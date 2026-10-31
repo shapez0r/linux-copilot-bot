@@ -1,0 +1,125 @@
+"""Environment-based configuration; real environment variables override the .env file."""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_MODEL = "GPT/GPT-6"
+SECRET_NAMES = ("TELEGRAM_BOT_TOKEN", "GITHUB_TOKEN")
+
+
+class ConfigError(Exception):
+    """Raised for missing or invalid settings."""
+
+
+@dataclass(frozen=True)
+class Config:
+    telegram_token: str
+    owner_id: int
+    github_token: str
+    github_owner: str  # Empty means the token's own account.
+    repos_dir: Path
+    state_dir: Path
+    profile: Path
+    model: str
+    timeout: int
+    temporary_chat: bool
+    settle_seconds: int
+    git_name: str
+    git_email: str
+    engine: Path = ROOT / "engine" / "copilot_repo_roundtrip.py"
+    askpass: Path = ROOT / "bin" / "git-askpass"
+
+    @property
+    def secrets(self):
+        return [s for s in (self.telegram_token, self.github_token) if s]
+
+
+def parse_env_file(path: Path) -> dict:
+    """Parse KEY=VALUE lines; blank lines and # comments are ignored, matching quotes are removed."""
+    values = {}
+    if not path.is_file():
+        return values
+    for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, sep, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if not sep or not key:
+            raise ConfigError(f"{path}:{number}: expected KEY=VALUE")
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def _flag(value: str, name: str) -> bool:
+    lowered = value.strip().lower()
+    if lowered in ("1", "true", "yes", "on"):
+        return True
+    if lowered in ("0", "false", "no", "off"):
+        return False
+    raise ConfigError(f"{name} must be true or false")
+
+
+def _integer(value: str, name: str, minimum: int) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise ConfigError(f"{name} must be an integer") from None
+    if number < minimum:
+        raise ConfigError(f"{name} must be at least {minimum}")
+    return number
+
+
+def load(environ=None, env_file=None) -> Config:
+    """Build the configuration from an optional .env file overlaid with environment variables."""
+    environ = os.environ if environ is None else environ
+    file_path = Path(env_file or environ.get("BOT_ENV_FILE") or ROOT / ".env").expanduser()
+    values = {**parse_env_file(file_path), **{k: v for k, v in environ.items() if k in _KNOWN}}
+
+    def get(name, default=""):
+        return values.get(name, default).strip()
+
+    missing = [n for n in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_OWNER_ID", "GITHUB_TOKEN") if not get(n)]
+    if missing:
+        raise ConfigError("Missing required settings: " + ", ".join(missing))
+    model = get("COPILOT_MODEL", DEFAULT_MODEL)
+    if model.count("/") != 1 or not all(part.strip() for part in model.split("/")):
+        raise ConfigError("COPILOT_MODEL must be a provider/model pair such as GPT/GPT-6")
+    home = Path.home()
+    return Config(
+        telegram_token=get("TELEGRAM_BOT_TOKEN"),
+        owner_id=_integer(get("TELEGRAM_OWNER_ID"), "TELEGRAM_OWNER_ID", 1),
+        github_token=get("GITHUB_TOKEN"),
+        github_owner=get("GITHUB_OWNER"),
+        repos_dir=Path(get("REPOS_DIR", "/home/repos")).expanduser(),
+        state_dir=Path(get("STATE_DIR", str(home / ".copilot-telegram-bot"))).expanduser(),
+        profile=Path(get("COPILOT_PROFILE", str(home / ".copilot-repo-browser"))).expanduser(),
+        model=model,
+        timeout=_integer(get("COPILOT_TIMEOUT", "900"), "COPILOT_TIMEOUT", 1),
+        temporary_chat=_flag(get("BOT_TEMPORARY_CHAT", "true"), "BOT_TEMPORARY_CHAT"),
+        settle_seconds=_integer(get("DEPLOY_SETTLE_SECONDS", "10"), "DEPLOY_SETTLE_SECONDS", 1),
+        git_name=get("GIT_AUTHOR_NAME", "Copilot Telegram Bot"),
+        git_email=get("GIT_AUTHOR_EMAIL", "copilot-telegram-bot@users.noreply.github.com"),
+    )
+
+
+_KNOWN = {
+    "TELEGRAM_BOT_TOKEN", "TELEGRAM_OWNER_ID", "GITHUB_TOKEN", "GITHUB_OWNER", "REPOS_DIR", "STATE_DIR",
+    "COPILOT_PROFILE", "COPILOT_MODEL", "COPILOT_TIMEOUT", "BOT_TEMPORARY_CHAT", "DEPLOY_SETTLE_SECONDS",
+    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+}
+
+
+def redact(text: str, secrets) -> str:
+    """Hide secret values in text that is logged or sent to Telegram."""
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "***")
+    return text

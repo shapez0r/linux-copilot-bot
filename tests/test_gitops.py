@@ -1,0 +1,73 @@
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+
+from support import git, make_config, make_origin
+from bot.gitops import Git, GitError
+
+
+class GitOpsTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.origin = make_origin(self.tmp)
+        self.git = Git(make_config(self.tmp))
+        self.dest = self.tmp / "repos" / "app"
+
+    def clone(self):
+        # Local paths stand in for GitHub URLs; the remote check accepts only github.com remotes.
+        return self.git.run("clone", str(self.origin), str(self.dest))
+
+    def test_clone_sync_commit_push(self):
+        self.clone()
+        self.assertEqual(self.git.sync(self.dest), "main")
+        (self.dest / "app.py").write_text("print(1)\n")
+        sha, branch = self.git.commit_and_push(self.dest, "Add the app\nwith details")
+        self.assertEqual(branch, "main")
+        self.assertEqual(git("rev-parse", "--short", "main", cwd=self.origin), sha)
+        self.assertEqual(git("log", "-1", "--format=%an|%s", cwd=self.origin), "Bot|Copilot: Add the app with details")
+
+    def test_nothing_to_commit(self):
+        self.clone()
+        self.assertIsNone(self.git.commit_and_push(self.dest, "noop"))
+
+    def test_sync_fast_forwards_and_rejects_dirty_checkouts(self):
+        self.clone()
+        other = self.tmp / "other"
+        git("clone", str(self.origin), str(other))
+        (other / "new.txt").write_text("x")
+        git("add", "-A", cwd=other)
+        git("-c", "user.name=t", "-c", "user.email=t@e.com", "commit", "-m", "more", cwd=other)
+        git("push", "origin", "main", cwd=other)
+        self.git.sync(self.dest)
+        self.assertTrue((self.dest / "new.txt").exists())
+        (self.dest / "stray.txt").write_text("y")
+        with self.assertRaisesRegex(GitError, "uncommitted"):
+            self.git.sync(self.dest)
+
+    def test_detached_head_is_rejected(self):
+        self.clone()
+        git("checkout", "--detach", cwd=self.dest)
+        with self.assertRaisesRegex(GitError, "detached"):
+            self.git.sync(self.dest)
+
+    def test_existing_directory_must_match_the_repository(self):
+        self.dest.mkdir(parents=True)
+        with self.assertRaisesRegex(GitError, "not a Git checkout"):
+            self.git.ensure_clone("unused", self.dest, "me", "app")
+        git("init", str(self.dest))
+        git("remote", "add", "origin", "https://github.com/me/other.git", cwd=self.dest)
+        with self.assertRaisesRegex(GitError, "different repository"):
+            self.git.ensure_clone("unused", self.dest, "me", "app")
+        git("remote", "set-url", "origin", "https://github.com/me/app.git", cwd=self.dest)
+        self.assertFalse(self.git.ensure_clone("unused", self.dest, "me", "app"))
+
+    def test_errors_do_not_leak_the_token(self):
+        with self.assertRaises(GitError) as caught:
+            self.git.run("clone", "https://gh-secret@invalid.invalid/x.git", str(self.tmp / "x"))
+        self.assertNotIn("gh-secret", str(caught.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()

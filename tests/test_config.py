@@ -1,0 +1,63 @@
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+
+from support import make_config  # noqa: F401  (adds the repository root to sys.path)
+from bot import config
+from bot.repos import RepoError, parse_repo_ref, same_remote
+
+
+class ConfigTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_env_file_parsing_and_override(self):
+        path = self.tmp / ".env"
+        path.write_text('# comment\nTELEGRAM_BOT_TOKEN="abc"\nexport TELEGRAM_OWNER_ID=7\nGITHUB_TOKEN=ghp\n'
+                        'COPILOT_MODEL=Claude/Opus 5.5\n')
+        cfg = config.load({"GITHUB_TOKEN": "from-env"}, env_file=path)
+        self.assertEqual((cfg.telegram_token, cfg.owner_id, cfg.github_token), ("abc", 7, "from-env"))
+        self.assertEqual(cfg.model, "Claude/Opus 5.5")
+        self.assertEqual(cfg.repos_dir, Path("/home/repos"))
+
+    def test_missing_and_invalid_settings(self):
+        with self.assertRaisesRegex(config.ConfigError, "TELEGRAM_BOT_TOKEN"):
+            config.load({}, env_file=self.tmp / "none")
+        base = {"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_OWNER_ID": "1", "GITHUB_TOKEN": "g"}
+        for bad in ({"TELEGRAM_OWNER_ID": "abc"}, {"COPILOT_MODEL": "GPT"}, {"COPILOT_TIMEOUT": "0"},
+                    {"BOT_TEMPORARY_CHAT": "maybe"}):
+            with self.subTest(bad=bad), self.assertRaises(config.ConfigError):
+                config.load({**base, **bad}, env_file=self.tmp / "none")
+
+    def test_malformed_env_line(self):
+        path = self.tmp / ".env"
+        path.write_text("not a setting\n")
+        with self.assertRaises(config.ConfigError):
+            config.parse_env_file(path)
+
+    def test_redact(self):
+        self.assertEqual(config.redact("a tok b tok", ["tok", ""]), "a *** b ***")
+
+
+class RepoRefTests(unittest.TestCase):
+    def test_accepted_forms(self):
+        self.assertEqual(parse_repo_ref("app", "me"), ("me", "app"))
+        self.assertEqual(parse_repo_ref("org/app.v2", "me"), ("org", "app.v2"))
+        self.assertEqual(parse_repo_ref("https://github.com/org/app.git", "me"), ("org", "app"))
+        self.assertEqual(parse_repo_ref(" github.com/org/app/ ", "me"), ("org", "app"))
+
+    def test_rejected_forms(self):
+        for bad in ("", "a/b/c", "../x", "-x", "x y", "a..b", "bad;name", "org//x", "/"):
+            with self.subTest(bad=bad), self.assertRaises(RepoError):
+                parse_repo_ref(bad, "me")
+
+    def test_same_remote(self):
+        self.assertTrue(same_remote("https://github.com/Org/App.git", "org", "app"))
+        self.assertTrue(same_remote("git@github.com:org/app.git", "org", "app"))
+        self.assertFalse(same_remote("https://github.com/org/other.git", "org", "app"))
+
+
+if __name__ == "__main__":
+    unittest.main()

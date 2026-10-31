@@ -1,0 +1,6 @@
+#!/bin/sh
+# Supplies GitHub credentials to Git from the environment, so tokens never appear in remote URLs.
+case "$1" in
+  Username*) printf '%s\n' "$BOT_GIT_USER" ;;
+  *) printf '%s\n' "$BOT_GIT_TOKEN" ;;
+esac

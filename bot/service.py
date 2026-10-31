@@ -1,0 +1,288 @@
+"""Owner commands and the request pipeline: prepare repo, Copilot round-trip, commit/push, redeploy."""
+from __future__ import annotations
+
+import logging
+import re
+import threading
+import time
+
+from .config import Config, redact
+from .deploy import Deployer
+from .github_api import GitHub, GitHubError
+from .gitops import Git, GitError
+from .repos import RepoError, local_path, parse_repo_ref
+from .roundtrip import Cancelled, RoundTrip, RoundTripError
+from .state import State
+from .telegram_api import Telegram, TelegramError
+
+log = logging.getLogger("bot")
+
+# Appended to every request so a new or changed app can be started by the redeploy step.
+DEPLOY_NOTE = (
+    "\n\nThis app is deployed by running `make run` from the repository root. Keep a Makefile whose `run` "
+    "target starts the app in the foreground, and keep secrets and runtime data outside the repository."
+)
+RESPONSE_PREVIEW_CHARS = 1500
+CREATE_CLONE_ATTEMPTS = 4  # A repository created through the API can take a moment to become cloneable.
+
+HELP = """Send a request as plain text and I will change the active repository with Copilot, commit, push and redeploy it with `make run`.
+
+/repo <name|owner/name> - select a repository; it is created (private) if missing and cloned to the repos directory
+/repo - show the active repository
+/fix <repo> <request> - select a repository and run a request in one message
+/model <provider/model> - choose the Copilot model (for example GPT/GPT-6)
+/status - show repository, model, job and app state
+/cancel - stop the running job
+/help - show this message"""
+
+_BOT_ERRORS = (RepoError, GitError, GitHubError, RoundTripError)
+
+
+class Progress:
+    """One Telegram message that is edited as a job advances, throttled to respect rate limits."""
+
+    MIN_INTERVAL = 3.0
+
+    def __init__(self, tg: Telegram, chat_id: int, cfg: Config):
+        self._tg, self._chat, self._cfg = tg, chat_id, cfg
+        self._id, self._shown, self._pending, self._last = None, "", "", 0.0
+
+    def update(self, text: str):
+        self._pending = redact(text, self._cfg.secrets)
+        if self._id is None or time.monotonic() - self._last >= self.MIN_INTERVAL:
+            self.flush()
+
+    def flush(self):
+        if not self._pending or self._pending == self._shown:
+            return
+        try:
+            if self._id is None:
+                self._id = self._tg.send_message(self._chat, self._pending)
+            else:
+                self._tg.edit_message(self._chat, self._id, self._pending)
+            self._shown, self._last = self._pending, time.monotonic()
+        except TelegramError as e:
+            log.warning("progress update failed: %s", e)
+
+
+class Bot:
+    def __init__(self, cfg: Config, tg: Telegram, gh: GitHub, git: Git, roundtrip: RoundTrip,
+                 deployer: Deployer, state: State):
+        self.cfg, self.tg, self.gh, self.git = cfg, tg, gh, git
+        self.roundtrip, self.deployer, self.state = roundtrip, deployer, state
+        self._lock = threading.Lock()
+        self._cancel = threading.Event()
+        self._worker = None
+
+    # ---- Telegram loop -------------------------------------------------
+
+    def run_forever(self, stop: threading.Event):
+        offset, delay = 0, 1
+        while not stop.is_set():
+            try:
+                updates = self.tg.get_updates(offset)
+                delay = 1
+            except TelegramError as e:
+                log.warning("polling failed: %s", redact(str(e), self.cfg.secrets))
+                stop.wait(delay)
+                delay = min(delay * 2, 30)
+                continue
+            for update in updates:
+                offset = update["update_id"] + 1
+                try:
+                    self.handle_update(update)
+                except Exception:
+                    log.exception("update failed")
+        self.shutdown()
+
+    def shutdown(self):
+        self._cancel.set()
+        if self._worker is not None:
+            self._worker.join(timeout=60)
+
+    def handle_update(self, update: dict):
+        message = update.get("message") or {}
+        sender = (message.get("from") or {}).get("id")
+        chat = message.get("chat") or {}
+        if sender != self.cfg.owner_id or chat.get("type") != "private":
+            log.warning("ignored message from user %s", sender)
+            return
+        text = (message.get("text") or "").strip()
+        if text:
+            self.handle_text(chat["id"], text)
+        else:
+            self.say(chat["id"], "Send the request as text.")
+
+    def say(self, chat_id: int, text: str):
+        try:
+            self.tg.send_long(chat_id, redact(text, self.cfg.secrets))
+        except TelegramError as e:
+            log.warning("send failed: %s", redact(str(e), self.cfg.secrets))
+
+    # ---- Commands ------------------------------------------------------
+
+    def handle_text(self, chat_id: int, text: str):
+        if not text.startswith("/"):
+            self.start_request(chat_id, "", text)
+            return
+        parts = re.split(r"\s+", text, maxsplit=1)
+        command = parts[0][1:].split("@")[0].lower()
+        arg = parts[1].strip() if len(parts) > 1 else ""
+        if command in ("start", "help"):
+            self.say(chat_id, HELP)
+        elif command == "repo":
+            self.cmd_repo(chat_id, arg)
+        elif command == "fix":
+            ref, _, request = arg.partition(" ")
+            if not ref or not request.strip():
+                self.say(chat_id, "Usage: /fix <repo> <request>")
+            else:
+                self.start_request(chat_id, ref, request.strip())
+        elif command == "model":
+            self.cmd_model(chat_id, arg)
+        elif command == "status":
+            self.cmd_status(chat_id)
+        elif command == "cancel":
+            self.cmd_cancel(chat_id)
+        else:
+            self.say(chat_id, "Unknown command. Send /help for the list.")
+
+    def cmd_model(self, chat_id: int, arg: str):
+        if not arg:
+            self.say(chat_id, f"Model: {self.state.model}")
+        elif arg.count("/") != 1 or not all(p.strip() for p in arg.split("/")):
+            self.say(chat_id, "Use a provider/model pair such as GPT/GPT-6.")
+        else:
+            self.state.model = arg
+            self.state.save()
+            self.say(chat_id, f"Model set to {arg}.")
+
+    def cmd_status(self, chat_id: int):
+        lines = [f"Repository: {self.state.repo or 'none selected'}", f"Model: {self.state.model}",
+                 f"Job: {'running' if self._lock.locked() else 'idle'}"]
+        if self.state.repo:
+            name = self.state.repo.split("/", 1)[1]
+            lines.append(f"App: {self.deployer.status(name, local_path(self.cfg.repos_dir, name))}")
+        self.say(chat_id, "\n".join(lines))
+
+    def cmd_cancel(self, chat_id: int):
+        if self._lock.locked():
+            self._cancel.set()
+            self.say(chat_id, "Cancelling; Copilot is asked to stop.")
+        else:
+            self.say(chat_id, "No job is running.")
+
+    def cmd_repo(self, chat_id: int, arg: str):
+        if not arg:
+            self.say(chat_id, f"Active repository: {self.state.repo}" if self.state.repo
+                     else "No repository selected. Use /repo <name>.")
+            return
+        self._spawn(chat_id, lambda: self._select_repo(chat_id, arg))
+
+    def start_request(self, chat_id: int, ref: str, request: str):
+        if not ref and not self.state.repo:
+            self.say(chat_id, "Select a repository first with /repo <name>.")
+            return
+        self._spawn(chat_id, lambda: self._request(chat_id, ref or self.state.repo, request))
+
+    # ---- Job execution -------------------------------------------------
+
+    def _spawn(self, chat_id: int, job):
+        if not self._lock.acquire(blocking=False):
+            self.say(chat_id, "A job is already running. Wait for it or send /cancel.")
+            return
+        self._cancel.clear()
+
+        def run():
+            try:
+                job()
+            except Cancelled:
+                self.say(chat_id, "Cancelled.")
+            except _BOT_ERRORS as e:
+                self.say(chat_id, f"\u274c {e}")
+            except Exception as e:
+                log.exception("job failed")
+                self.say(chat_id, f"\u274c Internal error: {e.__class__.__name__}. See the bot log.")
+            finally:
+                self._lock.release()
+
+        self._worker = threading.Thread(target=run, name="job", daemon=True)
+        self._worker.start()
+
+    def _owner_default(self) -> str:
+        return self.cfg.github_owner or self.gh.login
+
+    def _prepare(self, owner: str, name: str, progress: Progress):
+        """Make sure the repository exists on GitHub and is cloned and current; returns (path, branch, how)."""
+        progress.update(f"Looking up {owner}/{name} on GitHub...")
+        repo = self.gh.get_repo(owner, name)
+        created = repo is None
+        if created:
+            progress.update(f"Creating private repository {owner}/{name}...")
+            repo = self.gh.create_repo(owner, name)
+        dest = local_path(self.cfg.repos_dir, name)
+        progress.update(f"Preparing {dest}...")
+        for attempt in range(CREATE_CLONE_ATTEMPTS if created else 1):
+            try:
+                cloned = self.git.ensure_clone(repo["clone_url"], dest, owner, name)
+                break
+            except GitError:
+                if attempt == CREATE_CLONE_ATTEMPTS - 1 or not created:
+                    raise
+                time.sleep(2)
+        branch = self.git.sync(dest)
+        return dest, branch, "created" if created else "cloned" if cloned else "already cloned"
+
+    def _select_repo(self, chat_id: int, arg: str):
+        owner, name = parse_repo_ref(arg, self._owner_default())
+        progress = Progress(self.tg, chat_id, self.cfg)
+        dest, branch, how = self._prepare(owner, name, progress)
+        self.state.repo = f"{owner}/{name}"
+        self.state.save()
+        progress.flush()
+        self.say(chat_id, f"\u2705 {owner}/{name} is {how} at {dest} (branch {branch}) and now active.")
+
+    def _request(self, chat_id: int, ref: str, request: str):
+        owner, name = parse_repo_ref(ref, self._owner_default())
+        full = f"{owner}/{name}"
+        progress = Progress(self.tg, chat_id, self.cfg)
+        dest, branch, _ = self._prepare(owner, name, progress)
+        self.state.repo = full
+        self.state.save()
+        if self._cancel.is_set():
+            raise Cancelled()
+        progress.update(f"{full}: sending the repository to Copilot...")
+        try:
+            result = self.roundtrip.run(dest, request + DEPLOY_NOTE, self.state.model,
+                                        lambda stage, msg: progress.update(f"{full}: {msg}"), self._cancel)
+        except Cancelled:
+            progress.flush()
+            if self.git.is_dirty(dest):
+                self.say(chat_id, "\u26a0\ufe0f The checkout has uncommitted changes from the interrupted run; "
+                                  f"review {dest} before the next request.")
+            raise
+        progress.update(f"{full}: committing and pushing...")
+        pushed = self.git.commit_and_push(dest, request)
+        if pushed is None:
+            progress.flush()
+            self.say(chat_id, f"Copilot returned no changes to commit for {full}; nothing was deployed.")
+            return
+        sha, pushed_branch = pushed
+        progress.update(f"{full}: redeploying with make run...")
+        deploy = self.deployer.redeploy(name, dest)
+        progress.flush()
+        self.say(chat_id, self._report(full, sha, pushed_branch, result, deploy))
+
+    def _report(self, full: str, sha: str, branch: str, result: dict, deploy) -> str:
+        diff_lines = [l for l in (result.get("diff_stat") or "").splitlines() if l.strip()]
+        mark = "\u2705" if deploy.ok else "\u26a0\ufe0f"
+        lines = [f"{mark} {full}: commit {sha} pushed to {branch}."]
+        if diff_lines:
+            lines.append(f"Changes: {diff_lines[-1].strip()}")
+        lines.append(("Deploy: " if deploy.ok else "Pushed, but the redeploy failed: ") + deploy.message)
+        response = (result.get("chat_response") or "").strip()
+        if response:
+            if len(response) > RESPONSE_PREVIEW_CHARS:
+                response = response[:RESPONSE_PREVIEW_CHARS].rstrip() + "\u2026"
+            lines += ["", "Copilot:", response]
+        return "\n".join(lines)
