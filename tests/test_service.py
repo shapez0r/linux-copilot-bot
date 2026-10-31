@@ -48,7 +48,9 @@ class FakeGitHub:
 
     def create_repo(self, owner, name):
         self.created.append(f"{owner}/{name}")
-        return {"clone_url": str(make_origin(self._tmp, name + ".git"))}
+        repo = {"clone_url": str(make_origin(self._tmp, name + ".git"))}
+        self.repos[f"{owner}/{name}"] = repo
+        return repo
 
 
 class FakeRoundTrip:
@@ -126,6 +128,23 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue((self.cfg.repos_dir / "brand-new" / ".git").exists())
         self.assertEqual(self.state.repo, "me/brand-new")
         self.assertIn("created", self.tg.sent[-1])
+
+    def test_new_creates_selects_and_accepts_followup_request(self):
+        self.say("/new fresh-app")
+        self.assertEqual(self.gh.created, ["me/fresh-app"])
+        self.assertEqual(self.state.repo, "me/fresh-app")
+        self.assertIn("Send your next message", self.tg.sent[-1])
+        self.say("build a starter app")
+        self.assertEqual(len(self.rt.calls), 1)
+        self.assertEqual(self.rt.calls[0][0], self.cfg.repos_dir / "fresh-app")
+
+    def test_new_refuses_existing_repo_and_requires_name(self):
+        self.say("/new")
+        self.assertIn("Usage: /new", self.tg.sent[-1])
+        self.say("/new app")
+        self.assertIn("already exists", self.tg.sent[-1])
+        self.assertEqual(self.gh.created, [])
+        self.assertEqual(self.state.repo, "")
 
     def test_request_runs_commits_pushes_and_redeploys(self):
         self.say("/repo app")

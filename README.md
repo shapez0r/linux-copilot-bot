@@ -44,6 +44,7 @@ Only the owner (`TELEGRAM_OWNER_ID`) in a private chat is served; every other me
 
 | Message | Effect |
 | --- | --- |
+| `/new <name>` or `/new <owner/name>` | Create a new private GitHub repository, clone it, and make it active. Then send a plain-text request to start building. Refuses to overwrite or select an existing repository. |
 | `/repo <name>` or `/repo <owner/name>` | Select the active repository. A missing repository is created as a private GitHub repository with an initial commit, then cloned; an existing one is cloned or fast-forwarded. A GitHub URL is also accepted. |
 | `/repo` | Show the active repository. |
 | plain text | Run the text as a request against the active repository. |

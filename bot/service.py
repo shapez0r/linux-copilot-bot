@@ -27,6 +27,7 @@ CREATE_CLONE_ATTEMPTS = 4  # A repository created through the API can take a mom
 
 HELP = """Send a request as plain text and I will change the active repository with Copilot, commit, push and redeploy it with `make run`.
 
+/new <name|owner/name> - create a new private repository and select it; send your next message to start working
 /repo <name|owner/name> - select a repository; it is created (private) if missing and cloned to the repos directory
 /repo - show the active repository
 /fix <repo> <request> - select a repository and run a request in one message
@@ -130,6 +131,8 @@ class Bot:
         arg = parts[1].strip() if len(parts) > 1 else ""
         if command in ("start", "help"):
             self.say(chat_id, HELP)
+        elif command == "new":
+            self.cmd_new(chat_id, arg)
         elif command == "repo":
             self.cmd_repo(chat_id, arg)
         elif command == "fix":
@@ -172,6 +175,12 @@ class Bot:
         else:
             self.say(chat_id, "No job is running.")
 
+    def cmd_new(self, chat_id: int, arg: str):
+        if not arg:
+            self.say(chat_id, "Usage: /new <name|owner/name>")
+            return
+        self._spawn(chat_id, lambda: self._select_repo(chat_id, arg, new_only=True))
+
     def cmd_repo(self, chat_id: int, arg: str):
         if not arg:
             self.say(chat_id, f"Active repository: {self.state.repo}" if self.state.repo
@@ -212,10 +221,12 @@ class Bot:
     def _owner_default(self) -> str:
         return self.cfg.github_owner or self.gh.login
 
-    def _prepare(self, owner: str, name: str, progress: Progress):
+    def _prepare(self, owner: str, name: str, progress: Progress, new_only: bool = False):
         """Make sure the repository exists on GitHub and is cloned and current; returns (path, branch, how)."""
         progress.update(f"Looking up {owner}/{name} on GitHub...")
         repo = self.gh.get_repo(owner, name)
+        if new_only and repo is not None:
+            raise RepoError(f"{owner}/{name} already exists. Use /repo to select it.")
         created = repo is None
         if created:
             progress.update(f"Creating private repository {owner}/{name}...")
@@ -233,14 +244,15 @@ class Bot:
         branch = self.git.sync(dest)
         return dest, branch, "created" if created else "cloned" if cloned else "already cloned"
 
-    def _select_repo(self, chat_id: int, arg: str):
+    def _select_repo(self, chat_id: int, arg: str, new_only: bool = False):
         owner, name = parse_repo_ref(arg, self._owner_default())
         progress = Progress(self.tg, chat_id, self.cfg)
-        dest, branch, how = self._prepare(owner, name, progress)
+        dest, branch, how = self._prepare(owner, name, progress, new_only=new_only)
         self.state.repo = f"{owner}/{name}"
         self.state.save()
         progress.flush()
-        self.say(chat_id, f"\u2705 {owner}/{name} is {how} at {dest} (branch {branch}) and now active.")
+        self.say(chat_id, f"\u2705 {owner}/{name} is {how} at {dest} (branch {branch}) and now active."
+                 + (" Send your next message describing what to build." if new_only else ""))
 
     def _request(self, chat_id: int, ref: str, request: str):
         owner, name = parse_repo_ref(ref, self._owner_default())
