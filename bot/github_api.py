@@ -51,6 +51,6 @@ class GitHub:
         return self._request("GET", f"/repos/{owner}/{name}", allow_404=True)
 
     def create_repo(self, owner: str, name: str, private: bool = True):
-        """Create a repository with an initial commit, so a HEAD exists to snapshot."""
+        """Create an empty repository for the local app template's initial commit."""
         path = "/user/repos" if owner.lower() == self.login.lower() else f"/orgs/{owner}/repos"
-        return self._request("POST", path, {"name": name, "private": private, "auto_init": True})
+        return self._request("POST", path, {"name": name, "private": private, "auto_init": False})

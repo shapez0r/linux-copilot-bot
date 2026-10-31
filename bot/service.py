@@ -22,13 +22,12 @@ DEPLOY_NOTE = (
     "\n\nThis app is deployed by running `make run` from the repository root. Keep a Makefile whose `run` "
     "target starts the app in the foreground, and keep secrets and runtime data outside the repository."
 )
-RESPONSE_PREVIEW_CHARS = 1500
-CREATE_CLONE_ATTEMPTS = 4  # A repository created through the API can take a moment to become cloneable.
+NEW_REPO_TEMPLATE = "eurofish"
 
 HELP = """Send a request as plain text and I will change the active repository with Copilot, commit, push and redeploy it with `make run`.
 
 /new [public|private] <name|owner/name> - create a repository and select it; send your next message to start working
-/repo [public|private] <name|owner/name> - select a repository; it is created (private by default) if missing and cloned to the repos directory
+/repo [public|private] <name|owner/name> - select a repository; a missing one is created from the eurofish reference app
 /repo - show the active repository
 /fix <repo> <request> - select a repository and run a request in one message
 /model <provider/model> - choose the Copilot model (for example GPT/GPT-6)
@@ -232,7 +231,7 @@ class Bot:
         return self.cfg.github_owner or self.gh.login
 
     def _prepare(self, owner: str, name: str, progress: Progress, new_only: bool = False, private: bool = True):
-        """Make sure the repository exists on GitHub and is cloned and current; returns (path, branch, how)."""
+        """Create a repository from the reference app, or clone and update an existing repository."""
         progress.update(f"Looking up {owner}/{name} on GitHub...")
         repo = self.gh.get_repo(owner, name)
         if new_only and repo is not None:
@@ -242,17 +241,16 @@ class Bot:
             progress.update(f"Creating {'private' if private else 'public'} repository {owner}/{name}...")
             repo = self.gh.create_repo(owner, name, private=private)
         dest = local_path(self.cfg.repos_dir, name)
+        if created:
+            template = self.cfg.repos_dir / NEW_REPO_TEMPLATE
+            progress.update(f"Copying {template} into the new repository...")
+            branch = self.git.seed_from_template(repo["clone_url"], dest, template,
+                                                 repo.get("default_branch") or "main")
+            return dest, branch, f"created from {NEW_REPO_TEMPLATE}"
         progress.update(f"Preparing {dest}...")
-        for attempt in range(CREATE_CLONE_ATTEMPTS if created else 1):
-            try:
-                cloned = self.git.ensure_clone(repo["clone_url"], dest, owner, name)
-                break
-            except GitError:
-                if attempt == CREATE_CLONE_ATTEMPTS - 1 or not created:
-                    raise
-                time.sleep(2)
+        cloned = self.git.ensure_clone(repo["clone_url"], dest, owner, name)
         branch = self.git.sync(dest)
-        return dest, branch, "created" if created else "cloned" if cloned else "already cloned"
+        return dest, branch, "cloned" if cloned else "already cloned"
 
     def _select_repo(self, chat_id: int, arg: str, new_only: bool = False, private: bool = True):
         owner, name = parse_repo_ref(arg, self._owner_default())
@@ -302,9 +300,4 @@ class Bot:
         if diff_lines:
             lines.append(f"Changes: {diff_lines[-1].strip()}")
         lines.append(("Deploy: " if deploy.ok else "Pushed, but the redeploy failed: ") + deploy.message)
-        response = (result.get("chat_response") or "").strip()
-        if response:
-            if len(response) > RESPONSE_PREVIEW_CHARS:
-                response = response[:RESPONSE_PREVIEW_CHARS].rstrip() + "\u2026"
-            lines += ["", "Copilot:", response]
         return "\n".join(lines)

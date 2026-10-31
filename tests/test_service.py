@@ -48,7 +48,9 @@ class FakeGitHub:
 
     def create_repo(self, owner, name, private=True):
         self.created.append((f"{owner}/{name}", private))
-        repo = {"clone_url": str(make_origin(self._tmp, name + ".git"))}
+        origin = self._tmp / (name + ".git")
+        git("init", "--bare", "-b", "main", str(origin))
+        repo = {"clone_url": str(origin), "default_branch": "main"}
         self.repos[f"{owner}/{name}"] = repo
         return repo
 
@@ -87,6 +89,14 @@ class ServiceTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.cfg = make_config(self.tmp)
         self.origin = make_origin(self.tmp)
+        self.template = self.cfg.repos_dir / "eurofish"
+        (self.template / "src").mkdir(parents=True)
+        (self.template / "README.md").write_text("eurofish reference app\n")
+        (self.template / "src" / "app.py").write_text("print('eurofish')\n")
+        git("init", "-b", "main", str(self.template))
+        git("add", "-A", cwd=self.template)
+        git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-m", "reference",
+            cwd=self.template)
         self.tg = FakeTelegram()
         self.gh = FakeGitHub({"me/app": {"clone_url": str(self.origin)}}, self.tmp)
         self.rt, self.deployer = FakeRoundTrip(), FakeDeployer()
@@ -125,9 +135,14 @@ class ServiceTests(unittest.TestCase):
     def test_missing_repository_is_created_through_github(self):
         self.say("/repo brand-new")
         self.assertEqual(self.gh.created, [("me/brand-new", True)])
-        self.assertTrue((self.cfg.repos_dir / "brand-new" / ".git").exists())
+        dest = self.cfg.repos_dir / "brand-new"
+        self.assertTrue((dest / ".git").exists())
+        self.assertEqual((dest / "README.md").read_text(), "eurofish reference app\n")
+        self.assertEqual(git("rev-list", "--count", "HEAD", cwd=dest), "1")
+        self.assertEqual(git("log", "-1", "--format=%s", cwd=dest), "Initial commit")
+        self.assertNotIn(".git", git("ls-tree", "-r", "--name-only", "HEAD", cwd=dest).splitlines())
         self.assertEqual(self.state.repo, "me/brand-new")
-        self.assertIn("created", self.tg.sent[-1])
+        self.assertIn("created from eurofish", self.tg.sent[-1])
 
     def test_new_creates_selects_and_accepts_followup_request(self):
         self.say("/new fresh-app")
@@ -166,7 +181,8 @@ class ServiceTests(unittest.TestCase):
         report = self.tg.sent[-1]
         self.assertIn("pushed to main", report)
         self.assertIn("1 file changed", report)
-        self.assertIn("Added it.", report)
+        self.assertNotIn("Added it.", report)
+        self.assertNotIn("Copilot:", report)
 
     def test_fix_selects_the_repository_and_runs(self):
         self.say("/fix app tidy the readme")

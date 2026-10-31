@@ -17,6 +17,7 @@ FAKE_ENGINE = textwrap.dedent('''
     def status(stage, message):
         print("ROUNDTRIP_STATUS:" + json.dumps({"stage": stage, "message": message}), file=sys.stderr, flush=True)
     status("browser", "Opening")
+    status("task", "Coding and executing\\nprint('internal')")
     print("ROUNDTRIP_REASONING:{}", file=sys.stderr, flush=True)
     if mode == "ok":
         print(json.dumps({"chat_response": "done", "diff_stat": " 1 file changed"}))

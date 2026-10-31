@@ -28,6 +28,26 @@ class GitOpsTests(unittest.TestCase):
         self.assertEqual(git("rev-parse", "--short", "main", cwd=self.origin), sha)
         self.assertEqual(git("log", "-1", "--format=%an|%s", cwd=self.origin), "Bot|Copilot: Add the app with details")
 
+    def test_seed_from_template_creates_one_initial_commit_without_source_git_metadata(self):
+        template = self.tmp / "eurofish"
+        (template / "src").mkdir(parents=True)
+        (template / "README.md").write_text("reference app\n")
+        (template / "src" / "app.py").write_text("print('reference')\n")
+        git("init", "-b", "main", str(template))
+        git("add", "-A", cwd=template)
+        git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-m", "template history",
+            cwd=template)
+        empty = self.tmp / "empty.git"
+        git("init", "--bare", "-b", "main", str(empty))
+
+        branch = self.git.seed_from_template(str(empty), self.dest, template)
+
+        self.assertEqual(branch, "main")
+        self.assertEqual((self.dest / "src" / "app.py").read_text(), "print('reference')\n")
+        self.assertEqual(git("rev-list", "--count", "HEAD", cwd=self.dest), "1")
+        self.assertEqual(git("log", "-1", "--format=%s", cwd=self.dest), "Initial commit")
+        self.assertNotIn(".git", git("ls-tree", "-r", "--name-only", "HEAD", cwd=self.dest).splitlines())
+
     def test_nothing_to_commit(self):
         self.clone()
         self.assertIsNone(self.git.commit_and_push(self.dest, "noop"))

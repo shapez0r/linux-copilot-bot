@@ -2,7 +2,7 @@
 
 A Telegram bot for an Ubuntu VM that turns chat messages from its owner into repository changes. For each request it:
 
-1. selects the repository (an existing GitHub repository, or a new public or private one) and clones it to `/home/localadmin/repos/<name>`;
+1. selects an existing GitHub repository and clones it, or creates a new one from the local `eurofish` reference app, at `/home/localadmin/repos/<name>`;
 2. takes the message as the prompt;
 3. sends the repository to Microsoft 365 Copilot Chat through the Playwright round-trip engine and applies the returned repository;
 4. commits and pushes the result to GitHub;
@@ -16,6 +16,7 @@ A Telegram bot for an Ubuntu VM that turns chat messages from its owner into rep
 - A Microsoft 365 account with access to Copilot Chat.
 - A Telegram bot token from [@BotFather](https://t.me/BotFather) and your numeric Telegram user id (for example from @userinfobot).
 - A GitHub token with read/write access to repository contents. Creating repositories also requires permission to create repositories for the owner.
+- A reference app checkout at `<REPOS_DIR>/eurofish` (by default `/home/localadmin/repos/eurofish`) for new repositories.
 
 ## Setup
 
@@ -44,8 +45,8 @@ Only the owner (`TELEGRAM_OWNER_ID`) in a private chat is served; every other me
 
 | Message | Effect |
 | --- | --- |
-| `/new <name>` or `/new <owner/name>` | Create a new GitHub repository (private by default), clone it, and make it active. Then send a plain-text request to start building. Refuses to overwrite or select an existing repository. |
-| `/repo <name>` or `/repo <owner/name>` | Select the active repository. A missing repository is created as a GitHub repository (private by default) with an initial commit, then cloned; an existing one is cloned or fast-forwarded. A GitHub URL is also accepted. |
+| `/new <name>` or `/new <owner/name>` | Create a new GitHub repository (private by default), seed its initial commit from `<REPOS_DIR>/eurofish`, and make it active. Refuses to overwrite or select an existing repository. |
+| `/repo <name>` or `/repo <owner/name>` | Select the active repository. A missing repository is created and seeded from `<REPOS_DIR>/eurofish`; an existing one is cloned or fast-forwarded. A GitHub URL is also accepted. |
 | `/repo` | Show the active repository. |
 | plain text | Run the text as a request against the active repository. |
 | `/fix <repo> <request>` | Select a repository and run a request in one message. |
@@ -57,7 +58,11 @@ Use `public` or `private` before the name when creating a repository; the defaul
 
 A bare name uses `GITHUB_OWNER`, or the token's account when it is not set. The checkout directory is `<REPOS_DIR>/<repository name>`, so two repositories with the same name under different owners cannot be used side by side; the bot refuses a directory that belongs to another repository.
 
-One job runs at a time. Progress is shown in a single message that is edited as the job advances; the final message reports the commit, a change summary, the redeploy result, and Copilot's reply.
+### New repository template
+
+For every missing repository, the bot creates an empty GitHub repository, copies the contents of `<REPOS_DIR>/eurofish` into the new checkout, excludes every `.git` entry, and pushes the copy as the single `Initial commit`. The reference app must exist and contain files that Git can commit. The next request can ask Copilot to keep the same architecture and stack while turning the copy into a different app.
+
+One job runs at a time. Progress is shown in a single message that is edited as the job advances. Copilot task details, reasoning, code, and reply text are not sent to Telegram; the final message contains only the commit, change summary, and redeploy result.
 
 ### What a request does
 
@@ -78,7 +83,7 @@ Settings come from `.env` (or the file named by `BOT_ENV_FILE`); real environmen
 | `TELEGRAM_OWNER_ID` | required | Numeric id of the only accepted user. |
 | `GITHUB_TOKEN` | required | Used for GitHub API calls and Git over HTTPS through `GIT_ASKPASS` (including private repository clones); it is never written into remote URLs. |
 | `GITHUB_OWNER` | token's account | Owner for bare repository names. |
-| `REPOS_DIR` | `/home/localadmin/repos` | Parent of the app checkouts. |
+| `REPOS_DIR` | `/home/localadmin/repos` | Parent of app checkouts and the `eurofish` reference app used for new repositories. |
 | `STATE_DIR` | `~/.copilot-telegram-bot` | Active repository and model, process ids, app logs. |
 | `COPILOT_PROFILE` | `~/.copilot-repo-browser` | Browser profile created by `make login`. |
 | `COPILOT_MODEL` | `GPT/GPT-6` | Initial model label; change it later with `/model`. |
@@ -103,7 +108,7 @@ The engine's selector overrides (`COPILOT_COMPOSER`, `COPILOT_FILE_INPUT`, `COPI
 | `engine/copilot_repo_roundtrip.py` | Playwright round-trip engine (`login` and `fix`), the single automation engine. |
 | `bot/service.py` | Owner commands and the request pipeline. |
 | `bot/telegram_api.py`, `bot/github_api.py` | Telegram long polling and GitHub REST clients (standard library only). |
-| `bot/gitops.py`, `bot/repos.py` | Clone, sync, commit, push; repository references. |
+| `bot/gitops.py`, `bot/repos.py` | Seed, clone, sync, commit, push; repository references. |
 | `bot/roundtrip.py`, `bot/deploy.py` | Engine subprocess runner; detached `make run` management. |
 | `bin/git-askpass` | Supplies GitHub credentials to Git from the environment. |
 | `deploy/` | systemd unit. |

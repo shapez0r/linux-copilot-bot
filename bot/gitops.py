@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -55,6 +56,28 @@ class Git:
         if not same_remote(origin, owner, name):
             raise GitError(f"{dest} is a checkout of a different repository ({redact(origin, self._cfg.secrets)}).")
         return False
+
+    def seed_from_template(self, url: str, dest: Path, template: Path, branch: str = "main") -> str:
+        """Create and push a repository whose first commit copies template without Git metadata."""
+        if dest.exists():
+            raise GitError(f"{dest} already exists; refusing to replace it while creating a repository.")
+        if not template.is_dir():
+            raise GitError(f"New repository template not found: {template}")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copytree(template, dest, symlinks=True,
+                            ignore=lambda _path, names: {name for name in names if name == ".git"})
+        except OSError as exc:
+            shutil.rmtree(dest, ignore_errors=True)
+            raise GitError(f"Cannot copy new repository template: {exc.strerror or exc}") from None
+        self.run("init", "-b", branch, cwd=dest)
+        self.run("remote", "add", "origin", url, cwd=dest)
+        self.run("add", "-A", cwd=dest)
+        if not self.run("status", "--porcelain", cwd=dest):
+            raise GitError(f"New repository template has no files Git can commit: {template}")
+        self.run("commit", "-m", "Initial commit", cwd=dest)
+        self.run("push", "-u", "origin", branch, cwd=dest)
+        return branch
 
     def sync(self, dest: Path) -> str:
         """Fast-forward the checked-out branch to origin and return its name."""

@@ -57,9 +57,10 @@ class RoundTrip:
             for line in proc.stderr:
                 line = line.rstrip()
                 status = parse_status(line)
-                if status:
+                # Task cards can contain Copilot-generated code or execution details.
+                if status and status[0] != "task":
                     on_status(*status)
-                elif line.strip() and not line.startswith(("ROUNDTRIP_REASONING:", "ROUNDTRIP_CHAT:")):
+                elif not status and line.strip() and not line.startswith(("ROUNDTRIP_REASONING:", "ROUNDTRIP_CHAT:")):
                     tail.append(line.strip())
 
         readers = [threading.Thread(target=read_stderr, daemon=True),
