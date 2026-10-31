@@ -61,8 +61,8 @@ class FakeRoundTrip:
     def __init__(self, behavior="change"):
         self.behavior, self.calls = behavior, []
 
-    def run(self, repo_dir, request, model, on_status, cancel):
-        self.calls.append((Path(repo_dir), request, model))
+    def run(self, repo_dir, request, model, on_status, cancel, show_browser=None, temporary_chat=None):
+        self.calls.append((Path(repo_dir), request, model, show_browser, temporary_chat))
         on_status("browser", "Opening Copilot")
         if self.behavior == "cancel":
             raise Cancelled()
@@ -188,6 +188,26 @@ class ServiceTests(unittest.TestCase):
         self.say("/fix app tidy the readme")
         self.assertEqual(self.state.repo, "me/app")
         self.assertEqual(len(self.rt.calls), 1)
+
+    def test_fix_options_override_environment_defaults_for_active_repo(self):
+        self.state.repo = "me/app"
+        self.say("/fix browser tidy the readme")
+        self.assertEqual(self.rt.calls[0][0], self.dest)
+        self.assertEqual(self.rt.calls[0][1], "tidy the readme" + DEPLOY_NOTE)
+        self.assertEqual(self.rt.calls[0][3:], (True, None))
+
+        self.say("/fix notempchat add tests")
+        self.assertEqual(self.rt.calls[1][3:], (None, False))
+
+        self.say("/fix tempchat nobrowser update docs")
+        self.assertEqual(self.rt.calls[2][3:], (False, True))
+
+    def test_fix_option_requires_request_and_active_repo(self):
+        self.say("/fix browser")
+        self.assertIn("Usage", self.tg.sent[-1])
+        self.say("/fix browser add tests")
+        self.assertIn("Select a repository first", self.tg.sent[-1])
+        self.assertEqual(self.rt.calls, [])
 
     def test_no_changes_skips_redeploy(self):
         self.rt.behavior = "none"

@@ -57,6 +57,9 @@ class RoundTripTests(unittest.TestCase):
         configured = RoundTrip(cfg).command(self.tmp, "x", "A/B")
         self.assertIn("--show-browser", configured)
         self.assertIn("--no-temporary-chat", configured)
+        overridden = RoundTrip(cfg).command(self.tmp, "x", "A/B", False, True)
+        self.assertNotIn("--show-browser", overridden)
+        self.assertNotIn("--no-temporary-chat", overridden)
 
     def test_success_returns_result_and_relays_status(self):
         result = self.run_engine("ok")

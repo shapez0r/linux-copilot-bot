@@ -22,6 +22,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.model, "Claude/Opus 5.5")
         self.assertEqual(cfg.repos_dir, Path("/home/localadmin/repos"))
         self.assertFalse(cfg.show_browser)
+        self.assertTrue(cfg.temporary_chat)
 
     def test_browser_visibility_can_be_enabled(self):
         values = {"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_OWNER_ID": "1", "GITHUB_TOKEN": "g",

@@ -30,6 +30,7 @@ HELP = """Send a request as plain text and I will change the active repository w
 /repo [public|private] <name|owner/name> - select a repository; a missing one is created from the eurofish reference app
 /repo - show the active repository
 /fix <repo> <request> - select a repository and run a request in one message
+/fix [browser|nobrowser] [tempchat|notempchat] <request> - run against the active repository with per-request browser/chat options
 /model <provider/model> - choose the Copilot model (for example GPT/GPT-6)
 /status - show repository, model, job and app state
 /cancel - stop the running job
@@ -135,11 +136,7 @@ class Bot:
         elif command == "repo":
             self.cmd_repo(chat_id, arg)
         elif command == "fix":
-            ref, _, request = arg.partition(" ")
-            if not ref or not request.strip():
-                self.say(chat_id, "Usage: /fix <repo> <request>")
-            else:
-                self.start_request(chat_id, ref, request.strip())
+            self.cmd_fix(chat_id, arg)
         elif command == "model":
             self.cmd_model(chat_id, arg)
         elif command == "status":
@@ -174,6 +171,33 @@ class Bot:
         else:
             self.say(chat_id, "No job is running.")
 
+    def cmd_fix(self, chat_id: int, arg: str):
+        """Run a request with optional browser and Temporary chat overrides."""
+        words = arg.split()
+        show_browser = temporary_chat = None
+        used_option = False
+        while words:
+            option = words[0].lower()
+            if option in ("browser", "nobrowser"):
+                show_browser = option == "browser"
+            elif option in ("tempchat", "notempchat"):
+                temporary_chat = option == "tempchat"
+            else:
+                break
+            used_option = True
+            words.pop(0)
+        if used_option:
+            if not words:
+                self.say(chat_id, "Usage: /fix [browser|nobrowser] [tempchat|notempchat] <request>")
+                return
+            self.start_request(chat_id, "", " ".join(words), show_browser, temporary_chat)
+            return
+        ref, _, request = arg.partition(" ")
+        if not ref or not request.strip():
+            self.say(chat_id, "Usage: /fix <repo> <request>")
+        else:
+            self.start_request(chat_id, ref, request.strip())
+
     @staticmethod
     def _creation_options(arg: str):
         """Read an optional visibility prefix; private remains the default."""
@@ -197,11 +221,13 @@ class Bot:
             return
         self._spawn(chat_id, lambda: self._select_repo(chat_id, arg, private=private))
 
-    def start_request(self, chat_id: int, ref: str, request: str):
+    def start_request(self, chat_id: int, ref: str, request: str,
+                      show_browser=None, temporary_chat=None):
         if not ref and not self.state.repo:
             self.say(chat_id, "Select a repository first with /repo <name>.")
             return
-        self._spawn(chat_id, lambda: self._request(chat_id, ref or self.state.repo, request))
+        self._spawn(chat_id, lambda: self._request(chat_id, ref or self.state.repo, request,
+                                                   show_browser, temporary_chat))
 
     # ---- Job execution -------------------------------------------------
 
@@ -262,7 +288,8 @@ class Bot:
         self.say(chat_id, f"\u2705 {owner}/{name} is {how} at {dest} (branch {branch}) and now active."
                  + (" Send your next message describing what to build." if new_only else ""))
 
-    def _request(self, chat_id: int, ref: str, request: str):
+    def _request(self, chat_id: int, ref: str, request: str,
+                 show_browser=None, temporary_chat=None):
         owner, name = parse_repo_ref(ref, self._owner_default())
         full = f"{owner}/{name}"
         progress = Progress(self.tg, chat_id, self.cfg)
@@ -274,7 +301,8 @@ class Bot:
         progress.update(f"{full}: sending the repository to Copilot...")
         try:
             result = self.roundtrip.run(dest, request + DEPLOY_NOTE, self.state.model,
-                                        lambda stage, msg: progress.update(f"{full}: {msg}"), self._cancel)
+                                        lambda stage, msg: progress.update(f"{full}: {msg}"), self._cancel,
+                                        show_browser, temporary_chat)
         except Cancelled:
             progress.flush()
             if self.git.is_dirty(dest):

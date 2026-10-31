@@ -39,18 +39,22 @@ class RoundTrip:
     def __init__(self, cfg: Config):
         self._cfg = cfg
 
-    def command(self, repo_dir, request: str, model: str):
+    def command(self, repo_dir, request: str, model: str, show_browser=None, temporary_chat=None):
+        show_browser = self._cfg.show_browser if show_browser is None else show_browser
+        temporary_chat = self._cfg.temporary_chat if temporary_chat is None else temporary_chat
         cmd = [sys.executable, str(self._cfg.engine), "--profile", str(self._cfg.profile), "fix",
                "--repo", str(repo_dir), "--model", model, "--timeout", str(self._cfg.timeout)]
-        if self._cfg.show_browser:
+        if show_browser:
             cmd.append("--show-browser")
-        if not self._cfg.temporary_chat:
+        if not temporary_chat:
             cmd.append("--no-temporary-chat")
         return cmd + ["--", request]
 
-    def run(self, repo_dir, request: str, model: str, on_status, cancel: threading.Event) -> dict:
+    def run(self, repo_dir, request: str, model: str, on_status, cancel: threading.Event,
+            show_browser=None, temporary_chat=None) -> dict:
         """Run one round-trip; returns the engine's JSON result. `cancel` requests a graceful stop."""
-        proc = subprocess.Popen(self.command(repo_dir, request, model), stdin=subprocess.PIPE,
+        command = self.command(repo_dir, request, model, show_browser, temporary_chat)
+        proc = subprocess.Popen(command, stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
                                 env={k: v for k, v in os.environ.items() if k not in SECRET_NAMES})
         tail, out = deque(maxlen=8), []

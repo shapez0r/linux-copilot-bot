@@ -31,7 +31,7 @@ make run            # start the bot in the foreground
 
 ### Signing in to Copilot
 
-`make login` opens a visible Chromium window; sign in, open a usable Copilot Chat page, and press Enter in the terminal. The profile (default `~/.copilot-repo-browser`) holds authentication state: keep it private. Bot runs use the same profile with a hidden browser unless `BOT_SHOW_BROWSER=true`.
+`make login` opens a visible Chromium window; sign in, open a usable Copilot Chat page, and press Enter in the terminal. The profile (default `~/.copilot-repo-browser`) holds authentication state: keep it private. Bot runs use the same profile. Browser visibility defaults to `BOT_SHOW_BROWSER` and can be overridden for one request with `browser` or `nobrowser` in `/fix`.
 
 A VM usually has no display. Either run `make login` over `ssh -X` (or a VNC session), or sign in on a Linux desktop and copy the profile directory to the VM. A copied profile may not be accepted by Copilot; if so, sign in on the VM. Profiles from Windows or macOS do not carry over. Run `make login` while the bot is idle or stopped, and repeat it when a run fails with an authentication error.
 
@@ -50,6 +50,7 @@ Only the owner (`TELEGRAM_OWNER_ID`) in a private chat is served; every other me
 | `/repo` | Show the active repository. |
 | plain text | Run the text as a request against the active repository. |
 | `/fix <repo> <request>` | Select a repository and run a request in one message. |
+| `/fix [browser\|nobrowser] [tempchat\|notempchat] <request>` | Run a request against the active repository with one or both per-request options. Options may be supplied in either order. |
 | `/model <provider/model>` | Choose the Copilot model label (default `GPT/GPT-6`). |
 | `/status` | Show repository, model, job state, and whether the app is running. |
 | `/cancel` | Ask Copilot to stop and discard the running job. |
@@ -88,12 +89,14 @@ Settings come from `.env` (or the file named by `BOT_ENV_FILE`); real environmen
 | `COPILOT_PROFILE` | `~/.copilot-repo-browser` | Browser profile created by `make login`. |
 | `COPILOT_MODEL` | `GPT/GPT-6` | Initial model label; change it later with `/model`. |
 | `COPILOT_TIMEOUT` | `900` | Seconds without new Copilot output before a run gives up. |
-| `BOT_SHOW_BROWSER` | `false` | Show Chromium during requests. Requires a display, such as VNC or X forwarding. |
-| `BOT_TEMPORARY_CHAT` | `true` | Select Copilot's Temporary chat; `false` explicitly unselects it so chats are saved in your account. |
+| `BOT_SHOW_BROWSER` | `false` | Default browser visibility. `browser` or `nobrowser` on `/fix` overrides it for that request. A visible browser requires a display, such as VNC or X forwarding. |
+| `BOT_TEMPORARY_CHAT` | `true` | Default Temporary chat state. `tempchat` or `notempchat` on `/fix` overrides it for that request; disabling it saves the chat in your account. |
 | `DEPLOY_SETTLE_SECONDS` | `10` | How long `make run` must stay up to count as deployed. |
 | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL` | Copilot Telegram Bot | Identity on bot commits. |
 
 The engine's selector overrides (`COPILOT_COMPOSER`, `COPILOT_FILE_INPUT`, `COPILOT_SEND`, `COPILOT_DOWNLOAD`, `COPILOT_MODEL_BUTTON`, `COPILOT_TEMPORARY_CHAT`, `COPILOT_REASONING`, `COPILOT_STOP`) are CSS selectors read from the bot's environment when Copilot's UI changes. Run `python3 engine/copilot_repo_roundtrip.py --help` for the engine's options.
+
+Without `.env` values or `/fix` overrides, requests use `nobrowser` and `tempchat`. Telegram options apply only to the request that contains them and take precedence over `.env`.
 
 ## Security
 
