@@ -51,9 +51,12 @@ class RoundTripTests(unittest.TestCase):
         cmd = RoundTrip(self.cfg).command(self.tmp, "-rm things", "Claude/Opus 5.5")
         self.assertEqual(cmd[-2:], ["--", "-rm things"])
         self.assertIn("--profile", cmd)
+        self.assertNotIn("--show-browser", cmd)
         self.assertNotIn("--no-temporary-chat", cmd)
-        cfg = make_config(self.tmp, temporary_chat=False)
-        self.assertIn("--no-temporary-chat", RoundTrip(cfg).command(self.tmp, "x", "A/B"))
+        cfg = make_config(self.tmp, show_browser=True, temporary_chat=False)
+        configured = RoundTrip(cfg).command(self.tmp, "x", "A/B")
+        self.assertIn("--show-browser", configured)
+        self.assertIn("--no-temporary-chat", configured)
 
     def test_success_returns_result_and_relays_status(self):
         result = self.run_engine("ok")

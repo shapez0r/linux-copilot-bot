@@ -1403,24 +1403,25 @@ def temporary_chat_active(page, sel):
     return False
 
 
-def enable_temporary_chat(page, sel, timeout_seconds=30):
-    """Turn on Copilot's Temporary chat (top-right toggle) before model selection, without toggling it off."""
-    if temporary_chat_active(page, sel):
+def set_temporary_chat(page, sel, enabled, timeout_seconds=30):
+    """Set Copilot's Temporary chat toggle to the requested state before model selection."""
+    if temporary_chat_active(page, sel) == enabled:
         return
     button = page.locator(sel["temporary_chat"]).first
     try:
         button.wait_for(state="visible", timeout=timeout_seconds * 1000)
     except Exception:
         raise SystemExit("Temporary chat button was not found. Override COPILOT_TEMPORARY_CHAT, "
-                         "or run with --no-temporary-chat.")
+                         "or change the temporary-chat option.")
     button.click()
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         page.wait_for_timeout(500)
-        if temporary_chat_active(page, sel):
+        if temporary_chat_active(page, sel) == enabled:
             page.wait_for_timeout(500)
             return
-    raise SystemExit("Temporary chat could not be enabled (Copilot did not show the temporary chat state).")
+    state = "enabled" if enabled else "disabled"
+    raise SystemExit(f"Temporary chat could not be {state} (Copilot did not show the requested state).")
 
 
 # Accept descriptive ZIP links and file chips, excluding uploaded .zip.txt archives.
@@ -1694,11 +1695,13 @@ def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout)
                 emit_status("browser", "Opening Copilot Chat...")
                 page.goto(args.url, wait_until="domcontentloaded", timeout=120000)
                 wait_for_ui(page)
-            # Enable Temporary chat before model selection; saved follow-ups never enable it.
-            if args.temporary_chat and not continuing:
-                emit_status("temporary", "Enabling Temporary chat...")
-                enable_temporary_chat(page, sel)
-                emit_status("temporary", "Temporary chat enabled.")
+            # New chats explicitly adopt the configured state; saved follow-ups retain their state.
+            if not continuing:
+                action = "Enabling" if args.temporary_chat else "Disabling"
+                emit_status("temporary", f"{action} Temporary chat...")
+                set_temporary_chat(page, sel, args.temporary_chat)
+                state = "enabled" if args.temporary_chat else "disabled; this chat will be saved"
+                emit_status("temporary", f"Temporary chat {state}.")
             emit_status("model", "Checking Copilot model selection...")
             select_model(page, args.model, sel)
             emit_status("uploading", "Attaching repository archive...")
@@ -1907,7 +1910,7 @@ def main():
     fp.add_argument("--temporary-chat", dest="temporary_chat", action="store_true", default=True,
                     help="Enable Copilot Temporary chat before selecting the model (default: enabled)")
     fp.add_argument("--no-temporary-chat", dest="temporary_chat", action="store_false",
-                    help="Do not enable Temporary chat")
+                    help="Disable Temporary chat so the conversation is saved")
     fp.add_argument("--chat-url", default=None, metavar="URL",
                     help="Continue the saved Copilot chat at this URL (from a previous run's chat_url); "
                          "implies --no-temporary-chat. The current repository archive is attached again.")

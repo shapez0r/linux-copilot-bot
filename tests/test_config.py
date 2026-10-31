@@ -21,13 +21,19 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual((cfg.telegram_token, cfg.owner_id, cfg.github_token), ("abc", 7, "from-env"))
         self.assertEqual(cfg.model, "Claude/Opus 5.5")
         self.assertEqual(cfg.repos_dir, Path("/home/localadmin/repos"))
+        self.assertFalse(cfg.show_browser)
+
+    def test_browser_visibility_can_be_enabled(self):
+        values = {"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_OWNER_ID": "1", "GITHUB_TOKEN": "g",
+                  "BOT_SHOW_BROWSER": "true"}
+        self.assertTrue(config.load(values, env_file=self.tmp / "none").show_browser)
 
     def test_missing_and_invalid_settings(self):
         with self.assertRaisesRegex(config.ConfigError, "TELEGRAM_BOT_TOKEN"):
             config.load({}, env_file=self.tmp / "none")
         base = {"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_OWNER_ID": "1", "GITHUB_TOKEN": "g"}
         for bad in ({"TELEGRAM_OWNER_ID": "abc"}, {"COPILOT_MODEL": "GPT"}, {"COPILOT_TIMEOUT": "0"},
-                    {"BOT_TEMPORARY_CHAT": "maybe"}):
+                    {"BOT_SHOW_BROWSER": "maybe"}, {"BOT_TEMPORARY_CHAT": "maybe"}):
             with self.subTest(bad=bad), self.assertRaises(config.ConfigError):
                 config.load({**base, **bad}, env_file=self.tmp / "none")
 

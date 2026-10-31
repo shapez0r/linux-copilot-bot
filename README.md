@@ -31,7 +31,7 @@ make run            # start the bot in the foreground
 
 ### Signing in to Copilot
 
-`make login` opens a visible Chromium window; sign in, open a usable Copilot Chat page, and press Enter in the terminal. The profile (default `~/.copilot-repo-browser`) holds authentication state: keep it private. Bot runs use the same profile with a hidden browser.
+`make login` opens a visible Chromium window; sign in, open a usable Copilot Chat page, and press Enter in the terminal. The profile (default `~/.copilot-repo-browser`) holds authentication state: keep it private. Bot runs use the same profile with a hidden browser unless `BOT_SHOW_BROWSER=true`.
 
 A VM usually has no display. Either run `make login` over `ssh -X` (or a VNC session), or sign in on a Linux desktop and copy the profile directory to the VM. A copied profile may not be accepted by Copilot; if so, sign in on the VM. Profiles from Windows or macOS do not carry over. Run `make login` while the bot is idle or stopped, and repeat it when a run fails with an authentication error.
 
@@ -88,7 +88,8 @@ Settings come from `.env` (or the file named by `BOT_ENV_FILE`); real environmen
 | `COPILOT_PROFILE` | `~/.copilot-repo-browser` | Browser profile created by `make login`. |
 | `COPILOT_MODEL` | `GPT/GPT-6` | Initial model label; change it later with `/model`. |
 | `COPILOT_TIMEOUT` | `900` | Seconds without new Copilot output before a run gives up. |
-| `BOT_TEMPORARY_CHAT` | `true` | Use Copilot's Temporary chat; `false` saves chats in your account. |
+| `BOT_SHOW_BROWSER` | `false` | Show Chromium during requests. Requires a display, such as VNC or X forwarding. |
+| `BOT_TEMPORARY_CHAT` | `true` | Select Copilot's Temporary chat; `false` explicitly unselects it so chats are saved in your account. |
 | `DEPLOY_SETTLE_SECONDS` | `10` | How long `make run` must stay up to count as deployed. |
 | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL` | Copilot Telegram Bot | Identity on bot commits. |
 

@@ -60,6 +60,22 @@ class CompletionTests(unittest.TestCase):
             self.assertFalse(rt.download_retry_due(count, 100, 159))
             self.assertTrue(rt.download_retry_due(count, 100, 160))
 
+    def test_temporary_chat_is_switched_to_the_requested_state(self):
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                page, button = Mock(), Mock()
+                page.locator.return_value.first = button
+                with patch.object(rt, 'temporary_chat_active', side_effect=[not enabled, enabled]):
+                    rt.set_temporary_chat(page, rt.selectors_from_env(), enabled)
+                button.wait_for.assert_called_once_with(state='visible', timeout=30000)
+                button.click.assert_called_once_with()
+
+    def test_temporary_chat_is_not_clicked_when_state_already_matches(self):
+        page = Mock()
+        with patch.object(rt, 'temporary_chat_active', return_value=False):
+            rt.set_temporary_chat(page, rt.selectors_from_env(), False)
+        page.locator.assert_not_called()
+
     def test_visible_stop_controls_define_running_state(self):
         page = Mock()
         locator = Mock()

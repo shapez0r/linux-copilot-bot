@@ -42,6 +42,8 @@ class RoundTrip:
     def command(self, repo_dir, request: str, model: str):
         cmd = [sys.executable, str(self._cfg.engine), "--profile", str(self._cfg.profile), "fix",
                "--repo", str(repo_dir), "--model", model, "--timeout", str(self._cfg.timeout)]
+        if self._cfg.show_browser:
+            cmd.append("--show-browser")
         if not self._cfg.temporary_chat:
             cmd.append("--no-temporary-chat")
         return cmd + ["--", request]
