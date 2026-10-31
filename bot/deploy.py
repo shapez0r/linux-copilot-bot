@@ -1,4 +1,4 @@
-"""Runs each app's `make run` as a detached background process and replaces it on redeploy."""
+"""Runs each app in the background and publishes its local listener through Cloudflare."""
 from __future__ import annotations
 
 import json
@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .cloudflare import CloudflareError, CloudflareRoutes
 from .config import SECRET_NAMES, Config
 
 STOP_GRACE_SECONDS = 15
@@ -46,9 +47,37 @@ def _cwd(pid: int):
         return None
 
 
+def _listening_ports(process_group: int) -> list[int]:
+    """Return TCP ports listened on by processes in a Linux process group."""
+    inodes = set()
+    for stat_path in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            fields = stat_path.read_text().split(") ", 1)[1].split()
+            if int(fields[2]) != process_group:
+                continue
+            for fd in (stat_path.parent / "fd").iterdir():
+                target = os.readlink(fd)
+                if target.startswith("socket:["):
+                    inodes.add(target[8:-1])
+        except (OSError, ValueError, IndexError):
+            continue
+    ports = set()
+    for table in (Path("/proc/net/tcp"), Path("/proc/net/tcp6")):
+        try:
+            rows = table.read_text().splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            fields = row.split()
+            if len(fields) > 9 and fields[3] == "0A" and fields[9] in inodes:
+                ports.add(int(fields[1].rsplit(":", 1)[1], 16))
+    return sorted(ports)
+
+
 class Deployer:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, routes=None):
         self._cfg = cfg
+        self._routes = routes if routes is not None else (CloudflareRoutes(cfg) if cfg.cloudflare_enabled else None)
         self._run_dir = cfg.state_dir / "run"
         self._log_dir = cfg.state_dir / "logs"
         self._children = {}  # Popen handles started by this process, so exited apps are reaped.
@@ -134,7 +163,17 @@ class Deployer:
         if code is None:
             self._children[app] = proc
             self._pid_file(app).write_text(json.dumps({"pid": proc.pid}))
-            return DeployResult(True, f"`make run` is running (pid {proc.pid}).")
+            message = f"`make run` is running (pid {proc.pid})."
+            if self._routes is not None:
+                ports = _listening_ports(proc.pid)
+                if len(ports) != 1:
+                    detail = "no TCP listener" if not ports else "multiple TCP listeners: " + ", ".join(map(str, ports))
+                    return DeployResult(False, f"{message}\nTunnel route failed: found {detail} in the app process group.")
+                try:
+                    message += "\n" + self._routes.prepare(app, ports[0])
+                except CloudflareError as error:
+                    return DeployResult(False, f"{message}\nTunnel route failed: {error}")
+            return DeployResult(True, message)
         if code == 0:
             return DeployResult(True, "`make run` finished successfully.")
         return DeployResult(False, f"`make run` exited with code {code}.\n{self.log_tail(app)}")

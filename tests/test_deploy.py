@@ -1,5 +1,6 @@
 import os
 import shutil
+import socket
 import tempfile
 import unittest
 from pathlib import Path
@@ -62,9 +63,43 @@ class DeployTests(unittest.TestCase):
         self.assertFalse(self.deployer.stop("app", self.repo))
 
     def test_app_env_drops_secrets_and_the_bot_virtualenv(self):
-        env = app_env({"TELEGRAM_BOT_TOKEN": "t", "GITHUB_TOKEN": "g", "HOME": "/h", "VIRTUAL_ENV": "/v",
+        env = app_env({"TELEGRAM_BOT_TOKEN": "t", "GITHUB_TOKEN": "g", "CLOUDFLARE_API_TOKEN": "c",
+                       "HOME": "/h", "VIRTUAL_ENV": "/v",
                        "PATH": "/v/bin:/usr/bin"})
         self.assertEqual(env, {"HOME": "/h", "PATH": "/usr/bin"})
+
+    def test_running_http_app_gets_a_tunnel_route(self):
+        with socket.socket() as available:
+            available.bind(("127.0.0.1", 0))
+            port = available.getsockname()[1]
+
+        class Routes:
+            def __init__(self):
+                self.calls = []
+
+            def prepare(self, app, detected_port):
+                self.calls.append((app, detected_port))
+                return f"Tunnel ready on {detected_port}."
+
+        routes = Routes()
+        self.deployer = Deployer(make_config(self.tmp, settle_seconds=1), routes)
+        self.makefile(f"python3 -m http.server {port} --bind 127.0.0.1")
+        result = self.deployer.redeploy("app", self.repo)
+        self.assertTrue(result.ok, result.message)
+        self.assertEqual(routes.calls, [("app", port)])
+        self.assertIn("Tunnel ready", result.message)
+
+    def test_route_failure_does_not_stop_running_app(self):
+        class Routes:
+            def prepare(self, app, port):
+                raise AssertionError("no route should be attempted without a listener")
+
+        self.deployer = Deployer(make_config(self.tmp, settle_seconds=1), Routes())
+        self.makefile("sleep 60")
+        result = self.deployer.redeploy("app", self.repo)
+        self.assertFalse(result.ok)
+        self.assertIn("no TCP listener", result.message)
+        self.assertTrue(_alive(self.pid()))
 
 
 if __name__ == "__main__":

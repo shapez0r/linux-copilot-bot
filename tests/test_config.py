@@ -29,12 +29,24 @@ class ConfigTests(unittest.TestCase):
                   "BOT_SHOW_BROWSER": "true"}
         self.assertTrue(config.load(values, env_file=self.tmp / "none").show_browser)
 
+    def test_cloudflare_routing_configuration(self):
+        values = {"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_OWNER_ID": "1", "GITHUB_TOKEN": "g",
+                  "CLOUDFLARE_API_TOKEN": "cf", "CLOUDFLARE_ACCOUNT_ID": "a" * 32,
+                  "CLOUDFLARE_ZONE_ID": "b" * 32}
+        cfg = config.load(values, env_file=self.tmp / "none")
+        self.assertTrue(cfg.cloudflare_enabled)
+        self.assertEqual((cfg.cloudflare_tunnel, cfg.cloudflare_domain),
+                         ("kurwalab-tunnel", "kurwalab.fyi"))
+        self.assertIn("cf", cfg.secrets)
+
     def test_missing_and_invalid_settings(self):
         with self.assertRaisesRegex(config.ConfigError, "TELEGRAM_BOT_TOKEN"):
             config.load({}, env_file=self.tmp / "none")
         base = {"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_OWNER_ID": "1", "GITHUB_TOKEN": "g"}
         for bad in ({"TELEGRAM_OWNER_ID": "abc"}, {"COPILOT_MODEL": "GPT"}, {"COPILOT_TIMEOUT": "0"},
-                    {"BOT_SHOW_BROWSER": "maybe"}, {"BOT_TEMPORARY_CHAT": "maybe"}):
+                    {"BOT_SHOW_BROWSER": "maybe"}, {"BOT_TEMPORARY_CHAT": "maybe"},
+                    {"CLOUDFLARE_API_TOKEN": "cf"}, {"CLOUDFLARE_DOMAIN": "bad_domain"},
+                    {"CLOUDFLARE_DOMAIN": "-bad.example"}):
             with self.subTest(bad=bad), self.assertRaises(config.ConfigError):
                 config.load({**base, **bad}, env_file=self.tmp / "none")
 

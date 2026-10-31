@@ -17,10 +17,10 @@ from .telegram_api import Telegram, TelegramError
 
 log = logging.getLogger("bot")
 
-# Appended to every request so a new or changed app can be started by the redeploy step.
+# Keep generated apps compatible with process supervision and listener discovery.
 DEPLOY_NOTE = (
     "\n\nThis app is deployed by running `make run` from the repository root. Keep a Makefile whose `run` "
-    "target starts the app in the foreground, and keep secrets and runtime data outside the repository."
+    "target starts one HTTP server in the foreground, and keep secrets and runtime data outside the repository."
 )
 NEW_REPO_TEMPLATE = "eurofish"
 

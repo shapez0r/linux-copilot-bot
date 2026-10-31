@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MODEL = "GPT/GPT-6"
-SECRET_NAMES = ("TELEGRAM_BOT_TOKEN", "GITHUB_TOKEN")
+SECRET_NAMES = ("TELEGRAM_BOT_TOKEN", "GITHUB_TOKEN", "CLOUDFLARE_API_TOKEN")
+_DOMAIN_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
 class ConfigError(Exception):
@@ -32,10 +34,19 @@ class Config:
     git_email: str
     engine: Path = ROOT / "engine" / "copilot_repo_roundtrip.py"
     askpass: Path = ROOT / "bin" / "git-askpass"
+    cloudflare_api_token: str = ""
+    cloudflare_account_id: str = ""
+    cloudflare_zone_id: str = ""
+    cloudflare_tunnel: str = "kurwalab-tunnel"
+    cloudflare_domain: str = "kurwalab.fyi"
 
     @property
     def secrets(self):
-        return [s for s in (self.telegram_token, self.github_token) if s]
+        return [s for s in (self.telegram_token, self.github_token, self.cloudflare_api_token) if s]
+
+    @property
+    def cloudflare_enabled(self) -> bool:
+        return bool(self.cloudflare_api_token)
 
 
 def parse_env_file(path: Path) -> dict:
@@ -93,6 +104,23 @@ def load(environ=None, env_file=None) -> Config:
     model = get("COPILOT_MODEL", DEFAULT_MODEL)
     if model.count("/") != 1 or not all(part.strip() for part in model.split("/")):
         raise ConfigError("COPILOT_MODEL must be a provider/model pair such as GPT/GPT-6")
+    cloudflare = {
+        "CLOUDFLARE_API_TOKEN": get("CLOUDFLARE_API_TOKEN"),
+        "CLOUDFLARE_ACCOUNT_ID": get("CLOUDFLARE_ACCOUNT_ID"),
+        "CLOUDFLARE_ZONE_ID": get("CLOUDFLARE_ZONE_ID"),
+    }
+    if any(cloudflare.values()):
+        absent = [name for name, value in cloudflare.items() if not value]
+        if absent:
+            raise ConfigError("Cloudflare routing also requires: " + ", ".join(absent))
+        for name in ("CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_ZONE_ID"):
+            if not re.fullmatch(r"[0-9a-fA-F]{32}", cloudflare[name]):
+                raise ConfigError(f"{name} must be a 32-character hexadecimal id")
+        if not get("CLOUDFLARE_TUNNEL", "kurwalab-tunnel"):
+            raise ConfigError("CLOUDFLARE_TUNNEL is required when Cloudflare routing is enabled")
+    domain = get("CLOUDFLARE_DOMAIN", "kurwalab.fyi").lower().rstrip(".")
+    if len(domain) > 253 or any(not _DOMAIN_LABEL.fullmatch(part) for part in domain.split(".")):
+        raise ConfigError("CLOUDFLARE_DOMAIN must be a DNS domain name")
     home = Path.home()
     return Config(
         telegram_token=get("TELEGRAM_BOT_TOKEN"),
@@ -109,13 +137,19 @@ def load(environ=None, env_file=None) -> Config:
         settle_seconds=_integer(get("DEPLOY_SETTLE_SECONDS", "10"), "DEPLOY_SETTLE_SECONDS", 1),
         git_name=get("GIT_AUTHOR_NAME", "Copilot Telegram Bot"),
         git_email=get("GIT_AUTHOR_EMAIL", "copilot-telegram-bot@users.noreply.github.com"),
+        cloudflare_api_token=cloudflare["CLOUDFLARE_API_TOKEN"],
+        cloudflare_account_id=cloudflare["CLOUDFLARE_ACCOUNT_ID"],
+        cloudflare_zone_id=cloudflare["CLOUDFLARE_ZONE_ID"],
+        cloudflare_tunnel=get("CLOUDFLARE_TUNNEL", "kurwalab-tunnel"),
+        cloudflare_domain=domain,
     )
 
 
 _KNOWN = {
     "TELEGRAM_BOT_TOKEN", "TELEGRAM_OWNER_ID", "GITHUB_TOKEN", "GITHUB_OWNER", "REPOS_DIR", "STATE_DIR",
     "COPILOT_PROFILE", "COPILOT_MODEL", "COPILOT_TIMEOUT", "BOT_SHOW_BROWSER", "BOT_TEMPORARY_CHAT",
-    "DEPLOY_SETTLE_SECONDS", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+    "DEPLOY_SETTLE_SECONDS", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "CLOUDFLARE_API_TOKEN",
+    "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_ZONE_ID", "CLOUDFLARE_TUNNEL", "CLOUDFLARE_DOMAIN",
 }
 
 
