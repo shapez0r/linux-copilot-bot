@@ -50,7 +50,7 @@ class GitHub:
         """Repository metadata, or None when it does not exist or is not visible to the token."""
         return self._request("GET", f"/repos/{owner}/{name}", allow_404=True)
 
-    def create_repo(self, owner: str, name: str):
-        """Create a private repository with an initial commit, so a HEAD exists to snapshot."""
+    def create_repo(self, owner: str, name: str, private: bool = True):
+        """Create a repository with an initial commit, so a HEAD exists to snapshot."""
         path = "/user/repos" if owner.lower() == self.login.lower() else f"/orgs/{owner}/repos"
-        return self._request("POST", path, {"name": name, "private": True, "auto_init": True})
+        return self._request("POST", path, {"name": name, "private": private, "auto_init": True})

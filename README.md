@@ -2,7 +2,7 @@
 
 A Telegram bot for an Ubuntu VM that turns chat messages from its owner into repository changes. For each request it:
 
-1. selects the repository (an existing GitHub repository, or a new private one) and clones it to `/home/localadmin/repos/<name>`;
+1. selects the repository (an existing GitHub repository, or a new public or private one) and clones it to `/home/localadmin/repos/<name>`;
 2. takes the message as the prompt;
 3. sends the repository to Microsoft 365 Copilot Chat through the Playwright round-trip engine and applies the returned repository;
 4. commits and pushes the result to GitHub;
@@ -44,14 +44,16 @@ Only the owner (`TELEGRAM_OWNER_ID`) in a private chat is served; every other me
 
 | Message | Effect |
 | --- | --- |
-| `/new <name>` or `/new <owner/name>` | Create a new private GitHub repository, clone it, and make it active. Then send a plain-text request to start building. Refuses to overwrite or select an existing repository. |
-| `/repo <name>` or `/repo <owner/name>` | Select the active repository. A missing repository is created as a private GitHub repository with an initial commit, then cloned; an existing one is cloned or fast-forwarded. A GitHub URL is also accepted. |
+| `/new <name>` or `/new <owner/name>` | Create a new GitHub repository (private by default), clone it, and make it active. Then send a plain-text request to start building. Refuses to overwrite or select an existing repository. |
+| `/repo <name>` or `/repo <owner/name>` | Select the active repository. A missing repository is created as a GitHub repository (private by default) with an initial commit, then cloned; an existing one is cloned or fast-forwarded. A GitHub URL is also accepted. |
 | `/repo` | Show the active repository. |
 | plain text | Run the text as a request against the active repository. |
 | `/fix <repo> <request>` | Select a repository and run a request in one message. |
 | `/model <provider/model>` | Choose the Copilot model label (default `GPT/GPT-6`). |
 | `/status` | Show repository, model, job state, and whether the app is running. |
 | `/cancel` | Ask Copilot to stop and discard the running job. |
+
+Use `public` or `private` before the name when creating a repository; the default is `private`. Existing repositories keep their visibility. Private repositories are cloned using `GITHUB_TOKEN` through `GIT_ASKPASS`, without storing credentials in remote URLs.
 
 A bare name uses `GITHUB_OWNER`, or the token's account when it is not set. The checkout directory is `<REPOS_DIR>/<repository name>`, so two repositories with the same name under different owners cannot be used side by side; the bot refuses a directory that belongs to another repository.
 
@@ -74,7 +76,7 @@ Settings come from `.env` (or the file named by `BOT_ENV_FILE`); real environmen
 | --- | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | required | Bot token. |
 | `TELEGRAM_OWNER_ID` | required | Numeric id of the only accepted user. |
-| `GITHUB_TOKEN` | required | Used for GitHub API calls and Git over HTTPS through `GIT_ASKPASS`; it is never written into remote URLs. |
+| `GITHUB_TOKEN` | required | Used for GitHub API calls and Git over HTTPS through `GIT_ASKPASS` (including private repository clones); it is never written into remote URLs. |
 | `GITHUB_OWNER` | token's account | Owner for bare repository names. |
 | `REPOS_DIR` | `/home/localadmin/repos` | Parent of the app checkouts. |
 | `STATE_DIR` | `~/.copilot-telegram-bot` | Active repository and model, process ids, app logs. |

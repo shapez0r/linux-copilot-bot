@@ -27,8 +27,8 @@ CREATE_CLONE_ATTEMPTS = 4  # A repository created through the API can take a mom
 
 HELP = """Send a request as plain text and I will change the active repository with Copilot, commit, push and redeploy it with `make run`.
 
-/new <name|owner/name> - create a new private repository and select it; send your next message to start working
-/repo <name|owner/name> - select a repository; it is created (private) if missing and cloned to the repos directory
+/new [public|private] <name|owner/name> - create a repository and select it; send your next message to start working
+/repo [public|private] <name|owner/name> - select a repository; it is created (private by default) if missing and cloned to the repos directory
 /repo - show the active repository
 /fix <repo> <request> - select a repository and run a request in one message
 /model <provider/model> - choose the Copilot model (for example GPT/GPT-6)
@@ -175,18 +175,28 @@ class Bot:
         else:
             self.say(chat_id, "No job is running.")
 
+    @staticmethod
+    def _creation_options(arg: str):
+        """Read an optional visibility prefix; private remains the default."""
+        parts = arg.split(None, 1)
+        if parts and parts[0].lower() in ("public", "private"):
+            return (parts[1].strip() if len(parts) > 1 else ""), parts[0].lower() == "private"
+        return arg, True
+
     def cmd_new(self, chat_id: int, arg: str):
+        arg, private = self._creation_options(arg)
         if not arg:
-            self.say(chat_id, "Usage: /new <name|owner/name>")
+            self.say(chat_id, "Usage: /new [public|private] <name|owner/name>")
             return
-        self._spawn(chat_id, lambda: self._select_repo(chat_id, arg, new_only=True))
+        self._spawn(chat_id, lambda: self._select_repo(chat_id, arg, new_only=True, private=private))
 
     def cmd_repo(self, chat_id: int, arg: str):
+        arg, private = self._creation_options(arg)
         if not arg:
             self.say(chat_id, f"Active repository: {self.state.repo}" if self.state.repo
                      else "No repository selected. Use /repo <name>.")
             return
-        self._spawn(chat_id, lambda: self._select_repo(chat_id, arg))
+        self._spawn(chat_id, lambda: self._select_repo(chat_id, arg, private=private))
 
     def start_request(self, chat_id: int, ref: str, request: str):
         if not ref and not self.state.repo:
@@ -221,7 +231,7 @@ class Bot:
     def _owner_default(self) -> str:
         return self.cfg.github_owner or self.gh.login
 
-    def _prepare(self, owner: str, name: str, progress: Progress, new_only: bool = False):
+    def _prepare(self, owner: str, name: str, progress: Progress, new_only: bool = False, private: bool = True):
         """Make sure the repository exists on GitHub and is cloned and current; returns (path, branch, how)."""
         progress.update(f"Looking up {owner}/{name} on GitHub...")
         repo = self.gh.get_repo(owner, name)
@@ -229,8 +239,8 @@ class Bot:
             raise RepoError(f"{owner}/{name} already exists. Use /repo to select it.")
         created = repo is None
         if created:
-            progress.update(f"Creating private repository {owner}/{name}...")
-            repo = self.gh.create_repo(owner, name)
+            progress.update(f"Creating {'private' if private else 'public'} repository {owner}/{name}...")
+            repo = self.gh.create_repo(owner, name, private=private)
         dest = local_path(self.cfg.repos_dir, name)
         progress.update(f"Preparing {dest}...")
         for attempt in range(CREATE_CLONE_ATTEMPTS if created else 1):
@@ -244,10 +254,10 @@ class Bot:
         branch = self.git.sync(dest)
         return dest, branch, "created" if created else "cloned" if cloned else "already cloned"
 
-    def _select_repo(self, chat_id: int, arg: str, new_only: bool = False):
+    def _select_repo(self, chat_id: int, arg: str, new_only: bool = False, private: bool = True):
         owner, name = parse_repo_ref(arg, self._owner_default())
         progress = Progress(self.tg, chat_id, self.cfg)
-        dest, branch, how = self._prepare(owner, name, progress, new_only=new_only)
+        dest, branch, how = self._prepare(owner, name, progress, new_only=new_only, private=private)
         self.state.repo = f"{owner}/{name}"
         self.state.save()
         progress.flush()

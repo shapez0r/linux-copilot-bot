@@ -46,8 +46,8 @@ class FakeGitHub:
     def get_repo(self, owner, name):
         return self.repos.get(f"{owner}/{name}")
 
-    def create_repo(self, owner, name):
-        self.created.append(f"{owner}/{name}")
+    def create_repo(self, owner, name, private=True):
+        self.created.append((f"{owner}/{name}", private))
         repo = {"clone_url": str(make_origin(self._tmp, name + ".git"))}
         self.repos[f"{owner}/{name}"] = repo
         return repo
@@ -124,19 +124,29 @@ class ServiceTests(unittest.TestCase):
 
     def test_missing_repository_is_created_through_github(self):
         self.say("/repo brand-new")
-        self.assertEqual(self.gh.created, ["me/brand-new"])
+        self.assertEqual(self.gh.created, [("me/brand-new", True)])
         self.assertTrue((self.cfg.repos_dir / "brand-new" / ".git").exists())
         self.assertEqual(self.state.repo, "me/brand-new")
         self.assertIn("created", self.tg.sent[-1])
 
     def test_new_creates_selects_and_accepts_followup_request(self):
         self.say("/new fresh-app")
-        self.assertEqual(self.gh.created, ["me/fresh-app"])
+        self.assertEqual(self.gh.created, [("me/fresh-app", True)])
         self.assertEqual(self.state.repo, "me/fresh-app")
         self.assertIn("Send your next message", self.tg.sent[-1])
         self.say("build a starter app")
         self.assertEqual(len(self.rt.calls), 1)
         self.assertEqual(self.rt.calls[0][0], self.cfg.repos_dir / "fresh-app")
+
+    def test_visibility_choice_for_new_and_repo(self):
+        self.say("/new public open-app")
+        self.assertEqual(self.gh.created, [("me/open-app", False)])
+        self.say("/repo private closed-app")
+        self.assertEqual(self.gh.created[-1], ("me/closed-app", True))
+        self.say("/repo public app")
+        self.assertEqual(len(self.gh.created), 2)  # Existing visibility is not changed.
+        self.say("/new public")
+        self.assertIn("Usage: /new", self.tg.sent[-1])
 
     def test_new_refuses_existing_repo_and_requires_name(self):
         self.say("/new")
