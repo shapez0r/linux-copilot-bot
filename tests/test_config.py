@@ -20,7 +20,7 @@ class ConfigTests(unittest.TestCase):
         cfg = config.load({"GITHUB_TOKEN": "from-env"}, env_file=path)
         self.assertEqual((cfg.telegram_token, cfg.owner_id, cfg.github_token), ("abc", 7, "from-env"))
         self.assertEqual(cfg.model, "Claude/Opus 5.5")
-        self.assertEqual(cfg.repos_dir, Path("/home/repos"))
+        self.assertEqual(cfg.repos_dir, Path("/home/localadmin/repos"))
 
     def test_missing_and_invalid_settings(self):
         with self.assertRaisesRegex(config.ConfigError, "TELEGRAM_BOT_TOKEN"):

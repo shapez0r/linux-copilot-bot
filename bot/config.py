@@ -98,7 +98,7 @@ def load(environ=None, env_file=None) -> Config:
         owner_id=_integer(get("TELEGRAM_OWNER_ID"), "TELEGRAM_OWNER_ID", 1),
         github_token=get("GITHUB_TOKEN"),
         github_owner=get("GITHUB_OWNER"),
-        repos_dir=Path(get("REPOS_DIR", "/home/repos")).expanduser(),
+        repos_dir=Path(get("REPOS_DIR", "/home/localadmin/repos")).expanduser(),
         state_dir=Path(get("STATE_DIR", str(home / ".copilot-telegram-bot"))).expanduser(),
         profile=Path(get("COPILOT_PROFILE", str(home / ".copilot-repo-browser"))).expanduser(),
         model=model,

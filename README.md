@@ -2,11 +2,11 @@
 
 A Telegram bot for an Ubuntu VM that turns chat messages from its owner into repository changes. For each request it:
 
-1. selects the repository (an existing GitHub repository, or a new private one) and clones it to `/home/repos/<name>`;
+1. selects the repository (an existing GitHub repository, or a new private one) and clones it to `/home/localadmin/repos/<name>`;
 2. takes the message as the prompt;
 3. sends the repository to Microsoft 365 Copilot Chat through the Playwright round-trip engine and applies the returned repository;
 4. commits and pushes the result to GitHub;
-5. redeploys the app by running `make run` from `/home/repos/<name>`.
+5. redeploys the app by running `make run` from `/home/localadmin/repos/<name>`.
 
 **Experimental:** the engine drives Copilot's browser UI, so UI changes can interrupt it. Changes are pushed without review; review the commits on GitHub afterwards.
 
@@ -22,7 +22,7 @@ A Telegram bot for an Ubuntu VM that turns chat messages from its owner into rep
 ```bash
 make setup          # virtual environment, Playwright, Chromium
 make system-deps    # Chromium's operating-system libraries (sudo)
-sudo mkdir -p /home/repos && sudo chown "$USER" /home/repos
+sudo mkdir -p /home/localadmin/repos && sudo chown "$USER" /home/localadmin/repos
 cp .env.example .env && chmod 600 .env   # then fill in the required values
 make login          # sign in to Copilot once (see below)
 make run            # start the bot in the foreground
@@ -61,7 +61,7 @@ One job runs at a time. Progress is shown in a single message that is edited as 
 - **Prepare:** the checkout must be on a branch with no uncommitted changes; the bot fast-forwards it to `origin`.
 - **Round-trip:** the engine uploads a ZIP of the committed `HEAD`, asks Copilot for the complete fixed repository, validates the returned ZIP, and replaces the worktree. The bot appends a note asking Copilot to keep a Makefile whose `run` target starts the app in the foreground and to keep secrets and runtime data outside the repository.
 - **Commit and push:** all changes are committed on the current branch with the first line of the request as the subject, and pushed to `origin`. If Copilot changed nothing, nothing is committed or deployed. A failed push leaves the commit locally and is reported; the next request pushes it.
-- **Redeploy:** the previous `make run` process group for the app is stopped, then `make run` is started detached in `/home/repos/<name>` with output appended to `<STATE_DIR>/logs/<name>.log`. The redeploy counts as successful when the process is still running after `DEPLOY_SETTLE_SECONDS` or has exited with code 0; otherwise the log tail is sent. A repository without a `run` target is pushed but not started. Deployed apps do not receive the bot's tokens.
+- **Redeploy:** the previous `make run` process group for the app is stopped, then `make run` is started detached in `/home/localadmin/repos/<name>` with output appended to `<STATE_DIR>/logs/<name>.log`. The redeploy counts as successful when the process is still running after `DEPLOY_SETTLE_SECONDS` or has exited with code 0; otherwise the log tail is sent. A repository without a `run` target is pushed but not started. Deployed apps do not receive the bot's tokens.
 
 **Important:** the engine applies a returned ZIP as a full replacement. Everything in the checkout except `.git` is replaced, including untracked and ignored files such as `.env`, virtual environments, `node_modules`, and local databases. Keep runtime data and secrets outside the checkout and let `make run` rebuild dependencies.
 
@@ -75,7 +75,7 @@ Settings come from `.env` (or the file named by `BOT_ENV_FILE`); real environmen
 | `TELEGRAM_OWNER_ID` | required | Numeric id of the only accepted user. |
 | `GITHUB_TOKEN` | required | Used for GitHub API calls and Git over HTTPS through `GIT_ASKPASS`; it is never written into remote URLs. |
 | `GITHUB_OWNER` | token's account | Owner for bare repository names. |
-| `REPOS_DIR` | `/home/repos` | Parent of the app checkouts. |
+| `REPOS_DIR` | `/home/localadmin/repos` | Parent of the app checkouts. |
 | `STATE_DIR` | `~/.copilot-telegram-bot` | Active repository and model, process ids, app logs. |
 | `COPILOT_PROFILE` | `~/.copilot-repo-browser` | Browser profile created by `make login`. |
 | `COPILOT_MODEL` | `GPT/GPT-6` | Initial model label; change it later with `/model`. |
