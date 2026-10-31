@@ -19,6 +19,13 @@ class Git:
         self._login = github_login
 
     def _env(self):
+        # ZIP extraction may discard executable permissions on the credential helper.
+        askpass = self._cfg.askpass
+        try:
+            if not os.access(askpass, os.X_OK):
+                askpass.chmod(askpass.stat().st_mode | 0o100)
+        except OSError as exc:
+            raise GitError(f"Cannot make Git credential helper executable: {exc.strerror}") from None
         return dict(
             os.environ, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS=str(self._cfg.askpass),
             BOT_GIT_USER=self._login, BOT_GIT_TOKEN=self._cfg.github_token,

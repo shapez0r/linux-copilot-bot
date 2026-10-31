@@ -63,6 +63,15 @@ class GitOpsTests(unittest.TestCase):
         git("remote", "set-url", "origin", "https://github.com/me/app.git", cwd=self.dest)
         self.assertFalse(self.git.ensure_clone("unused", self.dest, "me", "app"))
 
+    def test_askpass_is_executable_even_after_permissions_are_lost(self):
+        helper = self.tmp / "git-askpass"
+        helper.write_bytes(self.git._cfg.askpass.read_bytes())
+        helper.chmod(0o600)
+        cfg = make_config(self.tmp, askpass=helper)
+        git_client = Git(cfg)
+        self.assertEqual(git_client.run("--version").startswith("git version"), True)
+        self.assertTrue(helper.stat().st_mode & 0o100)
+
     def test_errors_do_not_leak_the_token(self):
         with self.assertRaises(GitError) as caught:
             self.git.run("clone", "https://gh-secret@invalid.invalid/x.git", str(self.tmp / "x"))
