@@ -5,13 +5,20 @@ import tempfile
 import textwrap
 import threading
 import unittest
-from unittest import mock
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from support import make_config
 from bot.roundtrip import (Cancelled, RoundTrip, RoundTripError, format_prompt_status,
-                           format_task_status, parse_activity_event, parse_live_event, parse_status,
-                           parse_status_event)
+                           format_stage_status, format_timestamp, parse_activity_event,
+                           parse_live_event, parse_status, parse_status_event, StatusTimeline)
+
+STAMP = "2026-11-01 16:21:21 UTC+00:00"
+
+
+def fixed_timeline():
+    return StatusTimeline(lambda: STAMP)
 
 FAKE_ENGINE = textwrap.dedent('''
     import json, sys
@@ -57,8 +64,10 @@ class RoundTripTests(unittest.TestCase):
         self.statuses = []
 
     def run_engine(self, request, cancel=None):
-        return RoundTrip(self.cfg).run(self.tmp, request, "GPT/GPT-6", lambda s, m: self.statuses.append((s, m)),
-                                       cancel or threading.Event())
+        with mock.patch("bot.roundtrip.format_timestamp", return_value=STAMP):
+            return RoundTrip(self.cfg).run(
+                self.tmp, request, "GPT/GPT-6", lambda s, m: self.statuses.append((s, m)),
+                cancel or threading.Event())
 
     def test_command_passes_the_request_after_a_separator(self):
         cmd = RoundTrip(self.cfg).command(self.tmp, "-rm things", "Claude/Opus 5.5")
@@ -78,12 +87,14 @@ class RoundTripTests(unittest.TestCase):
         result = self.run_engine("ok")
         self.assertEqual(result["chat_response"], "done")
         self.assertEqual(self.statuses, [
-            ("browser", "Opening"),
-            ("task", "▶ Build app\nIn progress\n  ✓ Inspect repository\n"
-                     "  ▶ Implement changes\n  ○ Run tests"),
-            ("activity", "▶ Build app\nIn progress\n  ✓ Inspect repository\n"
-                          "  ▶ Implement changes\n  ○ Run tests\n\n"
-                          "▶ Working through the steps: Coding and executing\n\nInterim result."),
+            ("browser", f"Currently doing: Opening\n\n[{STAMP}] Opening"),
+            ("task", f"Currently doing: Implement changes\n\n[{STAMP}] ▶ Build app\nIn progress\n"
+                     f"  [{STAMP}] ✓ Inspect repository\n  [{STAMP}] ▶ Implement changes\n"
+                     f"  [{STAMP}] ○ Run tests"),
+            ("activity", f"Currently doing: Coding and executing\n\n[{STAMP}] ▶ Build app\nIn progress\n"
+                          f"  [{STAMP}] ✓ Inspect repository\n  [{STAMP}] ▶ Implement changes\n"
+                          f"  [{STAMP}] ○ Run tests\n\n[{STAMP}] ▶ Working through the steps: "
+                          "Coding and executing\n\nInterim result."),
         ])
         self.assertNotIn("secret_code", str(self.statuses))
         self.assertNotIn("no new output", str(self.statuses))
@@ -117,17 +128,22 @@ class RoundTripTests(unittest.TestCase):
                 ],
             }],
         }))
-        rendered = format_task_status(event["message"], event["tasks"])
-        self.assertEqual(rendered, "▶ Build app\nIn progress\n"
-                          "  ✓ Inspect files\n  ▶ Coding and executing\n  ○ Test")
+        rendered = format_prompt_status(event["message"], event["tasks"], [], timeline=fixed_timeline())
+        self.assertEqual(rendered, f"Currently doing: Coding and executing\n\n[{STAMP}] ▶ Build app\nIn progress\n"
+                          f"  [{STAMP}] ✓ Inspect files\n  [{STAMP}] ▶ Coding and executing\n"
+                          f"  [{STAMP}] ○ Test")
         self.assertNotIn("secret", rendered)
         self.assertNotIn("internal code output", rendered)
 
     def test_unstructured_task_status_does_not_relay_generated_details(self):
-        self.assertEqual(format_task_status("Coding and executing\nprint('internal')", None),
-                         "Copilot is executing the prompt.")
-        self.assertEqual(format_task_status("Copilot task card closed.", []),
-                         "Copilot task card closed; waiting for the final response.")
+        self.assertEqual(format_prompt_status("Coding and executing\nprint('internal')", None, [],
+                                              timeline=fixed_timeline()),
+                         f"Currently doing: Copilot is executing the prompt.\n\n"
+                         f"[{STAMP}] Copilot is executing the prompt.")
+        self.assertEqual(format_prompt_status("Copilot task card closed.", [], [],
+                                              timeline=fixed_timeline()),
+                         "Currently doing: Copilot task card closed; waiting for the final response.\n\n"
+                         f"[{STAMP}] Copilot task card closed; waiting for the final response.")
 
     def test_activity_status_keeps_titles_and_omits_details_answers_and_code(self):
         line = "ROUNDTRIP_REASONING:" + json.dumps({
@@ -151,8 +167,9 @@ class RoundTripTests(unittest.TestCase):
                 {"title": "Testing", "kind": "thought"},
             ],
         }])
-        rendered = format_prompt_status("", [], blocks)
-        self.assertEqual(rendered, "▶ Working through the steps: Testing")
+        rendered = format_prompt_status("", [], blocks, timeline=fixed_timeline())
+        self.assertEqual(rendered, f"Currently doing: Testing\n\n"
+                          f"[{STAMP}] ▶ Working through the steps: Testing")
         for hidden in ("private reasoning", "secret", "test output", "generated reply"):
             self.assertNotIn(hidden, rendered)
 
@@ -176,12 +193,13 @@ class RoundTripTests(unittest.TestCase):
         live = parse_live_event(line)
         self.assertEqual(live["answers"], [
             {"after": 0, "text": "Starting."}, {"after": 1, "text": "Found it."}])
-        rendered = format_prompt_status("900s elapsed; no new output", [], live["blocks"], live["answers"])
+        rendered = format_prompt_status("900s elapsed; no new output", [], live["blocks"], live["answers"],
+                                        fixed_timeline())
         self.assertEqual(rendered,
-                         "Starting.\n\n✓ Working through the steps: Read files\n\nFound it.\n\n"
-                         "▶ Reasoning\n  • Thought process\n"
-                         "  • Coding and executing")
-        self.assertNotIn("Comparing behavior", rendered)
+                         f"Currently doing: Comparing behavior\n\nStarting.\n\n"
+                         f"[{STAMP}] ✓ Working through the steps: Read files\n\nFound it.\n\n"
+                         f"[{STAMP}] ▶ Reasoning\n  [{STAMP}] • Thought process\n"
+                         f"  [{STAMP}] • Coding and executing")
         self.assertNotIn("token=secret", rendered)
         self.assertNotIn("no new output", rendered)
 
@@ -192,14 +210,49 @@ class RoundTripTests(unittest.TestCase):
             "answers": [{"after": 1, "text": "Interim answer."}],
         })
         live = parse_live_event(line)
-        self.assertEqual(format_prompt_status("", [], live["blocks"], live["answers"]),
-                         "✓ Reasoned for 12s\n\nInterim answer.")
+        self.assertEqual(format_prompt_status("", [], live["blocks"], live["answers"], fixed_timeline()),
+                         f"Currently doing: Reasoned for 12s\n\n[{STAMP}] ✓ Reasoned for 12s\n\n"
+                         "Interim answer.")
         self.assertNotIn("private chain of thought", str(live))
 
     def test_live_answer_without_activity_keeps_the_compact_stage(self):
         self.assertEqual(format_prompt_status("Waiting for Copilot...", [], [], [
             {"after": 0, "text": "I am checking the repository."},
-        ]), "Waiting for Copilot...\n\nI am checking the repository.")
+        ], fixed_timeline()), f"Currently doing: Waiting for Copilot...\n\n"
+                              f"[{STAMP}] Waiting for Copilot...\n\nI am checking the repository.")
+
+    def test_timestamp_has_seconds_zone_name_and_offset(self):
+        moment = datetime(2026, 11, 1, 17, 21, 9, tzinfo=timezone(timedelta(hours=1), "CET"))
+        self.assertEqual(format_timestamp(moment), "2026-11-01 17:21:09 CET+01:00")
+
+    def test_timeline_keeps_stage_times_and_updates_the_current_step(self):
+        stamps = iter(("2026-11-01 16:21:21 UTC+00:00", "2026-11-01 16:21:22 UTC+00:00"))
+        timeline = StatusTimeline(lambda: next(stamps))
+        first = format_prompt_status("", [], [{"index": 0, "title": "Reasoning", "active": True,
+                                                "layout": "working", "steps": [
+                                                    {"title": "Inspecting", "kind": "thought"}]}],
+                                     timeline=timeline)
+        second = format_prompt_status("", [], [{"index": 0, "title": "Reasoning", "active": True,
+                                                 "layout": "working", "steps": [
+                                                     {"title": "Coding and executing", "kind": "coding"}]}],
+                                      timeline=timeline)
+        self.assertIn("[2026-11-01 16:21:21 UTC+00:00]", first)
+        self.assertIn("Currently doing: Coding and executing", second)
+        self.assertIn("[2026-11-01 16:21:22 UTC+00:00]", second)
+
+    def test_active_reasoning_uses_its_last_paragraph_for_current_activity(self):
+        line = "ROUNDTRIP_REASONING:" + json.dumps({"blocks": [{
+            "title": "Reasoning", "active": True, "layout": "section",
+            "lines": ["Checking the tests.", "Comparing the two implementations now."],
+        }]})
+        live = parse_live_event(line)
+        rendered = format_prompt_status("", [], live["blocks"], timeline=fixed_timeline())
+        self.assertTrue(rendered.startswith("Currently doing: Comparing the two implementations now."))
+        self.assertNotIn("Checking the tests.", rendered)
+
+    def test_single_stage_formatter_adds_the_header_and_timestamp(self):
+        self.assertEqual(format_stage_status("Preparing repository...", fixed_timeline(), "prepare"),
+                         f"Currently doing: Preparing repository...\n\n[{STAMP}] Preparing repository...")
 
 
 if __name__ == "__main__":

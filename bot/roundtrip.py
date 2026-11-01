@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from collections import deque
+from datetime import datetime
 
 from .config import SECRET_NAMES, Config
 
@@ -22,6 +23,7 @@ ACTIVITY_KINDS = frozenset({"thought", "completed", "coding"})
 CODING_STEP = re.compile(r"^(coding\b|code execution\b|executing code\b|running code\b)", re.I)
 THOUGHT_STEP = re.compile(r"^\s*(reasoning|reasoned|thinking|thought|thought for)\b", re.I)
 ANSWER_MAX_CHARS = 4000
+CURRENT_STATUS_MAX_CHARS = 500
 
 
 class RoundTripError(Exception):
@@ -30,6 +32,48 @@ class RoundTripError(Exception):
 
 class Cancelled(Exception):
     """Raised when an authorized user cancelled the run."""
+
+
+def format_timestamp(moment=None) -> str:
+    """Return a local timestamp with second precision, zone name and UTC offset."""
+    moment = moment or datetime.now().astimezone()
+    if moment.tzinfo is None:
+        moment = moment.astimezone()
+    offset = moment.strftime("%z")
+    if len(offset) == 5:
+        offset = offset[:3] + ":" + offset[3:]
+    return f"{moment:%Y-%m-%d %H:%M:%S} {moment.tzname() or 'UTC'}{offset}"
+
+
+class StatusTimeline:
+    """Keep first-seen stage timestamps stable while an edited status message evolves."""
+
+    def __init__(self, clock=None):
+        self._clock = clock
+        self._timestamps = {}
+        self._states = {}
+        self.current = ""
+
+    def _now(self):
+        value = self._clock() if self._clock else format_timestamp()
+        return format_timestamp(value) if isinstance(value, datetime) else str(value)
+
+    def stage(self, key, label: str, state: str = "", current: bool = False) -> str:
+        normalized = " ".join(str(label).split())
+        new = key not in self._timestamps
+        if new:
+            self._timestamps[key] = self._now()
+        previous = self._states.get(key)
+        self._states[key] = state
+        if current and normalized and (new or previous != state):
+            self.current = normalized
+        return self._timestamps[key]
+
+    def detail(self, key, text: str):
+        normalized = _current_text(text)
+        if normalized and key not in self._timestamps:
+            self._timestamps[key] = self._now()
+            self.current = normalized
 
 
 def parse_status_event(line: str):
@@ -76,7 +120,7 @@ def parse_status(line: str):
 
 
 def parse_live_event(line: str):
-    """Return activity titles and interim answers without reasoning or execution details."""
+    """Return activity titles, the latest visible reasoning paragraph and interim answers."""
     if not line.startswith(REASONING_PREFIX):
         return None
     try:
@@ -104,19 +148,30 @@ def parse_live_event(line: str):
                 if kind not in ACTIVITY_KINDS:
                     kind = ("coding" if CODING_STEP.match(title) else
                             "completed" if not THOUGHT_STEP.match(title) and detail_count == 0 else "thought")
-                steps.append({"title": title, "kind": kind})
+                step = {"title": title, "kind": kind}
+                if raw_block.get("active") is True and kind == "thought" and THOUGHT_STEP.match(title):
+                    current = _last_visible_line(raw_step.get("lines"))
+                    if current:
+                        step["current"] = current
+                steps.append(step)
             try:
                 block_total = max(block_line_count, int(raw_block.get("total") or 0))
             except (TypeError, ValueError):
                 block_total = block_line_count
-            blocks.append({
+            block = {
                 "index": index,
                 "title": " ".join(str(raw_block.get("title") or "Reasoning").split()),
                 "active": raw_block.get("active") is True,
                 "layout": "working" if raw_block.get("layout") == "working" else "section",
                 "total": block_total,
                 "steps": steps,
-            })
+            }
+            current = next((step.get("current") for step in reversed(steps) if step.get("current")), "")
+            if block["active"] and not current and THOUGHT_STEP.match(block["title"]):
+                current = _last_visible_line(raw_block.get("lines"))
+            if current:
+                block["current"] = current
+            blocks.append(block)
         answers = []
         for answer in value.get("answers") if isinstance(value.get("answers"), list) else []:
             if not isinstance(answer, dict) or not isinstance(answer.get("text"), str):
@@ -150,6 +205,20 @@ def _section_steps(block):
     return block.get("steps") or []
 
 
+def _last_visible_line(value):
+    if not isinstance(value, list):
+        return ""
+    return next((_current_text(line) for line in reversed(value)
+                 if isinstance(line, str) and _current_text(line)), "")
+
+
+def _current_text(value) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) > CURRENT_STATUS_MAX_CHARS:
+        text = text[:CURRENT_STATUS_MAX_CHARS - 1].rstrip() + "…"
+    return text
+
+
 def _working_summary(blocks):
     completed, current = "", ""
     for block in blocks:
@@ -170,21 +239,24 @@ def _append_answer(lines, text):
     lines.extend(text.splitlines())
 
 
-def format_prompt_status(message: str, tasks, blocks, answers=None) -> str:
-    """Render task and activity names with interim answers, omitting reasoning details."""
+def format_prompt_status(message: str, tasks, blocks, answers=None, timeline=None, stage="status") -> str:
+    """Render a timestamped activity timeline with the latest activity at the top."""
     lines, answers = [], answers or []
+    timeline = timeline or StatusTimeline()
     by_after = {}
     for answer in answers:
         after = max(0, min(len(blocks), int(answer.get("after") or 0)))
         by_after[after] = by_after.get(after, "") + ("\n\n" if after in by_after else "") + answer["text"]
 
     if not tasks and not blocks:
-        lines.append(message if by_after and message else
-                     "Copilot is executing the prompt." if tasks is None else
-                     "Copilot task card closed; waiting for the final response.")
+        status = (message if message and (by_after or stage != "status") else
+                  "Copilot is executing the prompt." if tasks is None else
+                  "Copilot task card closed; waiting for the final response.")
+        stamp = timeline.stage(("status", stage, status), status, stage, current=True)
+        lines.append(f"[{stamp}] {status}")
         if 0 in by_after:
             _append_answer(lines, by_after[0])
-        return _limit_status(lines)
+        return _limit_status(lines, timeline.current)
 
     if 0 in by_after:
         _append_answer(lines, by_after[0])
@@ -196,9 +268,17 @@ def format_prompt_status(message: str, tasks, blocks, answers=None) -> str:
         marker = ("▶" if task.get("active") else "×" if re.search(r"stop|cancel", task["state"], re.I)
                   else "✗" if re.search(r"fail", task["state"], re.I)
                   else "✓" if re.search(r"complete|done", task["state"], re.I) else "○")
-        lines.extend((f"{marker} {title}", task["state"]))
+        active_step = any(step["state"] == "active" for step in task["steps"])
+        task_current = (task.get("active", False) and not active_step) or (not task["steps"] and not timeline.current)
+        task_stamp = timeline.stage(("task", title), title, task["state"], current=task_current)
+        lines.extend((f"[{task_stamp}] {marker} {title}", task["state"]))
         markers = {"completed": "✓", "active": "▶", "pending": "○", "failed": "✗"}
-        lines.extend(f"  {markers[step['state']]} {step['title']}" for step in task["steps"])
+        for position, step in enumerate(task["steps"]):
+            step_current = step["state"] == "active" or (
+                not task.get("active") and not timeline.current and position == len(task["steps"]) - 1)
+            step_stamp = timeline.stage(("task-step", title, position, step["title"]), step["title"],
+                                        step["state"], current=step_current)
+            lines.append(f"  [{step_stamp}] {markers[step['state']]} {step['title']}")
         if task.get("response"):
             _append_answer(lines, task["response"])
 
@@ -215,23 +295,51 @@ def format_prompt_status(message: str, tasks, blocks, answers=None) -> str:
                 index += 1
             group = blocks[start:index]
             active = any(item.get("active") for item in group)
-            lines.append(f"{'▶' if active else '✓'} Working through the steps: {_working_summary(group)}")
+            summary = _working_summary(group)
+            stamp = timeline.stage(("working", start, summary), summary,
+                                   "active" if active else "completed",
+                                   current=active or not timeline.current)
+            lines.append(f"[{stamp}] {'▶' if active else '✓'} Working through the steps: {summary}")
+            current_block = next((item for item in reversed(group) if item.get("active")), None)
+            if current_block and current_block.get("current"):
+                timeline.detail(("reasoning", start, current_block["current"]), current_block["current"])
         else:
             index += 1
-            lines.append(f"{'▶' if block.get('active') else '✓'} {block.get('title') or 'Reasoning'}")
-            for step in _section_steps(block):
+            title = block.get("title") or "Reasoning"
+            steps = _section_steps(block)
+            block_current = (block.get("active", False) and not steps) or (not steps and not timeline.current)
+            stamp = timeline.stage(("block", block.get("index", index - 1), title), title,
+                                   "active" if block.get("active") else "completed", current=block_current)
+            lines.append(f"[{stamp}] {'▶' if block.get('active') else '✓'} {title}")
+            for position, step in enumerate(steps):
                 kind = step.get("kind")
-                lines.append(f"  {'✓' if kind == 'completed' else '•'} {step.get('title') or 'Reasoning'}")
+                step_title = step.get("title") or "Reasoning"
+                step_current = position == len(steps) - 1 and (block.get("active", False) or not timeline.current)
+                step_stamp = timeline.stage(("block-step", block.get("index", index - 1), position, step_title),
+                                            step_title, kind or "thought",
+                                            current=step_current)
+                lines.append(f"  [{step_stamp}] {'✓' if kind == 'completed' else '•'} {step_title}")
+            if block.get("active") and block.get("current"):
+                timeline.detail(("reasoning", block.get("index", index - 1), block["current"]), block["current"])
         if index in by_after:
             _append_answer(lines, by_after[index])
-    return _limit_status(lines)
+    return _limit_status(lines, timeline.current)
 
 
-def _limit_status(lines):
-    text = "\n".join(lines)
-    if len(text) > TASK_STATUS_LIMIT:
-        text = "…" + text[-(TASK_STATUS_LIMIT - 1):].lstrip()
-    return text
+def _limit_status(lines, current):
+    header = f"Currently doing: {_current_text(current) or 'Waiting for Copilot'}"
+    body = "\n".join(lines)
+    available = TASK_STATUS_LIMIT - len(header) - 2
+    if len(body) > available:
+        body = "…" + body[-(available - 1):].lstrip()
+    return header + ("\n\n" + body if body else "")
+
+
+def format_stage_status(message: str, timeline=None, stage="job") -> str:
+    """Format a single bot stage for the shared edited progress message."""
+    timeline = timeline or StatusTimeline()
+    stamp = timeline.stage(("bot-stage", stage, message), message, stage, current=True)
+    return _limit_status([f"[{stamp}] {message}"], timeline.current)
 
 
 def format_task_status(message: str, tasks) -> str:
@@ -265,6 +373,7 @@ class RoundTrip:
 
         def read_stderr():
             live_tasks, live, current_message = None, {"blocks": [], "answers": []}, ""
+            timeline = StatusTimeline()
             for line in proc.stderr:
                 line = line.rstrip()
                 status = parse_status_event(line)
@@ -282,10 +391,8 @@ class RoundTrip:
                                           for task in live_tasks]
                         live = {"blocks": [{**block, "active": False} for block in live["blocks"]],
                                 "answers": live["answers"]}
-                    if live_tasks or live["blocks"] or live["answers"]:
-                        message = format_prompt_status(current_message, live_tasks, live["blocks"], live["answers"])
-                    else:
-                        message = current_message
+                    message = format_prompt_status(current_message, live_tasks, live["blocks"],
+                                                   live["answers"], timeline, status["stage"])
                     on_status(status["stage"], message)
                     continue
                 event = parse_live_event(line)
@@ -293,7 +400,8 @@ class RoundTrip:
                     live = event
                     if live["blocks"] or live["answers"] or live_tasks:
                         on_status("activity", format_prompt_status(
-                            current_message, live_tasks, live["blocks"], live["answers"]))
+                            current_message, live_tasks, live["blocks"], live["answers"],
+                            timeline, "activity"))
                 elif line.strip() and not line.startswith("ROUNDTRIP_CHAT:"):
                     tail.append(line.strip())
 

@@ -12,7 +12,8 @@ from .deploy import Deployer
 from .github_api import GitHub, GitHubError
 from .gitops import Git, GitError
 from .repos import RepoError, local_path, parse_repo_ref
-from .roundtrip import Cancelled, RoundTrip, RoundTripError
+from .roundtrip import (Cancelled, RoundTrip, RoundTripError, StatusTimeline,
+                        format_stage_status)
 from .state import State
 from .telegram_api import Telegram, TelegramError
 
@@ -51,8 +52,11 @@ class Progress:
     def __init__(self, tg: Telegram, chat_id: int, cfg: Config):
         self._tg, self._chat, self._cfg = tg, chat_id, cfg
         self._id, self._shown, self._pending, self._last = None, "", "", 0.0
+        self._timeline = StatusTimeline()
 
-    def update(self, text: str):
+    def update(self, text: str, stage="job"):
+        if not text.startswith("Currently doing: "):
+            text = format_stage_status(text, self._timeline, stage)
         self._pending = redact(text, self._cfg.secrets)
         if self._id is None or time.monotonic() - self._last >= self.MIN_INTERVAL:
             self.flush()
@@ -355,7 +359,8 @@ class Bot:
         progress.update(f"{full}: sending the repository to Copilot...")
         try:
             result = self.roundtrip.run(dest, request + DEPLOY_NOTE, self.state.model,
-                                        lambda stage, msg: progress.update(f"{full}: {msg}"), self._cancel,
+                                        lambda stage, msg: progress.update(self._repo_progress(full, msg), stage),
+                                        self._cancel,
                                         show_browser, temporary_chat)
         except Cancelled:
             progress.flush()
@@ -374,6 +379,14 @@ class Bot:
         deploy = self.deployer.redeploy(name, dest)
         progress.flush()
         self.say(chat_id, self._report(full, sha, pushed_branch, result, deploy))
+
+    @staticmethod
+    def _repo_progress(full: str, message: str) -> str:
+        """Keep the current-activity header first while retaining repository context."""
+        first, separator, rest = message.partition("\n")
+        if first.startswith("Currently doing: "):
+            return first + f"\nRepository: {full}" + (separator + rest if separator else "")
+        return f"{full}: {message}"
 
     def _report(self, full: str, sha: str, branch: str, result: dict, deploy) -> str:
         diff_lines = [l for l in (result.get("diff_stat") or "").splitlines() if l.strip()]

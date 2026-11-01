@@ -3,12 +3,13 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from support import git, make_config, make_origin
 from bot.deploy import DeployResult
 from bot.gitops import Git
 from bot.roundtrip import Cancelled
-from bot.service import DEPLOY_NOTE, HELP, Bot
+from bot.service import DEPLOY_NOTE, HELP, Bot, Progress
 from bot.state import State
 
 
@@ -121,6 +122,20 @@ class ServiceTests(unittest.TestCase):
         self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42, 77}))
         self.bot.handle_update(update(77))
         self.assertEqual(self.tg.sent, [HELP, HELP])
+
+    def test_progress_stages_have_a_current_header_and_zoned_timestamp(self):
+        with patch("bot.roundtrip.format_timestamp", return_value="2026-11-01 16:21:21 UTC+00:00"):
+            progress = Progress(self.tg, 1, self.cfg)
+            progress.update("Preparing repository...")
+        self.assertEqual(self.tg.sent[-1],
+                         "Currently doing: Preparing repository...\n\n"
+                         "[2026-11-01 16:21:21 UTC+00:00] Preparing repository...")
+
+    def test_repository_context_does_not_displace_the_current_header(self):
+        message = "Currently doing: Testing\n\n[2026-11-01 16:21:21 UTC+00:00] ▶ Testing"
+        self.assertEqual(self.bot._repo_progress("me/app", message),
+                         "Currently doing: Testing\nRepository: me/app\n\n"
+                         "[2026-11-01 16:21:21 UTC+00:00] ▶ Testing")
 
     def test_request_without_repository_asks_to_select_one(self):
         self.say("add a login page")
@@ -240,7 +255,6 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("Configure Cloudflare", self.tg.sent[-1])
 
     def test_cloudflare_command_routes_only_on_request(self):
-        from unittest.mock import patch
         self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
                                    cloudflare_zone_id="b" * 32)
         with patch("bot.service.CloudflareRoutes") as routes:
@@ -250,7 +264,6 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("Tunnel configured", self.tg.sent[-1])
 
     def test_cloudflare_list_and_delete_commands(self):
-        from unittest.mock import patch
         self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
                                    cloudflare_zone_id="b" * 32)
         with patch("bot.service.CloudflareRoutes") as routes:
