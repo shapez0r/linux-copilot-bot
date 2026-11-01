@@ -76,6 +76,12 @@ class CompletionTests(unittest.TestCase):
             rt.set_temporary_chat(page, rt.selectors_from_env(), False)
         page.locator.assert_not_called()
 
+    def test_visible_browser_falls_back_to_hidden_without_a_display(self):
+        self.assertTrue(rt.browser_is_headless(True, {}))
+        self.assertFalse(rt.browser_is_headless(True, {'DISPLAY': ':0'}))
+        self.assertFalse(rt.browser_is_headless(True, {'WAYLAND_DISPLAY': 'wayland-0'}))
+        self.assertTrue(rt.browser_is_headless(False, {'DISPLAY': ':0'}))
+
     def test_visible_stop_controls_define_running_state(self):
         page = Mock()
         locator = Mock()

@@ -1606,6 +1606,12 @@ def open_context(p, profile: Path, headless: bool, downloads: Path):
     )
 
 
+def browser_is_headless(show_browser: bool, environ=None) -> bool:
+    """Use hidden mode unless a visible browser was requested on an available display."""
+    environ = os.environ if environ is None else environ
+    return not show_browser or not (environ.get("DISPLAY") or environ.get("WAYLAND_DISPLAY"))
+
+
 def cmd_login(args):
     from playwright.sync_api import sync_playwright
     profile = Path(args.profile).expanduser().resolve(); profile.mkdir(parents=True, exist_ok=True)
@@ -1679,7 +1685,10 @@ def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout)
     raise_if_quit()
     with sync_playwright() as p:
         emit_status("browser", "Launching Copilot browser...")
-        ctx = open_context(p, profile, not args.show_browser, work)
+        headless = browser_is_headless(args.show_browser)
+        if args.show_browser and headless:
+            emit_status("browser", "No graphical display is available; launching Chromium hidden instead.")
+        ctx = open_context(p, profile, headless, work)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         submitted = False
         try:
@@ -1906,7 +1915,8 @@ def main():
                     help="Seconds without new on-screen output or a task-card change before giving up (default: 900)")
     fp.add_argument("--model", default="GPT/GPT-6",
                     help="Provider/model pair (default: GPT/GPT-6)")
-    fp.add_argument("--show-browser", action="store_true", help="Show Chromium during fixes (default: invisible)")
+    fp.add_argument("--show-browser", action="store_true",
+                    help="Show Chromium when a graphical display is available (default: invisible)")
     fp.add_argument("--headless", action="store_true", help="Deprecated; browser is already hidden by default")
     fp.add_argument("--allow-dirty", action="store_true")
     fp.add_argument("--temporary-chat", dest="temporary_chat", action="store_true", default=True,
