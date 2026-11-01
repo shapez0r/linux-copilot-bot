@@ -40,6 +40,9 @@ KNOWN_MODELS = (
 CREATE_APP = "➕ Create an app"
 LIST_APPS = "📱 List apps"
 FIX_APP = "🛠 Fix an app"
+START_APP = "▶️ Start an app"
+STOP_APP = "⏹ Stop an app"
+REGISTER_SERVICES = "⚙️ Register app services"
 DELETE_APP = "🗑 Delete an app"
 TUNNEL_ROUTES = "☁️ Tunnel routes"
 SELECT_REPOSITORY = "📂 Select repository"
@@ -67,6 +70,8 @@ def _keyboard(rows):
 MAIN_KEYBOARD = _keyboard([
     [CREATE_APP, LIST_APPS],
     [FIX_APP, DELETE_APP],
+    [START_APP, STOP_APP],
+    [REGISTER_SERVICES],
     [TUNNEL_ROUTES, SELECT_REPOSITORY],
     [SET_MODEL, SHOW_STATUS],
     [CANCEL_ACTION],
@@ -74,6 +79,7 @@ MAIN_KEYBOARD = _keyboard([
 USER_KEYBOARD = _keyboard([
     [CREATE_APP, LIST_APPS],
     [FIX_APP],
+    [START_APP, STOP_APP],
 ])
 MODEL_KEYBOARD = _keyboard([
     [KNOWN_MODELS[0], KNOWN_MODELS[1]],
@@ -97,12 +103,14 @@ HELP = """Use the buttons below to create and manage apps. You can also send a r
 
 /menu - show the app-management menu
 /new [public|private] [model=<provider/model>] [template=<app>] name="<name|owner/name>" prompt="<request>" - create, build, deploy and publish a new app
-/delete <name|owner/name> - permanently delete an app's GitHub repository, local checkout and tunnel route
+/delete <name|owner/name> - permanently delete an app service, GitHub repository, local checkout and tunnel route
 /repo [public|private] <name|owner/name> - select a repository; a missing one is created from the eurofish reference app
 /repo - show the active repository
 /fix <repo> <request> - select a repository and run a request in one message
 /fix [browser|nobrowser] [tempchat|notempchat] <request> - run against the active repository with per-request browser/chat options
-/list - list every local app with status and tunnel details
+/list - list every local app with systemd status and tunnel details
+/app start|stop <name> - start or stop an app service
+/register [all|<name>] - register and enable systemd services for existing local apps
 /cloudflare <subdomain> <port> - route <subdomain>.kurwalab.fyi to http://127.0.0.1:<port>
 /cloudflare list - list tunnel routes
 /cloudflare delete <subdomain> - delete a tunnel route by name
@@ -110,21 +118,22 @@ HELP = """Use the buttons below to create and manage apps. You can also send a r
 /status - show repository, model, job and app state
 /cancel - stop the running job
 /help - show this message"""
-USER_HELP = """Use the buttons below to create apps, list apps, and fix apps you created.
+USER_HELP = """Use the buttons below to create and list apps, and to fix, start, or stop apps you created.
 
 /menu - show the app menu
 /new [public|private] [model=<provider/model>] [template=<app>] name="<name|owner/name>" prompt="<request>" - create, build, deploy and publish a new app
 /fix <repo> <request> - fix an app you created
 /fix [browser|nobrowser] [tempchat|notempchat] <request> - fix your active app
-/list - list every local app with status and public URL
+/list - list every local app with systemd status and public URL
+/app start|stop <name> - start or stop one of your app services
 /cancel - stop your own running job
 /help - show this message"""
 
 ADMIN_ONLY_BUTTONS = {
     DELETE_APP, TUNNEL_ROUTES, SELECT_REPOSITORY, SET_MODEL, SHOW_STATUS,
-    LIST_ROUTES, ADD_ROUTE, DELETE_ROUTE,
+    LIST_ROUTES, ADD_ROUTE, DELETE_ROUTE, REGISTER_SERVICES,
 }
-ADMIN_ONLY_COMMANDS = {"delete", "repo", "cloudflare", "model", "status"}
+ADMIN_ONLY_COMMANDS = {"delete", "repo", "cloudflare", "model", "status", "register"}
 ADMIN_ONLY_MESSAGE = "This action is available only to kurwalab.fyi admins."
 
 _BOT_ERRORS = (RepoError, GitError, GitHubError, RoundTripError, CloudflareError, DeployError)
@@ -243,7 +252,8 @@ class Bot:
         if text == CANCEL_ACTION:
             self.cmd_cancel(chat_id, user_id)
             return
-        if text in (CREATE_APP, LIST_APPS, FIX_APP, DELETE_APP, TUNNEL_ROUTES,
+        if text in (CREATE_APP, LIST_APPS, FIX_APP, START_APP, STOP_APP, REGISTER_SERVICES,
+                    DELETE_APP, TUNNEL_ROUTES,
                     SELECT_REPOSITORY, SET_MODEL, SHOW_STATUS, LIST_ROUTES, ADD_ROUTE, DELETE_ROUTE):
             self._handle_menu_button(chat_id, text, user_id)
             return
@@ -276,6 +286,10 @@ class Bot:
             self.cmd_fix(chat_id, arg, user_id)
         elif command == "list":
             self.cmd_list(chat_id, arg, user_id)
+        elif command == "app":
+            self.cmd_app(chat_id, arg, user_id)
+        elif command == "register":
+            self.cmd_register(chat_id, arg, user_id)
         elif command == "cloudflare":
             self.cmd_cloudflare(chat_id, arg)
         elif command == "model":
@@ -296,6 +310,8 @@ class Bot:
             self.cmd_list(chat_id, "", user_id)
         elif label == SHOW_STATUS:
             self.cmd_status(chat_id, user_id)
+        elif label == REGISTER_SERVICES:
+            self.cmd_register(chat_id, "all", user_id)
         elif label == TUNNEL_ROUTES:
             self._dialogs.pop(chat_id, None)
             self.say_keyboard(chat_id, "Manage Cloudflare Tunnel routes.", ROUTES_KEYBOARD)
@@ -325,6 +341,16 @@ class Bot:
                 "Choose an app or enter its repository as `name` or `owner/name`.",
                 self._choice_keyboard(choices),
             )
+        elif label in (START_APP, STOP_APP):
+            choices = self._manageable_app_names(user_id)
+            if not choices:
+                self.say(chat_id, "You do not have any apps to manage." if not self._is_admin(user_id)
+                         else "No apps are available.")
+                return
+            action = "start" if label == START_APP else "stop"
+            self._dialogs[chat_id] = {"flow": "app-control", "step": action, "data": {},
+                                      "user_id": user_id}
+            self.say_keyboard(chat_id, f"Choose an app to {action}.", self._choice_keyboard(choices))
         elif label == DELETE_APP:
             if self._job_blocks_dialog(chat_id):
                 return
@@ -374,12 +400,36 @@ class Bot:
             choices.insert(0, active)
         return list(dict.fromkeys(choices))
 
+    def _app_directories(self):
+        return sorted(
+            (path for path in self.cfg.repos_dir.iterdir()
+             if path.is_dir() and not self.deployer.is_bot_repo(path)),
+            key=lambda path: path.name.lower(),
+        )
+
+    def _tracked_repo_for_app(self, app: str):
+        matches = [repo for repo in self.state.app_owners
+                   if repo.rsplit("/", 1)[-1].lower() == app.lower()]
+        return matches[0] if len(matches) == 1 else None
+
+    def _can_manage_app(self, user_id, app: str) -> bool:
+        if self._is_admin(user_id):
+            return True
+        repo = self._tracked_repo_for_app(app)
+        return bool(repo and self.state.app_owner(repo) == telegram_owner(user_id))
+
+    def _manageable_app_names(self, user_id=None):
+        try:
+            folders = self._app_directories()
+        except OSError:
+            return []
+        return [folder.name for folder in folders if self._can_manage_app(user_id, folder.name)]
+
     def _register_running_apps(self):
         running = self.deployer.running_apps()
         changed = False
         for app, _ in running:
-            matches = [repo for repo in self.state.app_owners if repo.rsplit("/", 1)[-1].lower() == app.lower()]
-            if not matches:
+            if not self._tracked_repo_for_app(app):
                 self.state.set_app_owner(f"{self._owner_default()}/{app}", ADMIN_OWNER)
                 changed = True
         if changed:
@@ -410,6 +460,10 @@ class Bot:
             self._handle_repo_dialog(chat_id, text, user_id)
         elif flow == "model":
             self._handle_model_dialog(chat_id, dialog, text)
+        elif flow == "app-control":
+            action = dialog["step"]
+            self._dialogs.pop(chat_id, None)
+            self.cmd_app(chat_id, f"{action} {text.strip()}", user_id)
         elif flow == "route-add":
             self._handle_route_add_dialog(chat_id, dialog, text)
         elif flow == "route-delete":
@@ -725,18 +779,82 @@ class Bot:
                  f"Job: {'running' if self._lock.locked() else 'idle'}"]
         if active:
             name = active.split("/", 1)[1]
-            lines.append(f"App: {self.deployer.status(name, local_path(self.cfg.repos_dir, name))}")
+            try:
+                status = self.deployer.status(name, local_path(self.cfg.repos_dir, name))
+            except DeployError as error:
+                status = f"unavailable ({error})"
+            lines.append(f"App: {status}")
         self.say(chat_id, "\n".join(lines))
+
+    def cmd_app(self, chat_id: int, arg: str, user_id=None):
+        parts = arg.split()
+        if len(parts) != 2 or parts[0].lower() not in ("start", "stop"):
+            self.say(chat_id, "Usage: /app start|stop <name>")
+            return
+        action, name = parts[0].lower(), parts[1]
+        if not self._valid_route(name):
+            self.say(chat_id, "App names must be lowercase DNS labels containing only letters, digits and hyphens.")
+            return
+        folder = self.cfg.repos_dir / name
+        if not folder.is_dir() or self.deployer.is_bot_repo(folder):
+            self.say(chat_id, f"App folder not found: {folder}")
+            return
+        if not self._can_manage_app(user_id, name):
+            self.say(chat_id, "You can only start or stop apps you created.")
+            return
+
+        def control():
+            if action == "start":
+                result = self.deployer.start(name, folder)
+                self.say(chat_id, ("✅ " if result.ok else "⚠️ ") + result.message)
+            else:
+                stopped = self.deployer.stop(name, folder)
+                message = (f"Systemd service {self.deployer.service_name(name)} is stopped."
+                           if stopped else f"Systemd service {self.deployer.service_name(name)} was already stopped "
+                                           "or is not registered.")
+                self.say(chat_id, "✅ " + message)
+
+        self._spawn(chat_id, control, user_id=user_id)
+
+    def cmd_register(self, chat_id: int, arg: str, user_id=None):
+        target = arg.strip() or "all"
+        if target != "all" and (len(target.split()) != 1 or not self._valid_route(target)):
+            self.say(chat_id, "Usage: /register [all|<name>]")
+            return
+
+        def register():
+            try:
+                folders = self._app_directories()
+            except OSError as error:
+                self.say(chat_id, f"Could not read the apps folder: {error}")
+                return
+            if target != "all":
+                folders = [folder for folder in folders if folder.name == target]
+            if not folders:
+                self.say(chat_id, "No matching apps are available.")
+                return
+            lines = ["Systemd app service registration:"]
+            changed = False
+            for folder in folders:
+                try:
+                    lines.append(f"- {folder.name}: {self.deployer.ensure_service(folder.name, folder)}")
+                    if not self._tracked_repo_for_app(folder.name):
+                        self.state.set_app_owner(f"{self._owner_default()}/{folder.name}", ADMIN_OWNER)
+                        changed = True
+                except (DeployError, OSError) as error:
+                    lines.append(f"- {folder.name}: failed: {error}")
+            if changed:
+                self.state.save()
+            self.say(chat_id, "\n".join(lines))
+
+        self._spawn(chat_id, register, user_id=user_id)
 
     def cmd_list(self, chat_id: int, arg: str, user_id=None):
         if arg:
             self.say(chat_id, "Usage: /list")
             return
         try:
-            apps = sorted(
-                (path for path in self.cfg.repos_dir.iterdir() if path.is_dir()),
-                key=lambda path: path.name.lower(),
-            )
+            apps = self._app_directories()
         except OSError as error:
             self.say(chat_id, f"Could not read the apps folder: {error}")
             return
@@ -744,7 +862,6 @@ class Bot:
             self.say(chat_id, "No apps are available.")
             return
 
-        running = {name.lower() for name, _ in self.deployer.running_apps()}
         routes = {}
         routes_available = self.cfg.cloudflare_enabled
         if routes_available:
@@ -757,7 +874,10 @@ class Bot:
         lines = ["Apps:"]
         for folder in apps:
             name = folder.name
-            status = "running" if name.lower() in running else "stopped"
+            try:
+                status = self.deployer.status(name, folder)
+            except DeployError as error:
+                status = f"unavailable ({error})"
             route = routes.get(name.lower())
             if route:
                 port = route["service"].rsplit(":", 1)[-1].rstrip("/")
@@ -1081,7 +1201,7 @@ class Bot:
                               f"Copilot output:\n{output}")
             return
         sha, pushed_branch = pushed
-        progress.update(f"{full}: deploying with make run on port {port}...")
+        progress.update(f"{full}: registering and restarting its systemd service on port {port}...")
         deploy = self.deployer.redeploy(name, dest)
         if not deploy.ok:
             progress.flush()
@@ -1096,17 +1216,9 @@ class Bot:
             self.say(chat_id, self._new_app_report(full, sha, pushed_branch, result, deploy.message,
                                                    error=f"Tunnel setup failed: {error}"))
             return
-        progress.update(f"{full}: adding reboot startup to crontab...")
-        try:
-            startup = self.deployer.ensure_reboot(dest)
-        except DeployError as error:
-            progress.flush()
-            self.say(chat_id, self._new_app_report(full, sha, pushed_branch, result, deploy.message,
-                                                   tunnel=tunnel, error=f"Crontab setup failed: {error}"))
-            return
         progress.flush()
         self.say(chat_id, self._new_app_report(full, sha, pushed_branch, result, deploy.message,
-                                               tunnel=tunnel, startup=startup,
+                                               tunnel=tunnel,
                                                url=f"https://{name}.{self.cfg.cloudflare_domain}"))
 
     def _delete_app(self, chat_id: int, ref: str):
@@ -1123,20 +1235,22 @@ class Bot:
                 owner, owner_error = None, error
         full = f"{owner}/{name}" if owner else name
         dest = local_path(self.cfg.repos_dir, name)
+        if self.deployer.is_bot_repo(dest):
+            raise RepoError("The bot repository cannot be deleted as an app.")
 
         failed = False
         try:
             stopped = self.deployer.stop(name, dest)
-            process = "Process: stopped the running app." if stopped else "Process: no running app was recorded."
+            process = "Service process: stopped the running app." if stopped else "Service process: no running app was recorded."
         except (DeployError, OSError) as error:
             failed = True
-            process = f"Process: failed to stop: {error}"
+            process = f"Service process: failed to stop: {error}"
 
         try:
-            startup = self.deployer.remove_reboot(dest)
+            startup = self.deployer.unregister(name, dest)
         except (DeployError, OSError) as error:
             failed = True
-            startup = f"Startup: failed to remove the reboot entry: {error}"
+            startup = f"Service: failed to unregister: {error}"
 
         github_clean = False
         if owner_error is not None:
@@ -1228,7 +1342,7 @@ class Bot:
             self.say(chat_id, f"Copilot returned no changes to commit for {full}; nothing was deployed.")
             return
         sha, pushed_branch = pushed
-        progress.update(f"{full}: redeploying with make run...")
+        progress.update(f"{full}: restarting its systemd service...")
         deploy = self.deployer.redeploy(name, dest)
         progress.flush()
         self.say(chat_id, self._report(full, sha, pushed_branch, result, deploy))

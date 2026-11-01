@@ -1,21 +1,15 @@
-# Install as /etc/systemd/system/copilot-telegram-bot.service after replacing User and the paths,
-# then: sudo systemctl daemon-reload && sudo systemctl enable --now copilot-telegram-bot
+# Install as ~/.config/systemd/user/copilot-telegram-bot.service, then run:
+# systemctl --user daemon-reload && systemctl --user enable --now copilot-telegram-bot
 [Unit]
 Description=Copilot Telegram repository bot
-After=network-online.target
-Wants=network-online.target
 
 [Service]
-User=ubuntu
-WorkingDirectory=/opt/copilot-telegram-bot
-ExecStart=/opt/copilot-telegram-bot/.venv/bin/python -m bot
-Environment=PYTHONUNBUFFERED=1
+Type=simple
+WorkingDirectory=/home/localadmin/repos/linux-copilot-bot
+ExecStart=/usr/bin/make run
 Restart=on-failure
 RestartSec=10
-# Stopping the bot waits for a running job to cancel.
 TimeoutStopSec=90
-# Deployed apps run detached from the bot and must survive bot restarts.
-KillMode=process
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import shutil
 import signal
 import subprocess
@@ -10,7 +11,7 @@ import sys
 import threading
 
 from . import config
-from .deploy import Deployer
+from .deploy import DeployError, Deployer
 from .github_api import GitHub, GitHubError
 from .gitops import Git
 from .roundtrip import RoundTrip
@@ -56,7 +57,15 @@ def main(argv=None) -> int:
     cfg.repos_dir.mkdir(parents=True, exist_ok=True)
     cfg.state_dir.mkdir(parents=True, exist_ok=True)
 
-    bot = Bot(cfg, Telegram(cfg.telegram_token), gh, Git(cfg, gh.login), RoundTrip(cfg), Deployer(cfg),
+    deployer = Deployer(cfg)
+    if os.environ.get("INVOCATION_ID"):
+        log.info("The bot is running under systemd; self-registration is not needed.")
+    else:
+        try:
+            log.info("%s", deployer.ensure_bot_service(config.ROOT))
+        except DeployError as error:
+            log.warning("Bot service registration failed: %s", config.redact(str(error), cfg.secrets))
+    bot = Bot(cfg, Telegram(cfg.telegram_token), gh, Git(cfg, gh.login), RoundTrip(cfg), deployer,
               State(cfg.state_dir / "state.json", cfg.model))
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):

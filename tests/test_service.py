@@ -13,7 +13,7 @@ from bot.gitops import Git, GitError
 from bot.roundtrip import Cancelled
 from bot.service import (CONFIRM_DELETE, CREATE_APP, CUSTOM_MODEL, DELETE_APP, DEPLOY_NOTE,
                          FIX_APP, HELP, KNOWN_MODELS, MAIN_KEYBOARD, NEW_APP_PROMPT, USER_HELP,
-                         USER_KEYBOARD, Bot, Progress)
+                         USER_KEYBOARD, REGISTER_SERVICES, START_APP, STOP_APP, Bot, Progress)
 from bot.state import ADMIN_OWNER, State, telegram_owner
 
 
@@ -92,19 +92,27 @@ class FakeRoundTrip:
 
 class FakeDeployer:
     def __init__(self, ok=True):
-        self.ok, self.calls, self.reboots, self.running = ok, [], [], []
-        self.stops, self.removed_reboots, self.stop_result = [], [], False
+        self.ok, self.calls, self.registered, self.running = ok, [], [], []
+        self.starts, self.stops, self.unregistered, self.stop_result = [], [], [], False
+        self.statuses = {}
 
     def redeploy(self, app, repo_dir):
         self.calls.append((app, Path(repo_dir)))
-        return DeployResult(self.ok, "`make run` is running (pid 1)." if self.ok else "`make run` exited with code 2.")
+        self.registered.append((app, Path(repo_dir)))
+        return DeployResult(self.ok, f"Systemd service copilot-app-{app}.service is running (pid 1)."
+                            if self.ok else f"Systemd service copilot-app-{app}.service failed.")
 
-    def ensure_reboot(self, repo_dir):
-        self.reboots.append(Path(repo_dir))
-        return f"Startup: added `@reboot cd {repo_dir} && git pull && make run` to crontab."
+    def ensure_service(self, app, repo_dir):
+        self.registered.append((app, Path(repo_dir)))
+        return f"Service copilot-app-{app}.service is registered and enabled."
+
+    def start(self, app, repo_dir):
+        self.starts.append((app, Path(repo_dir)))
+        return DeployResult(self.ok, f"Systemd service copilot-app-{app}.service is running (pid 1).")
 
     def status(self, app, repo_dir):
-        return "not running"
+        return self.statuses.get(
+            app, "running (pid 1)" if any(name == app for name, _ in self.running) else "stopped")
 
     def running_apps(self):
         return self.running
@@ -113,9 +121,17 @@ class FakeDeployer:
         self.stops.append((app, Path(repo_dir)))
         return self.stop_result
 
-    def remove_reboot(self, repo_dir):
-        self.removed_reboots.append(Path(repo_dir))
-        return "Startup: removed the reboot entry."
+    def unregister(self, app, repo_dir):
+        self.unregistered.append((app, Path(repo_dir)))
+        return f"Service: disabled and removed copilot-app-{app}.service."
+
+    @staticmethod
+    def service_name(app):
+        return f"copilot-app-{app}.service"
+
+    @staticmethod
+    def is_bot_repo(path):
+        return Path(path).name == "linux-copilot-bot"
 
 
 class ServiceTests(unittest.TestCase):
@@ -167,22 +183,25 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("Create and manage apps", self.tg.sent[-1])
         self.assertEqual(self.tg.markups[-1], MAIN_KEYBOARD)
 
-    def test_regular_users_see_only_create_list_and_fix_options(self):
+    def test_regular_users_see_create_list_fix_and_own_app_controls(self):
         self.bot.cfg = make_config(self.tmp, user_ids=frozenset({77}))
         self.user_say(77, "/start")
         self.assertEqual(self.tg.markups[-1], USER_KEYBOARD)
         labels = {button["text"] for row in USER_KEYBOARD["keyboard"] for button in row}
-        self.assertEqual(labels, {CREATE_APP, "📱 List apps", FIX_APP})
+        self.assertEqual(labels, {CREATE_APP, "📱 List apps", FIX_APP, START_APP, STOP_APP})
         self.user_say(77, "/help")
         self.assertEqual(self.tg.sent[-1], USER_HELP)
 
     def test_regular_users_cannot_invoke_admin_commands_or_buttons(self):
         self.bot.cfg = make_config(self.tmp, user_ids=frozenset({77}))
-        for command in ("/delete app", "/repo app", "/cloudflare list", "/model GPT/GPT-6", "/status"):
+        for command in ("/delete app", "/repo app", "/cloudflare list", "/model GPT/GPT-6", "/status",
+                        "/register"):
             with self.subTest(command=command):
                 self.user_say(77, command)
                 self.assertIn("only to kurwalab.fyi admins", self.tg.sent[-1])
         self.user_say(77, DELETE_APP)
+        self.assertIn("only to kurwalab.fyi admins", self.tg.sent[-1])
+        self.user_say(77, REGISTER_SERVICES)
         self.assertIn("only to kurwalab.fyi admins", self.tg.sent[-1])
 
     def test_regular_users_see_only_their_apps_in_the_fix_picker(self):
@@ -313,7 +332,7 @@ class ServiceTests(unittest.TestCase):
         routes.return_value.next_port.assert_called_once_with()
         routes.return_value.prepare.assert_called_once_with("fresh-app", 8081)
         self.assertEqual(self.deployer.calls, [("fresh-app", self.cfg.repos_dir / "fresh-app")])
-        self.assertEqual(self.deployer.reboots, [self.cfg.repos_dir / "fresh-app"])
+        self.assertEqual(self.deployer.registered, [("fresh-app", self.cfg.repos_dir / "fresh-app")])
         self.assertEqual(self.state.app_owner("me/fresh-app"), ADMIN_OWNER)
         report = self.tg.sent[-1]
         self.assertIn("https://fresh-app.kurwalab.fyi", report)
@@ -550,12 +569,12 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.gh.deleted, ["me/app"])
         self.assertFalse(self.dest.exists())
         self.assertEqual(self.deployer.stops, [("app", self.dest)])
-        self.assertEqual(self.deployer.removed_reboots, [self.dest])
+        self.assertEqual(self.deployer.unregistered, [("app", self.dest)])
         self.assertEqual(self.state.repo, "")
         self.assertEqual(State(self.tmp / "state.json", "x").repo, "")
         self.assertEqual(self.state.app_owner("me/app"), "")
         self.assertIn("Deletion completed for me/app", self.tg.sent[-1])
-        self.assertIn("Process: stopped the running app", self.tg.sent[-1])
+        self.assertIn("Service process: stopped the running app", self.tg.sent[-1])
 
     def test_delete_validates_arguments_and_app_name(self):
         self.say("/delete")
@@ -564,6 +583,12 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("Usage: /delete", self.tg.sent[-1])
         self.say("/delete BadName")
         self.assertIn("lowercase DNS labels", self.tg.sent[-1])
+        self.assertEqual(self.gh.deleted, [])
+
+    def test_delete_refuses_the_bot_repository(self):
+        (self.cfg.repos_dir / "linux-copilot-bot").mkdir(exist_ok=True)
+        self.say("/delete linux-copilot-bot")
+        self.assertIn("cannot be deleted as an app", self.tg.sent[-1])
         self.assertEqual(self.gh.deleted, [])
 
     def test_delete_without_cloudflare_still_attempts_github_and_local_cleanup(self):
@@ -675,7 +700,7 @@ class ServiceTests(unittest.TestCase):
         self.deployer.ok = False
         self.say("/fix app break it")
         self.assertIn("redeploy failed", self.tg.sent[-1])
-        self.assertIn("exited with code 2", self.tg.sent[-1])
+        self.assertIn("copilot-app-app.service failed", self.tg.sent[-1])
 
     def test_cancelled_run_reports_and_does_not_commit(self):
         self.rt.behavior = "cancel"
@@ -729,6 +754,46 @@ class ServiceTests(unittest.TestCase):
         self.say("/fix")
         self.assertIn("Usage", self.tg.sent[-1])
 
+    def test_admin_registers_all_existing_apps_but_not_the_bot_folder(self):
+        for name in ("existing-one", "existing-two", "linux-copilot-bot"):
+            (self.cfg.repos_dir / name).mkdir(exist_ok=True)
+        self.say("/register")
+        registered = {name for name, _ in self.deployer.registered}
+        self.assertIn("eurofish", registered)
+        self.assertIn("existing-one", registered)
+        self.assertIn("existing-two", registered)
+        self.assertNotIn("linux-copilot-bot", registered)
+        self.assertEqual(self.state.app_owner("me/existing-one"), ADMIN_OWNER)
+        self.assertIn("Systemd app service registration", self.tg.sent[-1])
+
+    def test_app_controls_enforce_regular_user_ownership(self):
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77, 88}))
+        for name in ("mine", "theirs"):
+            (self.cfg.repos_dir / name).mkdir(exist_ok=True)
+        self.state.set_app_owner("me/mine", telegram_owner(77))
+        self.state.set_app_owner("me/theirs", telegram_owner(88))
+        self.user_say(77, "/app start mine")
+        self.assertEqual(self.deployer.starts, [("mine", self.cfg.repos_dir / "mine")])
+        self.deployer.stop_result = True
+        self.user_say(77, "/app stop mine")
+        self.assertEqual(self.deployer.stops, [("mine", self.cfg.repos_dir / "mine")])
+        self.user_say(77, "/app stop theirs")
+        self.assertIn("only start or stop apps you created", self.tg.sent[-1])
+        self.assertEqual(self.deployer.stops, [("mine", self.cfg.repos_dir / "mine")])
+        self.say("/app start theirs")
+        self.assertEqual(self.deployer.starts[-1], ("theirs", self.cfg.repos_dir / "theirs"))
+
+    def test_app_control_buttons_show_only_regular_users_owned_apps(self):
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77, 88}))
+        for name in ("mine", "theirs"):
+            (self.cfg.repos_dir / name).mkdir(exist_ok=True)
+        self.state.set_app_owner("me/mine", telegram_owner(77))
+        self.state.set_app_owner("me/theirs", telegram_owner(88))
+        self.user_say(77, START_APP)
+        labels = {button["text"] for row in self.tg.markups[-1]["keyboard"] for button in row}
+        self.assertIn("mine", labels)
+        self.assertNotIn("theirs", labels)
+
     def test_list_reports_every_local_folder_with_admin_details(self):
         for name in ("ihatepdf", "eurofish", "stravall", "carcalendar", "eurocat"):
             (self.cfg.repos_dir / name).mkdir(exist_ok=True)
@@ -754,6 +819,13 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("name: ihatepdf — status: stopped", listing)
         self.assertIn("port: not configured — url: not configured", listing)
 
+    def test_list_excludes_the_bot_and_uses_detailed_systemd_status(self):
+        (self.cfg.repos_dir / "linux-copilot-bot").mkdir(exist_ok=True)
+        self.deployer.statuses["eurofish"] = "failed"
+        self.say("/list")
+        self.assertIn("name: eurofish — status: failed", self.tg.sent[-1])
+        self.assertNotIn("linux-copilot-bot", self.tg.sent[-1])
+
     def test_regular_list_omits_admin_only_folder_and_port(self):
         self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}),
                                    cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
@@ -767,7 +839,7 @@ class ServiceTests(unittest.TestCase):
             self.user_say(77, "/list")
         self.assertEqual(
             self.tg.sent[-1],
-            "Apps:\n- name: eurofish — status: running — url: https://eurofish.kurwalab.fyi",
+            "Apps:\n- name: eurofish — status: running (pid 1) — url: https://eurofish.kurwalab.fyi",
         )
 
     def test_list_reports_unavailable_routes_without_cloudflare_configuration(self):

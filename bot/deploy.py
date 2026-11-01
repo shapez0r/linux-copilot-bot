@@ -1,18 +1,21 @@
-"""Runs each app in the background without changing tunnel routes."""
+"""Registers and controls bot-managed applications as systemd user services."""
 from __future__ import annotations
 
-import json
 import os
+import re
 import shlex
-import signal
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import SECRET_NAMES, Config
+from .config import ROOT, SECRET_NAMES, Config
 
-STOP_GRACE_SECONDS = 15
+SYSTEMD_TIMEOUT_SECONDS = 30
+APP_SERVICE_PREFIX = "copilot-app-"
+BOT_SERVICE = "copilot-telegram-bot.service"
+_APP_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 
 
 @dataclass
@@ -21,12 +24,39 @@ class DeployResult:
     message: str
 
 
+@dataclass(frozen=True)
+class ServiceState:
+    load: str = "not-found"
+    active: str = "inactive"
+    sub: str = "dead"
+    pid: int = 0
+
+    @property
+    def registered(self) -> bool:
+        return self.load == "loaded"
+
+    @property
+    def running(self) -> bool:
+        return self.active == "active"
+
+    def display(self) -> str:
+        if not self.registered:
+            return "not registered"
+        if self.running:
+            return f"running (pid {self.pid})" if self.pid else "running"
+        if self.active == "inactive":
+            return "stopped"
+        if self.active == "failed":
+            return "failed"
+        return f"{self.active} ({self.sub})" if self.sub and self.sub != self.active else self.active
+
+
 class DeployError(RuntimeError):
-    """Raised when deployment startup configuration cannot be updated safely."""
+    """Raised when a systemd service cannot be managed safely."""
 
 
 def app_env(environ=None) -> dict:
-    """Environment for deployed apps: no bot secrets and no leakage of the bot's own virtualenv."""
+    """Return an app environment without bot secrets or the bot virtual environment."""
     env = {k: v for k, v in (os.environ if environ is None else environ).items() if k not in SECRET_NAMES}
     venv = env.pop("VIRTUAL_ENV", "")
     if venv:
@@ -35,168 +65,309 @@ def app_env(environ=None) -> dict:
     return env
 
 
-def _alive(pid: int) -> bool:
-    """True for a running process; zombies count as exited."""
-    try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
-    except OSError:
-        return False
-    return stat[stat.rindex(")") + 2:].split()[0] != "Z"
-
-
-def _cwd(pid: int):
-    try:
-        return Path(os.readlink(f"/proc/{pid}/cwd"))
-    except OSError:
-        return None
+def _unit_path(value: str) -> str:
+    """Escape a path for a systemd directive."""
+    return (value.replace("%", "%%").replace("\\", "\\x5c").replace(" ", "\\x20")
+            .replace("\t", "\\x09").replace("\r", "\\x0d").replace("\n", "\\x0a"))
 
 
 class Deployer:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, bot_repo_dir: Path = ROOT):
         self._cfg = cfg
-        self._run_dir = cfg.state_dir / "run"
+        self._bot_repo_dir = Path(bot_repo_dir).resolve()
         self._log_dir = cfg.state_dir / "logs"
-        self._children = {}  # Popen handles started by this process, so exited apps are reaped.
+        self._unit_dir = Path.home() / ".config" / "systemd" / "user"
 
     def log_path(self, app: str) -> Path:
         return self._log_dir / f"{app}.log"
 
-    def _pid_file(self, app: str) -> Path:
-        return self._run_dir / f"{app}.pid"
-
-    def _read_pid(self, app: str):
+    def is_bot_repo(self, path: Path) -> bool:
         try:
-            return int(json.loads(self._pid_file(app).read_text())["pid"])
-        except (OSError, ValueError, KeyError, TypeError):
-            return None
+            return path.resolve() == self._bot_repo_dir or path.name == "linux-copilot-bot"
+        except OSError:
+            return False
+
+    @staticmethod
+    def service_name(app: str) -> str:
+        if not _APP_NAME.fullmatch(app):
+            raise DeployError(f"invalid app name for a systemd service: {app}")
+        return f"{APP_SERVICE_PREFIX}{app}.service"
+
+    def service_path(self, app: str) -> Path:
+        return self._unit_dir / self.service_name(app)
 
     def has_run_target(self, repo_dir: Path) -> bool:
-        """Whether `make run` resolves to a recipe (checked with a dry run)."""
-        done = subprocess.run(["make", "-n", "run"], cwd=repo_dir, env=app_env(), stdin=subprocess.DEVNULL,
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        """Return whether `make run` resolves to a recipe."""
+        try:
+            done = subprocess.run(
+                ["make", "-n", "run"], cwd=repo_dir, env=app_env(), stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
         return done.returncode == 0
 
+    def _validate_repo(self, app: str, repo_dir: Path, must_exist: bool = True):
+        self.service_name(app)
+        try:
+            resolved = repo_dir.resolve(strict=must_exist)
+            parent = self._cfg.repos_dir.resolve(strict=True)
+        except OSError as error:
+            raise DeployError(f"cannot resolve the app folder: {error}") from None
+        if resolved.parent != parent or resolved.name != app or (must_exist and not resolved.is_dir()):
+            raise DeployError(f"app folder must be {self._cfg.repos_dir / app}")
+        if self.is_bot_repo(resolved):
+            raise DeployError("the bot repository is not an app")
+
+    def _systemctl(self, args: list[str], check: bool = True):
+        command = ["systemctl", "--user", *args]
+        env = os.environ.copy()
+        runtime = Path(f"/run/user/{os.getuid()}")
+        if runtime.is_dir():
+            env.setdefault("XDG_RUNTIME_DIR", str(runtime))
+        try:
+            done = subprocess.run(
+                command, text=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, timeout=SYSTEMD_TIMEOUT_SECONDS, env=env,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise DeployError(f"cannot run {' '.join(command)}: {error}") from None
+        if check and done.returncode != 0:
+            detail = done.stderr.strip() or done.stdout.strip() or f"exit code {done.returncode}"
+            raise DeployError(f"{' '.join(command)} failed: {detail[-600:]}")
+        return done
+
+    def _state(self, service: str) -> ServiceState:
+        done = self._systemctl([
+            "show", service, "--no-pager", "--property=LoadState", "--property=ActiveState",
+            "--property=SubState", "--property=MainPID",
+        ], check=False)
+        values = {}
+        for line in done.stdout.splitlines():
+            key, separator, value = line.partition("=")
+            if separator:
+                values[key] = value
+        if done.returncode != 0 and not values:
+            detail = done.stderr.strip() or done.stdout.strip() or f"exit code {done.returncode}"
+            raise DeployError(f"cannot read systemd service {service}: {detail[-600:]}")
+        try:
+            pid = int(values.get("MainPID") or 0)
+        except ValueError:
+            pid = 0
+        return ServiceState(
+            load=values.get("LoadState", "not-found"),
+            active=values.get("ActiveState", "inactive"),
+            sub=values.get("SubState", "dead"),
+            pid=pid,
+        )
+
+    def service_state(self, app: str) -> ServiceState:
+        return self._state(self.service_name(app))
+
     def status(self, app: str, repo_dir: Path) -> str:
-        pid = self._read_pid(app)
-        if pid and _alive(pid) and _cwd(pid) == repo_dir.resolve():
-            return f"running (pid {pid})"
-        return "not running"
+        self._validate_repo(app, repo_dir)
+        return self.service_state(app).display()
 
     def running_apps(self) -> list[tuple[str, int]]:
-        """Return app names and process ids for verified live deployments."""
-        apps = []
-        for pid_file in self._run_dir.glob("*.pid"):
-            app = pid_file.stem
-            pid = self._read_pid(app)
-            repo_dir = self._cfg.repos_dir / app
-            if pid and _alive(pid) and _cwd(pid) == repo_dir.resolve():
-                apps.append((app, pid))
-        return sorted(apps)
-
-    def stop(self, app: str, repo_dir: Path) -> bool:
-        """Stop the process group started by an earlier deploy; True when a group was signalled."""
-        pid = self._read_pid(app)
-        handle = self._children.pop(app, None)
-        self._pid_file(app).unlink(missing_ok=True)
-        if pid is None:
-            return False
-        if _alive(pid) and _cwd(pid) != repo_dir.resolve():
-            return False  # Stale pid reused by an unrelated process.
+        """Return local apps whose systemd services are active."""
         try:
-            os.killpg(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            if handle is not None:
-                handle.poll()
-            return False
-        if not self._wait_gone(pid, handle, STOP_GRACE_SECONDS):
+            folders = sorted(path for path in self._cfg.repos_dir.iterdir()
+                             if path.is_dir() and not self.is_bot_repo(path))
+        except OSError:
+            return []
+        running = []
+        for folder in folders:
+            if not _APP_NAME.fullmatch(folder.name):
+                continue
             try:
-                os.killpg(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            self._wait_gone(pid, handle, 5)
-        return True
+                state = self.service_state(folder.name)
+            except DeployError:
+                continue
+            if state.running:
+                running.append((folder.name, state.pid))
+        return running
 
-    @staticmethod
-    def _wait_gone(pid: int, handle, seconds: float) -> bool:
-        """Wait until no process of the group remains; reaps the leader when this process started it."""
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            if handle is not None:
-                handle.poll()
-            try:
-                os.killpg(pid, 0)
-            except ProcessLookupError:
-                return True
-            time.sleep(0.2)
-        return False
-
-    def redeploy(self, app: str, repo_dir: Path) -> DeployResult:
-        """Stop the previous instance, start `make run` and report whether it stayed up."""
-        if not self.has_run_target(repo_dir):
-            return DeployResult(False, "No `run` target in the Makefile; nothing was started.")
-        self.stop(app, repo_dir)
-        self._log_dir.mkdir(parents=True, exist_ok=True)
-        self._run_dir.mkdir(parents=True, exist_ok=True)
-        log_path = self.log_path(app)
-        with open(log_path, "ab") as log:
-            log.write(f"\n=== make run {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n".encode())
-            log.flush()
-            proc = subprocess.Popen(["make", "run"], cwd=repo_dir, env=app_env(), stdin=subprocess.DEVNULL,
-                                    stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        deadline = time.monotonic() + self._cfg.settle_seconds
-        while time.monotonic() < deadline and proc.poll() is None:
-            time.sleep(0.25)
-        code = proc.poll()
-        if code is None:
-            self._children[app] = proc
-            self._pid_file(app).write_text(json.dumps({"pid": proc.pid}))
-            message = f"`make run` is running (pid {proc.pid})."
-            return DeployResult(True, message)
-        if code == 0:
-            return DeployResult(True, "`make run` finished successfully.")
-        return DeployResult(False, f"`make run` exited with code {code}.\n{self.log_tail(app)}")
-
-    def ensure_reboot(self, repo_dir: Path) -> str:
-        """Add an idempotent user-crontab entry that updates and starts the app at reboot."""
-        line = f"@reboot cd {shlex.quote(str(repo_dir))} && git pull && make run"
-        entries = self._read_crontab()
-        if line in entries:
-            return f"Startup: crontab already contains `{line}`."
-        self._write_crontab([*entries, line])
-        return f"Startup: added `{line}` to crontab."
-
-    def remove_reboot(self, repo_dir: Path) -> str:
-        """Remove the exact reboot entry installed for an app."""
-        line = f"@reboot cd {shlex.quote(str(repo_dir))} && git pull && make run"
-        entries = self._read_crontab()
-        if line not in entries:
-            return "Startup: no reboot entry was present."
-        self._write_crontab([entry for entry in entries if entry != line])
-        return "Startup: removed the reboot entry."
-
-    @staticmethod
-    def _read_crontab() -> list[str]:
+    def _app_unit(self, app: str, repo_dir: Path) -> str:
+        make = shutil.which("make") or "/usr/bin/make"
         try:
-            current = subprocess.run(["crontab", "-l"], text=True, stdin=subprocess.DEVNULL,
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self._log_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise DeployError(f"cannot create the app log folder: {error}") from None
+        return "\n".join([
+            "[Unit]",
+            f"Description=Copilot-managed app: {app}",
+            "",
+            "[Service]",
+            "Type=simple",
+            f"WorkingDirectory={_unit_path(str(repo_dir.resolve()))}",
+            f"ExecStart={_unit_path(make)} run",
+            "Restart=on-failure",
+            "RestartSec=5",
+            "UnsetEnvironment=TELEGRAM_BOT_TOKEN GITHUB_TOKEN CLOUDFLARE_API_TOKEN VIRTUAL_ENV",
+            f"StandardOutput=append:{_unit_path(str(self.log_path(app)))}",
+            "StandardError=inherit",
+            "",
+            "[Install]",
+            "WantedBy=default.target",
+            "",
+        ])
+
+    def _bot_unit(self, repo_dir: Path) -> str:
+        make = shutil.which("make") or "/usr/bin/make"
+        return "\n".join([
+            "[Unit]",
+            "Description=Copilot Telegram repository bot",
+            "",
+            "[Service]",
+            "Type=simple",
+            f"WorkingDirectory={_unit_path(str(repo_dir.resolve()))}",
+            f"ExecStart={_unit_path(make)} run",
+            "Restart=on-failure",
+            "RestartSec=10",
+            "TimeoutStopSec=90",
+            "",
+            "[Install]",
+            "WantedBy=default.target",
+            "",
+        ])
+
+    def _install_unit(self, service: str, content: str) -> bool:
+        try:
+            self._unit_dir.mkdir(parents=True, exist_ok=True)
+            path = self._unit_dir / service
+            changed = not path.is_file() or path.read_text(encoding="utf-8") != content
+            if changed:
+                temporary = path.with_suffix(path.suffix + ".tmp")
+                temporary.write_text(content, encoding="utf-8")
+                temporary.replace(path)
+        except OSError as error:
+            raise DeployError(f"cannot write systemd service {service}: {error}") from None
+        if changed:
+            self._systemctl(["daemon-reload"])
+        enabled = self._systemctl(["is-enabled", service], check=False).returncode == 0
+        if not enabled:
+            self._systemctl(["enable", service])
+        return changed or not enabled
+
+    def _remove_legacy_reboot(self, repo_dir: Path) -> bool:
+        """Remove the exact app startup line when crontab is available."""
+        crontab = shutil.which("crontab")
+        if not crontab:
+            return False
+        line = f"@reboot cd {shlex.quote(str(repo_dir))} && git pull && make run"
+        try:
+            current = subprocess.run(
+                [crontab, "-l"], text=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, timeout=SYSTEMD_TIMEOUT_SECONDS,
+            )
         except (OSError, subprocess.TimeoutExpired) as error:
             raise DeployError(f"cannot read the user crontab: {error}") from None
-        if current.returncode != 0 and "no crontab" not in current.stderr.lower():
+        if current.returncode != 0:
+            if "no crontab" in current.stderr.lower():
+                return False
             detail = current.stderr.strip() or f"exit code {current.returncode}"
             raise DeployError(f"cannot read the user crontab: {detail[-400:]}")
-        return current.stdout.splitlines() if current.returncode == 0 else []
-
-    @staticmethod
-    def _write_crontab(entries: list[str]):
-        content = "\n".join(entries) + "\n"
+        if line not in current.stdout.splitlines():
+            return False
+        remaining = [entry for entry in current.stdout.splitlines() if entry != line]
         try:
-            installed = subprocess.run(["crontab", "-"], input=content, text=True, stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE, timeout=30)
+            installed = subprocess.run(
+                [crontab, "-"], input="\n".join(remaining) + "\n", text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=SYSTEMD_TIMEOUT_SECONDS,
+            )
         except (OSError, subprocess.TimeoutExpired) as error:
-            raise DeployError(f"cannot update the user crontab: {error}") from None
+            raise DeployError(f"cannot remove the legacy reboot entry: {error}") from None
         if installed.returncode != 0:
             detail = installed.stderr.strip() or f"exit code {installed.returncode}"
-            raise DeployError(f"cannot update the user crontab: {detail[-400:]}")
+            raise DeployError(f"cannot remove the legacy reboot entry: {detail[-400:]}")
+        return True
+
+    def ensure_bot_service(self, repo_dir: Path) -> str:
+        """Install and enable the bot unit without starting a second bot process."""
+        repo_dir = Path(repo_dir).resolve()
+        changed = self._install_unit(BOT_SERVICE, self._bot_unit(repo_dir))
+        removed = self._remove_legacy_reboot(repo_dir)
+        action = "registered and enabled" if changed else "already registered and enabled"
+        suffix = " The legacy crontab entry was removed." if removed else ""
+        return f"Bot service {BOT_SERVICE} is {action}.{suffix}"
+
+    def ensure_service(self, app: str, repo_dir: Path) -> str:
+        """Install and enable one app unit without changing its running state."""
+        repo_dir = Path(repo_dir)
+        self._validate_repo(app, repo_dir)
+        if not self.has_run_target(repo_dir):
+            raise DeployError(f"{repo_dir} has no usable `make run` target")
+        service = self.service_name(app)
+        changed = self._install_unit(service, self._app_unit(app, repo_dir))
+        removed = self._remove_legacy_reboot(repo_dir)
+        action = "registered and enabled" if changed else "already registered and enabled"
+        suffix = " The legacy crontab entry was removed." if removed else ""
+        return f"Service {service} is {action}.{suffix}"
+
+    def _wait_running(self, app: str) -> DeployResult:
+        service = self.service_name(app)
+        deadline = time.monotonic() + self._cfg.settle_seconds
+        state = self.service_state(app)
+        while time.monotonic() < deadline:
+            if state.active in ("failed", "inactive"):
+                break
+            time.sleep(0.25)
+            state = self.service_state(app)
+        if state.running and time.monotonic() >= deadline:
+            pid = f" (pid {state.pid})" if state.pid else ""
+            return DeployResult(True, f"Systemd service {service} is enabled and running{pid}.")
+        detail = self.log_tail(app)
+        message = f"Systemd service {service} is {state.display()}."
+        if detail:
+            message += "\n" + detail
+        return DeployResult(False, message)
+
+    def start(self, app: str, repo_dir: Path) -> DeployResult:
+        self.ensure_service(app, repo_dir)
+        self._systemctl(["start", self.service_name(app)])
+        return self._wait_running(app)
+
+    def stop(self, app: str, repo_dir: Path) -> bool:
+        repo_dir = Path(repo_dir)
+        self._validate_repo(app, repo_dir, must_exist=False)
+        state = self.service_state(app)
+        if not state.registered:
+            return False
+        self._systemctl(["stop", self.service_name(app)])
+        return state.active not in ("inactive", "failed")
+
+    def redeploy(self, app: str, repo_dir: Path) -> DeployResult:
+        """Install the app unit and restart it with systemd."""
+        try:
+            self.ensure_service(app, repo_dir)
+            self._systemctl(["restart", self.service_name(app)])
+            return self._wait_running(app)
+        except DeployError as error:
+            return DeployResult(False, str(error))
+
+    def unregister(self, app: str, repo_dir: Path) -> str:
+        """Disable and remove an app unit and its exact legacy crontab entry."""
+        repo_dir = Path(repo_dir)
+        self._validate_repo(app, repo_dir, must_exist=False)
+        service = self.service_name(app)
+        path = self.service_path(app)
+        registered = path.is_file() or self.service_state(app).registered
+        if registered:
+            self._systemctl(["disable", "--now", service])
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as error:
+                raise DeployError(f"cannot remove systemd service {service}: {error}") from None
+            self._systemctl(["daemon-reload"])
+            self._systemctl(["reset-failed", service], check=False)
+        removed = self._remove_legacy_reboot(repo_dir)
+        if registered:
+            message = f"Service: disabled and removed {service}."
+        else:
+            message = "Service: no systemd unit was registered."
+        if removed:
+            message += " The legacy crontab entry was removed."
+        return message
 
     def log_tail(self, app: str, lines: int = 15) -> str:
         try:
