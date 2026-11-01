@@ -8,9 +8,8 @@ from support import git, make_config, make_origin
 from bot.deploy import DeployResult
 from bot.gitops import Git
 from bot.roundtrip import Cancelled
-from bot.service import DEPLOY_NOTE, HELP, Bot, Progress
+from bot.service import DEPLOY_NOTE, HELP, Bot
 from bot.state import State
-from bot.telegram_api import MESSAGE_LIMIT
 
 
 class LocalGit(Git):
@@ -119,42 +118,10 @@ class ServiceTests(unittest.TestCase):
         self.bot.handle_update(update(42))
         self.assertEqual(self.tg.sent, [HELP])
 
-    def test_multiple_authorized_users_private_only(self):
-        self.bot.cfg = make_config(self.tmp, owner_ids=(42, 7))
-        def update(sender, chat_type="private"):
-            return {"message": {"from": {"id": sender}, "chat": {"id": sender, "type": chat_type}, "text": "/help"}}
-        for sender, kind in ((42, "private"), (7, "private"), (8, "private"), (7, "group")):
-            self.bot.handle_update(update(sender, kind))
-        self.assertEqual(self.tg.sent, [HELP, HELP])
-
     def test_request_without_repository_asks_to_select_one(self):
         self.say("add a login page")
         self.assertIn("Select a repository first", self.tg.sent[-1])
         self.assertEqual(self.rt.calls, [])
-
-    def test_prompt_progress_has_activity_and_last_model_output(self):
-        progress = Progress(self.tg, 1, self.cfg)
-        progress.MIN_INTERVAL = 0
-        progress.begin_prompt()
-        progress.update("me/app: waiting for Copilot")
-        self.assertIn("Last model output: not received yet", self.tg.sent[-1])
-        progress.update("me/app: Copilot is working", model_output=True)
-        self.assertRegex(self.tg.edits[-1], r"^[\U0001f504\u23f3\u231b] ")
-        self.assertRegex(self.tg.edits[-1], r"Last model output: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$")
-        progress.update("me/app: Still waiting for Copilot prompt to finish; no new output for 15s")
-        self.assertRegex(self.tg.edits[-1], r"^[\U0001f504\u23f3\u231b] ")
-        self.assertIn("Still waiting for Copilot prompt to finish", self.tg.edits[-1])
-        progress.end_prompt()
-        progress.flush()
-        self.assertNotIn("Last model output:", self.tg.edits[-1])
-
-    def test_prompt_progress_stays_within_telegram_message_limit(self):
-        progress = Progress(self.tg, 1, self.cfg)
-        progress.MIN_INTERVAL = 0
-        progress.begin_prompt()
-        progress.update("x" * (MESSAGE_LIMIT + 500), model_output=True)
-        self.assertEqual(len(self.tg.sent[-1]), MESSAGE_LIMIT)
-        self.assertIn("\nLast model output: ", self.tg.sent[-1])
 
     def test_repo_command_clones_and_persists_selection(self):
         self.say("/repo app")
@@ -262,42 +229,12 @@ class ServiceTests(unittest.TestCase):
 
     def test_cloudflare_requires_credentials_and_valid_arguments(self):
         for command in ("/cloudflare", "/cloudflare a 0", "/cloudflare a 65536",
-                        "/cloudflare bad.name 8080", "/cloudflare A 8080", "/cloudflare a abc",
-                        "/cloudflare delete", "/cloudflare delete bad.name"):
+                        "/cloudflare bad.name 8080", "/cloudflare A 8080", "/cloudflare a abc"):
             self.say(command)
             self.assertTrue("Usage:" in self.tg.sent[-1] or "must be" in self.tg.sent[-1])
         self.say("/cloudflare eurofish 8080")
         self.assertIn("Configure Cloudflare", self.tg.sent[-1])
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-    def test_cloudflare_list_requires_credentials_and_is_read_only(self):
-=======
-    def test_cloudflare_list_command(self):
->>>>>>> c251461 (cloudflare menu)
-        from unittest.mock import patch
-        self.say("/cloudflare list")
-        self.assertIn("Configure Cloudflare", self.tg.sent[-1])
-        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
-                                   cloudflare_zone_id="b" * 32)
-        with patch("bot.service.CloudflareRoutes") as routes:
-<<<<<<< HEAD
-            routes.return_value.list_routes.return_value = "Routes for kurwalab-tunnel:\napp -> service"
-            self.say("/cloudflare list")
-            routes.return_value.list_routes.assert_called_once_with()
-            routes.return_value.prepare.assert_not_called()
-            routes.return_value.delete.assert_not_called()
-        self.assertIn("app -> service", self.tg.sent[-1])
-=======
-            routes.return_value.list_routes.return_value = "Routes on kurwalab-tunnel:\nhttps://app.kurwalab.fyi -> http://127.0.0.1:8080"
-            self.say("/cloudflare list")
-            routes.return_value.list_routes.assert_called_once_with()
-            routes.return_value.prepare.assert_not_called()
-        self.assertIn("https://app.kurwalab.fyi", self.tg.sent[-1])
->>>>>>> c251461 (cloudflare menu)
-
-=======
->>>>>>> parent of c75835c (patch)
     def test_cloudflare_command_routes_only_on_request(self):
         from unittest.mock import patch
         self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
@@ -307,17 +244,6 @@ class ServiceTests(unittest.TestCase):
             self.say("/cloudflare eurofish 8080")
             routes.return_value.prepare.assert_called_once_with("eurofish", 8080)
         self.assertIn("Tunnel configured", self.tg.sent[-1])
-
-    def test_cloudflare_delete_command_deletes_only_on_request(self):
-        from unittest.mock import patch
-        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
-                                   cloudflare_zone_id="b" * 32)
-        with patch("bot.service.CloudflareRoutes") as routes:
-            routes.return_value.delete.return_value = "Route deleted."
-            self.say("/cloudflare delete eurofish")
-            routes.return_value.delete.assert_called_once_with("eurofish")
-            routes.return_value.prepare.assert_not_called()
-        self.assertIn("Route deleted", self.tg.sent[-1])
 
     def test_model_and_status_commands(self):
         self.say("/model Claude/Opus 5.5")

@@ -5,7 +5,6 @@ import logging
 import re
 import threading
 import time
-from datetime import datetime, timezone
 
 from .config import Config, redact
 from .cloudflare import CloudflareError, CloudflareRoutes
@@ -15,7 +14,7 @@ from .gitops import Git, GitError
 from .repos import RepoError, local_path, parse_repo_ref
 from .roundtrip import Cancelled, RoundTrip, RoundTripError
 from .state import State
-from .telegram_api import MESSAGE_LIMIT, Telegram, TelegramError
+from .telegram_api import Telegram, TelegramError
 
 log = logging.getLogger("bot")
 
@@ -33,9 +32,7 @@ HELP = """Send a request as plain text and I will change the active repository w
 /repo - show the active repository
 /fix <repo> <request> - select a repository and run a request in one message
 /fix [browser|nobrowser] [tempchat|notempchat] <request> - run against the active repository with per-request browser/chat options
-/cloudflare list - show current kurwalab-tunnel hostname routes
 /cloudflare <subdomain> <port> - route <subdomain>.kurwalab.fyi to http://127.0.0.1:<port>
-/cloudflare delete <subdomain> - delete the route for <subdomain>.kurwalab.fyi
 /model <provider/model> - choose the Copilot model (for example GPT/GPT-6)
 /status - show repository, model, job and app state
 /cancel - stop the running job
@@ -48,40 +45,13 @@ class Progress:
     """One Telegram message that is edited as a job advances, throttled to respect rate limits."""
 
     MIN_INTERVAL = 3.0
-    ACTIVE_MARKS = ("\U0001f504", "\u23f3", "\u231b")
 
     def __init__(self, tg: Telegram, chat_id: int, cfg: Config):
         self._tg, self._chat, self._cfg = tg, chat_id, cfg
         self._id, self._shown, self._pending, self._last = None, "", "", 0.0
-        self._status, self._ongoing, self._last_model_output, self._frame = "", False, None, 0
 
-    def begin_prompt(self):
-        """Add activity and model-output metadata while Copilot handles a prompt."""
-        self._ongoing, self._last_model_output = True, None
-
-    def end_prompt(self):
-        self._ongoing = False
-        self._pending = self._clip(self._status)
-
-    @staticmethod
-    def _clip(text: str, limit: int = MESSAGE_LIMIT) -> str:
-        if limit <= 0:
-            return ""
-        return text if len(text) <= limit else text[:limit - 1].rstrip() + "\u2026"
-
-    def update(self, text: str, model_output: bool = False):
-        self._status = redact(text, self._cfg.secrets)
-        if model_output:
-            self._last_model_output = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        if self._ongoing:
-            mark = self.ACTIVE_MARKS[self._frame % len(self.ACTIVE_MARKS)]
-            self._frame += 1
-            last_output = self._last_model_output or "not received yet"
-            suffix = f"\nLast model output: {last_output}"
-            available = MESSAGE_LIMIT - len(mark) - 1 - len(suffix)
-            self._pending = f"{mark} {self._clip(self._status, available)}{suffix}"
-        else:
-            self._pending = self._clip(self._status)
+    def update(self, text: str):
+        self._pending = redact(text, self._cfg.secrets)
         if self._id is None or time.monotonic() - self._last >= self.MIN_INTERVAL:
             self.flush()
 
@@ -137,7 +107,7 @@ class Bot:
         message = update.get("message") or {}
         sender = (message.get("from") or {}).get("id")
         chat = message.get("chat") or {}
-        if sender not in (self.cfg.owner_ids or (self.cfg.owner_id,)) or chat.get("type") != "private":
+        if sender != self.cfg.owner_id or chat.get("type") != "private":
             log.warning("ignored message from user %s", sender)
             return
         text = (message.get("text") or "").strip()
@@ -181,46 +151,22 @@ class Bot:
             self.say(chat_id, "Unknown command. Send /help for the list.")
 
     def cmd_cloudflare(self, chat_id: int, arg: str):
-        """Create, update or delete only the route explicitly supplied by the owner."""
+        """Route only the hostname and port explicitly supplied by the owner."""
         parts = arg.split()
-<<<<<<< HEAD
-        if parts == ["list"]:
-            if not self.cfg.cloudflare_enabled:
-                self.say(chat_id, "Configure Cloudflare API token, account ID and zone ID first.")
-                return
-<<<<<<< HEAD
-            self._spawn(chat_id, lambda: self.say(chat_id, CloudflareRoutes(self.cfg).list_routes()))
-=======
-            self._spawn(chat_id, lambda: self.tg.send_long(
-                chat_id, redact(CloudflareRoutes(self.cfg).list_routes(), self.cfg.secrets)))
-            return
         if len(parts) != 2:
             self.say(chat_id, "Usage: /cloudflare <subdomain> <port>")
->>>>>>> c251461 (cloudflare menu)
             return
-=======
->>>>>>> parent of c75835c (patch)
-        deleting = len(parts) == 2 and parts[0].lower() == "delete"
-        if len(parts) != 2:
-            self.say(chat_id, "Usage: /cloudflare <subdomain> <port> or /cloudflare delete <subdomain>")
-            return
-        route = parts[1] if deleting else parts[0]
+        route, raw_port = parts
         if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", route):
             self.say(chat_id, "Subdomain must be a lowercase DNS label (letters, digits, hyphens).")
             return
-        raw_port = None if deleting else parts[1]
-        if raw_port is not None and (not raw_port.isascii() or not raw_port.isdecimal()
-                                     or not 1 <= int(raw_port) <= 65535):
+        if not raw_port.isascii() or not raw_port.isdecimal() or not 1 <= int(raw_port) <= 65535:
             self.say(chat_id, "Port must be an integer from 1 to 65535.")
             return
         if not self.cfg.cloudflare_enabled:
             self.say(chat_id, "Configure Cloudflare API token, account ID and zone ID first.")
             return
-        if deleting:
-            self._spawn(chat_id, lambda: self.say(chat_id, CloudflareRoutes(self.cfg).delete(route)))
-        else:
-            self._spawn(chat_id, lambda: self.say(
-                chat_id, CloudflareRoutes(self.cfg).prepare(route, int(raw_port))))
+        self._spawn(chat_id, lambda: self.say(chat_id, CloudflareRoutes(self.cfg).prepare(route, int(raw_port))))
 
     def cmd_model(self, chat_id: int, arg: str):
         if not arg:
@@ -374,26 +320,17 @@ class Bot:
         self.state.save()
         if self._cancel.is_set():
             raise Cancelled()
-        progress.begin_prompt()
         progress.update(f"{full}: sending the repository to Copilot...")
         try:
             result = self.roundtrip.run(dest, request + DEPLOY_NOTE, self.state.model,
-                                        lambda stage, msg: progress.update(
-                                            f"{full}: {msg}", model_output=stage in ("task", "reasoning")),
-                                        self._cancel,
+                                        lambda stage, msg: progress.update(f"{full}: {msg}"), self._cancel,
                                         show_browser, temporary_chat)
         except Cancelled:
-            progress.end_prompt()
             progress.flush()
             if self.git.is_dirty(dest):
                 self.say(chat_id, "\u26a0\ufe0f The checkout has uncommitted changes from the interrupted run; "
                                   f"review {dest} before the next request.")
             raise
-        except Exception:
-            progress.end_prompt()
-            progress.flush()
-            raise
-        progress.end_prompt()
         progress.update(f"{full}: committing and pushing...")
         pushed = self.git.commit_and_push(dest, request)
         if pushed is None:

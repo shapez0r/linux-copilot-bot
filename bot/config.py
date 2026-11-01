@@ -38,7 +38,6 @@ class Config:
     cloudflare_zone_id: str = ""
     cloudflare_tunnel: str = "kurwalab-tunnel"
     cloudflare_domain: str = "kurwalab.fyi"
-    owner_ids: tuple[int, ...] = ()
 
     @property
     def secrets(self):
@@ -116,15 +115,10 @@ def load(environ=None, env_file=None) -> Config:
         for name in ("CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_ZONE_ID"):
             if not re.fullmatch(r"[0-9a-fA-F]{32}", cloudflare[name]):
                 raise ConfigError(f"{name} must be a 32-character hexadecimal id")
-    raw_ids = get("TELEGRAM_OWNER_ID").split(",")
-    if any(not part.strip() for part in raw_ids):
-        raise ConfigError("TELEGRAM_OWNER_ID must contain comma-separated positive numeric IDs")
-    owner_ids = tuple(dict.fromkeys(_integer(part.strip(), "TELEGRAM_OWNER_ID", 1) for part in raw_ids))
     home = Path.home()
     return Config(
         telegram_token=get("TELEGRAM_BOT_TOKEN"),
-        owner_id=owner_ids[0],
-        owner_ids=owner_ids,
+        owner_id=_integer(get("TELEGRAM_OWNER_ID"), "TELEGRAM_OWNER_ID", 1),
         github_token=get("GITHUB_TOKEN"),
         github_owner=get("GITHUB_OWNER"),
         repos_dir=Path(get("REPOS_DIR", "/home/localadmin/repos")).expanduser(),

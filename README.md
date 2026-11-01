@@ -7,7 +7,7 @@ A Telegram bot for an Ubuntu VM that turns chat messages from its owner into rep
 3. sends the repository to Microsoft 365 Copilot Chat through the Playwright round-trip engine and applies the returned repository;
 4. commits and pushes the result to GitHub;
 5. redeploys the app by running `make run` from `/home/localadmin/repos/<name>`;
-6. leaves Cloudflare routes unchanged; routes are created or deleted only with `/cloudflare`.
+6. leaves Cloudflare routes unchanged; routes are created only with `/cloudflare`.
 
 **Experimental:** the engine drives Copilot's browser UI, so UI changes can interrupt it. Changes are pushed without review; review the commits on GitHub afterwards.
 
@@ -15,7 +15,7 @@ A Telegram bot for an Ubuntu VM that turns chat messages from its owner into rep
 
 - Ubuntu with Python 3.9+, `python3-venv`, Git, and `make`.
 - A Microsoft 365 account with access to Copilot Chat.
-- A Telegram bot token from [@BotFather](https://t.me/BotFather) and the numeric Telegram user IDs to authorize (for example from @userinfobot).
+- A Telegram bot token from [@BotFather](https://t.me/BotFather) and your numeric Telegram user id (for example from @userinfobot).
 - A GitHub token with read/write access to repository contents. Creating repositories also requires permission to create repositories for the owner.
 - A reference app checkout at `<REPOS_DIR>/eurofish` (by default `/home/localadmin/repos/eurofish`) for new repositories.
 - For manually requested public routes, a remotely managed Cloudflare Tunnel and an API token with **Account / Cloudflare Tunnel / Edit** and **Zone / DNS / Edit** permissions.
@@ -45,7 +45,7 @@ Edit `deploy/copilot-telegram-bot.service` (user and paths), install it under `/
 
 ## Using the bot
 
-Only users listed in `TELEGRAM_OWNER_ID` in private chats are served; every other message is ignored. The configured users share the active repository, model, and single-job queue.
+Only the owner (`TELEGRAM_OWNER_ID`) in a private chat is served; every other message is ignored.
 
 | Message | Effect |
 | --- | --- |
@@ -55,9 +55,7 @@ Only users listed in `TELEGRAM_OWNER_ID` in private chats are served; every othe
 | plain text | Run the text as a request against the active repository. |
 | `/fix <repo> <request>` | Select a repository and run a request in one message. |
 | `/fix [browser\|nobrowser] [tempchat\|notempchat] <request>` | Run a request against the active repository with one or both per-request options. Options may be supplied in either order. |
-| `/cloudflare list` | List current hostname ingress routes on `kurwalab-tunnel` without changing them; requires Cloudflare credentials. |
 | `/cloudflare <subdomain> <port>` | Create or update `<subdomain>.kurwalab.fyi` on `kurwalab-tunnel`, targeting `http://127.0.0.1:<port>`; requires Cloudflare credentials. |
-| `/cloudflare delete <subdomain>` | Delete the tunnel ingress rule and DNS record for `<subdomain>.kurwalab.fyi`; requires Cloudflare credentials. |
 | `/model <provider/model>` | Choose the Copilot model label (default `GPT/GPT-6`). |
 | `/status` | Show repository, model, job state, and whether the app is running. |
 | `/cancel` | Ask Copilot to stop and discard the running job. |
@@ -70,7 +68,7 @@ A bare name uses `GITHUB_OWNER`, or the token's account when it is not set. The 
 
 For every missing repository, the bot creates an empty GitHub repository, copies the contents of `<REPOS_DIR>/eurofish` into the new checkout, excludes every `.git` entry, and pushes the copy as the single `Initial commit`. The reference app must exist and contain files that Git can commit. The next request can ask Copilot to keep the same architecture and stack while turning the copy into a different app.
 
-One job runs at a time. Progress is shown in a single edited message with a rotating activity icon. While Copilot is working, the message mirrors visible task plans, the latest completed or current working-step title, standalone activity titles, visible reasoning, and intermediate response text. Reasoning and response excerpts are limited to 500 characters each, and generated code is not relayed. A UTC `Last model output` timestamp records the latest detected change; inactivity updates also report when visible output last changed. The final message contains only the commit, change summary, and redeploy result.
+One job runs at a time. Progress is shown in a single message that is edited as the job advances. Copilot task details, reasoning, code, and reply text are not sent to Telegram; the final message contains only the commit, change summary, and redeploy result.
 
 ### What a request does
 
@@ -78,7 +76,7 @@ One job runs at a time. Progress is shown in a single edited message with a rota
 - **Round-trip:** the engine uploads a ZIP of the committed `HEAD`, asks Copilot for the complete fixed repository, validates the returned ZIP, and replaces the worktree. The bot appends a note asking Copilot to keep a Makefile whose `run` target starts one HTTP server in the foreground and to keep secrets and runtime data outside the repository.
 - **Commit and push:** all changes are committed on the current branch with the first line of the request as the subject, and pushed to `origin`. If Copilot changed nothing, nothing is committed or deployed. A failed push leaves the commit locally and is reported; the next request pushes it.
 - **Redeploy:** the previous `make run` process group for the app is stopped, then `make run` is started detached in `/home/localadmin/repos/<name>` with output appended to `<STATE_DIR>/logs/<name>.log`. The redeploy counts as successful when the process is still running after `DEPLOY_SETTLE_SECONDS` or has exited with code 0; otherwise the log tail is sent. A repository without a `run` target is pushed but not started. Deployed apps do not receive the bot's tokens.
-- **Routes on demand:** `/cloudflare eurofish 8080` creates or updates `eurofish.kurwalab.fyi` to `http://127.0.0.1:8080` on `kurwalab-tunnel` and maintains its proxied DNS CNAME. `/cloudflare delete eurofish` removes that hostname's ingress rule and DNS record. The subdomain must be one lowercase DNS label and the port must be 1–65535. Other ingress rules are preserved. Deployment does not change routes.
+- **Route on demand:** `/cloudflare eurofish 8080` creates or updates `eurofish.kurwalab.fyi` to `http://127.0.0.1:8080` on `kurwalab-tunnel` and maintains its proxied DNS CNAME. The subdomain must be one lowercase DNS label and the port must be 1–65535. Other ingress rules are preserved. No routes are created by deployment.
 
 **Important:** the engine applies a returned ZIP as a full replacement. Everything in the checkout except `.git` is replaced, including untracked and ignored files such as `.env`, virtual environments, `node_modules`, and local databases. Keep runtime data and secrets outside the checkout and let `make run` rebuild dependencies.
 
@@ -89,7 +87,7 @@ Settings come from `.env` (or the file named by `BOT_ENV_FILE`); real environmen
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | required | Bot token. |
-| `TELEGRAM_OWNER_ID` | required | One numeric user ID or comma-separated IDs (for example `123456,789012`). |
+| `TELEGRAM_OWNER_ID` | required | Numeric id of the only accepted user. |
 | `GITHUB_TOKEN` | required | Used for GitHub API calls and Git over HTTPS through `GIT_ASKPASS` (including private repository clones); it is never written into remote URLs. |
 | `GITHUB_OWNER` | token's account | Owner for bare repository names. |
 | `REPOS_DIR` | `/home/localadmin/repos` | Parent of app checkouts and the `eurofish` reference app used for new repositories. |
@@ -111,7 +109,7 @@ Without `.env` values or `/fix` overrides, requests use `nobrowser` and `tempcha
 
 ## Security
 
-- The bot obeys only IDs listed in `TELEGRAM_OWNER_ID`. Anyone who controls an authorized Telegram account can make Copilot-written code run on the VM.
+- The bot obeys only `TELEGRAM_OWNER_ID`. Anyone who controls that Telegram account can make Copilot-written code run on the VM.
 - A request can create or change a `Makefile` that the bot then runs. Use a dedicated unprivileged VM user, restrict the GitHub token to the repositories involved, and keep `.env` and the browser profile readable only by that user.
 - Upload only repositories approved for your organization's Copilot environment.
 - Telegram, GitHub, and Cloudflare API tokens are redacted from errors and messages and are removed from the environment of deployed apps.

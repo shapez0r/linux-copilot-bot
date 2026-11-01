@@ -20,16 +20,9 @@ class ConfigTests(unittest.TestCase):
         cfg = config.load({"GITHUB_TOKEN": "from-env"}, env_file=path)
         self.assertEqual((cfg.telegram_token, cfg.owner_id, cfg.github_token), ("abc", 7, "from-env"))
         self.assertEqual(cfg.model, "Claude/Opus 5.5")
-        self.assertEqual(cfg.owner_ids, (7,))
         self.assertEqual(cfg.repos_dir, Path("/home/localadmin/repos"))
         self.assertFalse(cfg.show_browser)
         self.assertTrue(cfg.temporary_chat)
-
-    def test_multiple_authorized_ids(self):
-        values = {"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_OWNER_ID": "42, 7,42", "GITHUB_TOKEN": "g"}
-        cfg = config.load(values, env_file=self.tmp / "none")
-        self.assertEqual(cfg.owner_id, 42)
-        self.assertEqual(cfg.owner_ids, (42, 7))
 
     def test_browser_visibility_can_be_enabled(self):
         values = {"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_OWNER_ID": "1", "GITHUB_TOKEN": "g",
@@ -50,8 +43,7 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(config.ConfigError, "TELEGRAM_BOT_TOKEN"):
             config.load({}, env_file=self.tmp / "none")
         base = {"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_OWNER_ID": "1", "GITHUB_TOKEN": "g"}
-        for bad in ({"TELEGRAM_OWNER_ID": "abc"}, {"TELEGRAM_OWNER_ID": "1,"},
-                    {"TELEGRAM_OWNER_ID": "1,abc"}, {"TELEGRAM_OWNER_ID": "0,2"}, {"COPILOT_MODEL": "GPT"}, {"COPILOT_TIMEOUT": "0"},
+        for bad in ({"TELEGRAM_OWNER_ID": "abc"}, {"COPILOT_MODEL": "GPT"}, {"COPILOT_TIMEOUT": "0"},
                     {"BOT_SHOW_BROWSER": "maybe"}, {"BOT_TEMPORARY_CHAT": "maybe"},
                     {"CLOUDFLARE_API_TOKEN": "cf"},
                     ):
