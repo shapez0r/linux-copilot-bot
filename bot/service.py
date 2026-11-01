@@ -36,7 +36,6 @@ HELP = """Send a request as plain text and I will change the active repository w
 /cloudflare list - show current kurwalab-tunnel hostname routes
 /cloudflare <subdomain> <port> - route <subdomain>.kurwalab.fyi to http://127.0.0.1:<port>
 /cloudflare delete <subdomain> - delete the route for <subdomain>.kurwalab.fyi
-/cloudflare list - show all configured routes on kurwalab-tunnel
 /model <provider/model> - choose the Copilot model (for example GPT/GPT-6)
 /status - show repository, model, job and app state
 /cancel - stop the running job
@@ -184,6 +183,7 @@ class Bot:
     def cmd_cloudflare(self, chat_id: int, arg: str):
         """Create, update or delete only the route explicitly supplied by the owner."""
         parts = arg.split()
+<<<<<<< HEAD
         if parts == ["list"]:
             if not self.cfg.cloudflare_enabled:
                 self.say(chat_id, "Configure Cloudflare API token, account ID and zone ID first.")
@@ -198,9 +198,11 @@ class Bot:
             self.say(chat_id, "Usage: /cloudflare <subdomain> <port>")
 >>>>>>> c251461 (cloudflare menu)
             return
+=======
+>>>>>>> parent of c75835c (patch)
         deleting = len(parts) == 2 and parts[0].lower() == "delete"
         if len(parts) != 2:
-            self.say(chat_id, "Usage: /cloudflare <subdomain> <port>, /cloudflare delete <subdomain>, or /cloudflare list")
+            self.say(chat_id, "Usage: /cloudflare <subdomain> <port> or /cloudflare delete <subdomain>")
             return
         route = parts[1] if deleting else parts[0]
         if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", route):

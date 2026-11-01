@@ -157,6 +157,7 @@ class CloudflareRoutes:
         self._request("DELETE", f"/zones/{self._zone}/dns_records/{record_id}")
         return True
 
+<<<<<<< HEAD
     def list_routes(self) -> str:
         """List configured ingress routes without changing tunnel or DNS state."""
         tunnel_id = self._resolve_tunnel()
@@ -191,6 +192,8 @@ class CloudflareRoutes:
             f"https://{host} -> {service}" for host, service in routes)
 >>>>>>> c251461 (cloudflare menu)
 
+=======
+>>>>>>> parent of c75835c (patch)
     def prepare(self, app: str, port: int) -> str:
         """Create or update an explicitly requested ingress rule and proxied CNAME."""
         hostname = self._hostname(app)

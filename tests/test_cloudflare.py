@@ -26,6 +26,7 @@ class FakeRoutes(CloudflareRoutes):
 
 class CloudflareRouteTests(unittest.TestCase):
 <<<<<<< HEAD
+<<<<<<< HEAD
     def test_list_routes_reads_all_ingress_without_writing(self):
         routes = FakeRoutes([
             [{"id": "tunnel-id", "name": "kurwalab-tunnel", "tun_type": "cfd_tunnel"}],
@@ -68,6 +69,8 @@ class CloudflareRouteTests(unittest.TestCase):
         self.assertIn("No hostname routes", routes.list_routes())
 >>>>>>> c251461 (cloudflare menu)
 
+=======
+>>>>>>> parent of c75835c (patch)
     def test_prepare_preserves_other_ingress_and_creates_dns(self):
         routes = FakeRoutes([
             [{"id": "tunnel-id", "name": "kurwalab-tunnel", "tun_type": "cfd_tunnel"}],

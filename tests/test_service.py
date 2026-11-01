@@ -270,6 +270,7 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("Configure Cloudflare", self.tg.sent[-1])
 
 <<<<<<< HEAD
+<<<<<<< HEAD
     def test_cloudflare_list_requires_credentials_and_is_read_only(self):
 =======
     def test_cloudflare_list_command(self):
@@ -295,6 +296,8 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("https://app.kurwalab.fyi", self.tg.sent[-1])
 >>>>>>> c251461 (cloudflare menu)
 
+=======
+>>>>>>> parent of c75835c (patch)
     def test_cloudflare_command_routes_only_on_request(self):
         from unittest.mock import patch
         self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
