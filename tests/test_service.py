@@ -227,6 +227,24 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.tg.sent[-1], "Cancelled.")
         self.assertEqual(self.deployer.calls, [])
 
+    def test_cloudflare_requires_credentials_and_valid_arguments(self):
+        for command in ("/cloudflare", "/cloudflare a 0", "/cloudflare a 65536",
+                        "/cloudflare bad.name 8080", "/cloudflare A 8080", "/cloudflare a abc"):
+            self.say(command)
+            self.assertTrue("Usage:" in self.tg.sent[-1] or "must be" in self.tg.sent[-1])
+        self.say("/cloudflare eurofish 8080")
+        self.assertIn("Configure Cloudflare", self.tg.sent[-1])
+
+    def test_cloudflare_command_routes_only_on_request(self):
+        from unittest.mock import patch
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.prepare.return_value = "Tunnel configured."
+            self.say("/cloudflare eurofish 8080")
+            routes.return_value.prepare.assert_called_once_with("eurofish", 8080)
+        self.assertIn("Tunnel configured", self.tg.sent[-1])
+
     def test_model_and_status_commands(self):
         self.say("/model Claude/Opus 5.5")
         self.assertEqual(self.state.model, "Claude/Opus 5.5")

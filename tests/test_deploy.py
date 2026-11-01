@@ -3,6 +3,7 @@ import shutil
 import socket
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from support import make_config
@@ -68,39 +69,12 @@ class DeployTests(unittest.TestCase):
                        "PATH": "/v/bin:/usr/bin"})
         self.assertEqual(env, {"HOME": "/h", "PATH": "/usr/bin"})
 
-    def test_running_http_app_gets_a_tunnel_route(self):
-        with socket.socket() as available:
-            available.bind(("127.0.0.1", 0))
-            port = available.getsockname()[1]
-
-        class Routes:
-            def __init__(self):
-                self.calls = []
-
-            def prepare(self, app, detected_port):
-                self.calls.append((app, detected_port))
-                return f"Tunnel ready on {detected_port}."
-
-        routes = Routes()
-        self.deployer = Deployer(make_config(self.tmp, settle_seconds=1), routes)
-        self.makefile(f"python3 -m http.server {port} --bind 127.0.0.1")
-        result = self.deployer.redeploy("app", self.repo)
-        self.assertTrue(result.ok, result.message)
-        self.assertEqual(routes.calls, [("app", port)])
-        self.assertIn("Tunnel ready", result.message)
-
-    def test_route_failure_does_not_stop_running_app(self):
-        class Routes:
-            def prepare(self, app, port):
-                raise AssertionError("no route should be attempted without a listener")
-
-        self.deployer = Deployer(make_config(self.tmp, settle_seconds=1), Routes())
+    def test_redeploy_never_changes_cloudflare_routes(self):
         self.makefile("sleep 60")
-        result = self.deployer.redeploy("app", self.repo)
-        self.assertFalse(result.ok)
-        self.assertIn("no TCP listener", result.message)
+        with mock.patch("bot.cloudflare.CloudflareRoutes.prepare", side_effect=AssertionError("unexpected route")):
+            result = self.deployer.redeploy("app", self.repo)
+        self.assertTrue(result.ok, result.message)
         self.assertTrue(_alive(self.pid()))
-
 
 if __name__ == "__main__":
     unittest.main()

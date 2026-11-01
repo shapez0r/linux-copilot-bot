@@ -72,7 +72,7 @@ class CloudflareRoutes:
         label = app.lower()
         if not _DNS_LABEL.fullmatch(label):
             raise CloudflareError(
-                f"app name {app!r} is not a valid DNS label; use only letters, digits and hyphens")
+                f"route {app!r} is not a valid DNS label; use only letters, digits and hyphens")
         return f"{label}.{self._domain}"
 
     def _update_ingress(self, tunnel_id: str, hostname: str, service: str):
@@ -128,7 +128,7 @@ class CloudflareRoutes:
         self._request("PATCH", f"/zones/{self._zone}/dns_records/{record_id}", body)
 
     def prepare(self, app: str, port: int) -> str:
-        """Create or update the app's ingress rule and proxied CNAME."""
+        """Create or update an explicitly requested ingress rule and proxied CNAME."""
         hostname = self._hostname(app)
         tunnel_id = self._resolve_tunnel()
         service = f"http://127.0.0.1:{port}"

@@ -7,7 +7,7 @@ A Telegram bot for an Ubuntu VM that turns chat messages from its owner into rep
 3. sends the repository to Microsoft 365 Copilot Chat through the Playwright round-trip engine and applies the returned repository;
 4. commits and pushes the result to GitHub;
 5. redeploys the app by running `make run` from `/home/localadmin/repos/<name>`;
-6. when Cloudflare routing is configured, publishes the app as `<name>.kurwalab.fyi` on `kurwalab-tunnel`.
+6. leaves Cloudflare routes unchanged; routes are created only with `/cloudflare`.
 
 **Experimental:** the engine drives Copilot's browser UI, so UI changes can interrupt it. Changes are pushed without review; review the commits on GitHub afterwards.
 
@@ -18,7 +18,7 @@ A Telegram bot for an Ubuntu VM that turns chat messages from its owner into rep
 - A Telegram bot token from [@BotFather](https://t.me/BotFather) and your numeric Telegram user id (for example from @userinfobot).
 - A GitHub token with read/write access to repository contents. Creating repositories also requires permission to create repositories for the owner.
 - A reference app checkout at `<REPOS_DIR>/eurofish` (by default `/home/localadmin/repos/eurofish`) for new repositories.
-- For automatic public routes, a remotely managed Cloudflare Tunnel and an API token with **Account / Cloudflare Tunnel / Edit** and **Zone / DNS / Edit** permissions.
+- For manually requested public routes, a remotely managed Cloudflare Tunnel and an API token with **Account / Cloudflare Tunnel / Edit** and **Zone / DNS / Edit** permissions.
 
 ## Setup
 
@@ -31,7 +31,7 @@ make login          # sign in to Copilot once (see below)
 make run            # start the bot in the foreground
 ```
 
-To enable the tunnel integration, put the Cloudflare API token, account ID, and zone ID in `.env`. The example already names `kurwalab-tunnel` and `kurwalab.fyi`; change those settings if the tunnel or domain changes. Leaving all three credential/id values empty disables route management.
+To enable the tunnel integration, put the Cloudflare API token, account ID, and zone ID in `.env`. The tunnel is always `kurwalab-tunnel` and the domain is always `kurwalab.fyi`. Without credentials, `/cloudflare` is unavailable. Redeployment never changes routes.
 
 ### Signing in to Copilot
 
@@ -55,6 +55,7 @@ Only the owner (`TELEGRAM_OWNER_ID`) in a private chat is served; every other me
 | plain text | Run the text as a request against the active repository. |
 | `/fix <repo> <request>` | Select a repository and run a request in one message. |
 | `/fix [browser\|nobrowser] [tempchat\|notempchat] <request>` | Run a request against the active repository with one or both per-request options. Options may be supplied in either order. |
+| `/cloudflare <subdomain> <port>` | Create or update `<subdomain>.kurwalab.fyi` on `kurwalab-tunnel`, targeting `http://127.0.0.1:<port>`; requires Cloudflare credentials. |
 | `/model <provider/model>` | Choose the Copilot model label (default `GPT/GPT-6`). |
 | `/status` | Show repository, model, job state, and whether the app is running. |
 | `/cancel` | Ask Copilot to stop and discard the running job. |
@@ -75,7 +76,7 @@ One job runs at a time. Progress is shown in a single message that is edited as 
 - **Round-trip:** the engine uploads a ZIP of the committed `HEAD`, asks Copilot for the complete fixed repository, validates the returned ZIP, and replaces the worktree. The bot appends a note asking Copilot to keep a Makefile whose `run` target starts one HTTP server in the foreground and to keep secrets and runtime data outside the repository.
 - **Commit and push:** all changes are committed on the current branch with the first line of the request as the subject, and pushed to `origin`. If Copilot changed nothing, nothing is committed or deployed. A failed push leaves the commit locally and is reported; the next request pushes it.
 - **Redeploy:** the previous `make run` process group for the app is stopped, then `make run` is started detached in `/home/localadmin/repos/<name>` with output appended to `<STATE_DIR>/logs/<name>.log`. The redeploy counts as successful when the process is still running after `DEPLOY_SETTLE_SECONDS` or has exited with code 0; otherwise the log tail is sent. A repository without a `run` target is pushed but not started. Deployed apps do not receive the bot's tokens.
-- **Publish:** when Cloudflare routing is enabled and the app remains running, the bot detects the single TCP listener owned by the app process group. It creates or updates `<lowercase-app-name>.<CLOUDFLARE_DOMAIN>` in the tunnel to target `http://127.0.0.1:<detected-port>`, and creates or updates the proxied CNAME for that hostname. Other tunnel settings and ingress rules are preserved. The app name must be a valid DNS label, and a missing or ambiguous listener is reported without stopping the running app.
+- **Route on demand:** `/cloudflare eurofish 8080` creates or updates `eurofish.kurwalab.fyi` to `http://127.0.0.1:8080` on `kurwalab-tunnel` and maintains its proxied DNS CNAME. The subdomain must be one lowercase DNS label and the port must be 1–65535. Other ingress rules are preserved. No routes are created by deployment.
 
 **Important:** the engine applies a returned ZIP as a full replacement. Everything in the checkout except `.git` is replaced, including untracked and ignored files such as `.env`, virtual environments, `node_modules`, and local databases. Keep runtime data and secrets outside the checkout and let `make run` rebuild dependencies.
 
@@ -97,11 +98,9 @@ Settings come from `.env` (or the file named by `BOT_ENV_FILE`); real environmen
 | `BOT_SHOW_BROWSER` | `false` | Default browser visibility. `browser` or `nobrowser` on `/fix` overrides it for that request. A visible browser requires a display, such as VNC or X forwarding. |
 | `BOT_TEMPORARY_CHAT` | `true` | Default Temporary chat state. `tempchat` or `notempchat` on `/fix` overrides it for that request; disabling it saves the chat in your account. |
 | `DEPLOY_SETTLE_SECONDS` | `10` | How long `make run` must stay up to count as deployed. |
-| `CLOUDFLARE_API_TOKEN` | empty | Enables automatic tunnel routes; requires Cloudflare Tunnel Edit and DNS Edit permissions. It is not passed to deployed apps. |
+| `CLOUDFLARE_API_TOKEN` | empty | Enables the `/cloudflare` command; requires Cloudflare Tunnel Edit and DNS Edit permissions. It is not passed to deployed apps. |
 | `CLOUDFLARE_ACCOUNT_ID` | empty | Account containing the tunnel; required with the Cloudflare token. |
 | `CLOUDFLARE_ZONE_ID` | empty | Zone containing the public hostname; required with the Cloudflare token. |
-| `CLOUDFLARE_TUNNEL` | `kurwalab-tunnel` | Remotely managed tunnel whose ingress rules are updated. |
-| `CLOUDFLARE_DOMAIN` | `kurwalab.fyi` | Domain appended to the lowercase app name. |
 | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL` | Copilot Telegram Bot | Identity on bot commits. |
 
 The engine's selector overrides (`COPILOT_COMPOSER`, `COPILOT_FILE_INPUT`, `COPILOT_SEND`, `COPILOT_DOWNLOAD`, `COPILOT_MODEL_BUTTON`, `COPILOT_TEMPORARY_CHAT`, `COPILOT_REASONING`, `COPILOT_STOP`) are CSS selectors read from the bot's environment when Copilot's UI changes. Run `python3 engine/copilot_repo_roundtrip.py --help` for the engine's options.
