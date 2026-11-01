@@ -13,10 +13,14 @@ from collections import deque
 from .config import SECRET_NAMES, Config
 
 STATUS_PREFIX = "ROUNDTRIP_STATUS:"
+REASONING_PREFIX = "ROUNDTRIP_REASONING:"
 QUIT_GRACE_SECONDS = 30  # Time the engine gets to click Stop in Copilot and exit after a cancel request.
 QUIT_EXIT_CODE = 130
 TASK_STATUS_LIMIT = 3500
 TASK_STATES = frozenset({"completed", "active", "pending", "failed"})
+ACTIVITY_KINDS = frozenset({"thought", "completed", "coding"})
+CODING_STEP = re.compile(r"^(coding\b|code execution\b|executing code\b|running code\b)", re.I)
+THOUGHT_STEP = re.compile(r"^\s*(reasoning|reasoned|thinking|thought|thought for)\b", re.I)
 
 
 class RoundTripError(Exception):
@@ -68,17 +72,65 @@ def parse_status(line: str):
     return (event["stage"], event["message"]) if event else None
 
 
-def format_task_status(message: str, tasks) -> str:
-    """Render the latest Copilot task card as a bounded plain-text Telegram status."""
-    if tasks is None:
-        return "Copilot is executing the prompt."
-    if not tasks:
-        return "Copilot task card closed; waiting for the final response."
-    task = tasks[-1]
-    title = task["title"] or "Copilot task"
-    lines = [f"Prompt execution: {title}", f"Status: {task['state']}"]
-    markers = {"completed": "✓", "active": "▶", "pending": "○", "failed": "✗"}
-    lines.extend(f"{markers[step['state']]} {step['title']}" for step in task["steps"])
+def parse_activity_event(line: str):
+    """Return activity titles and states without reasoning, answer, or code content."""
+    if not line.startswith(REASONING_PREFIX):
+        return None
+    try:
+        value = json.loads(line[len(REASONING_PREFIX):])
+        if not isinstance(value, dict) or not isinstance(value.get("blocks"), list):
+            return None
+        blocks = []
+        for raw_block in value["blocks"]:
+            if not isinstance(raw_block, dict):
+                continue
+            steps = []
+            for raw_step in raw_block.get("steps") if isinstance(raw_block.get("steps"), list) else []:
+                if not isinstance(raw_step, dict):
+                    continue
+                title = " ".join(str(raw_step.get("title") or "Reasoning").split())
+                kind = str(raw_step.get("kind") or "").lower()
+                if kind not in ACTIVITY_KINDS:
+                    detail_count = len(raw_step.get("lines")) if isinstance(raw_step.get("lines"), list) else 0
+                    try:
+                        detail_count = max(detail_count, int(raw_step.get("total") or 0))
+                    except (TypeError, ValueError):
+                        pass
+                    kind = ("coding" if CODING_STEP.match(title) else
+                            "completed" if not THOUGHT_STEP.match(title) and detail_count == 0 else "thought")
+                steps.append({"title": title, "kind": kind})
+            blocks.append({
+                "title": " ".join(str(raw_block.get("title") or "Reasoning").split()),
+                "active": raw_block.get("active") is True,
+                "layout": "working" if raw_block.get("layout") == "working" else "section",
+                "steps": steps,
+            })
+        return blocks
+    except (TypeError, ValueError):
+        return None
+
+
+def format_prompt_status(message: str, tasks, blocks) -> str:
+    """Render task plans and activity titles while omitting generated details and code."""
+    lines = []
+    if tasks:
+        task = tasks[-1]
+        title = task["title"] or "Copilot task"
+        lines = [f"Prompt execution: {title}", f"Status: {task['state']}"]
+        markers = {"completed": "✓", "active": "▶", "pending": "○", "failed": "✗"}
+        lines.extend(f"{markers[step['state']]} {step['title']}" for step in task["steps"])
+    elif not blocks:
+        lines.append("Copilot is executing the prompt." if tasks is None else
+                     "Copilot task card closed; waiting for the final response.")
+    if blocks:
+        if lines:
+            lines.append("")
+        lines.append("Activity:")
+        for block in blocks:
+            lines.append(f"{'▶' if block['active'] else '✓'} {block['title']}")
+            for step in block["steps"]:
+                marker = "✓" if step["kind"] == "completed" else "•"
+                lines.append(f"  {marker} {step['title']}")
     timing = re.search(r"\b\d+s elapsed;.*$", message, re.I)
     if timing:
         lines.extend(("", timing.group(0)))
@@ -86,6 +138,11 @@ def format_task_status(message: str, tasks) -> str:
     if len(text) > TASK_STATUS_LIMIT:
         text = text[:TASK_STATUS_LIMIT - 1].rstrip() + "…"
     return text
+
+
+def format_task_status(message: str, tasks) -> str:
+    """Render the latest Copilot task card as a bounded plain-text Telegram status."""
+    return format_prompt_status(message, tasks, [])
 
 
 class RoundTrip:
@@ -113,14 +170,24 @@ class RoundTrip:
         tail, out = deque(maxlen=8), []
 
         def read_stderr():
+            live_tasks, live_blocks, task_message = None, [], ""
             for line in proc.stderr:
                 line = line.rstrip()
                 status = parse_status_event(line)
                 if status:
-                    message = (format_task_status(status["message"], status["tasks"])
-                               if status["stage"] == "task" else status["message"])
+                    if status["stage"] == "task":
+                        live_tasks, task_message = status["tasks"], status["message"]
+                        message = format_prompt_status(task_message, live_tasks, live_blocks)
+                    else:
+                        message = status["message"]
                     on_status(status["stage"], message)
-                elif line.strip() and not line.startswith(("ROUNDTRIP_REASONING:", "ROUNDTRIP_CHAT:")):
+                    continue
+                blocks = parse_activity_event(line)
+                if blocks is not None:
+                    live_blocks = blocks
+                    if live_blocks or live_tasks:
+                        on_status("activity", format_prompt_status(task_message, live_tasks, live_blocks))
+                elif line.strip() and not line.startswith("ROUNDTRIP_CHAT:"):
                     tail.append(line.strip())
 
         readers = [threading.Thread(target=read_stderr, daemon=True),

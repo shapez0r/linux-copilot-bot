@@ -9,8 +9,8 @@ from unittest import mock
 from pathlib import Path
 
 from support import make_config
-from bot.roundtrip import (Cancelled, RoundTrip, RoundTripError, format_task_status, parse_status,
-                           parse_status_event)
+from bot.roundtrip import (Cancelled, RoundTrip, RoundTripError, format_prompt_status,
+                           format_task_status, parse_activity_event, parse_status, parse_status_event)
 
 FAKE_ENGINE = textwrap.dedent('''
     import json, sys
@@ -26,7 +26,11 @@ FAKE_ENGINE = textwrap.dedent('''
                {"title": "Inspect repository", "state": "completed"},
                {"title": "Implement changes", "state": "active"},
                {"title": "Run tests", "state": "pending"}]}])
-    print("ROUNDTRIP_REASONING:{}", file=sys.stderr, flush=True)
+    print("ROUNDTRIP_REASONING:" + json.dumps({"blocks": [{
+        "title": "Reasoning", "active": True, "layout": "working", "steps": [
+            {"title": "Inspecting files", "kind": "completed", "lines": []},
+            {"title": "Coding and executing", "kind": "coding", "lines": ["secret_code()"]},
+        ]}], "answers": [{"after": 1, "text": "secret reply"}]}), file=sys.stderr, flush=True)
     if mode == "ok":
         print(json.dumps({"chat_response": "done", "diff_stat": " 1 file changed"}))
     elif mode == "fail":
@@ -77,7 +81,12 @@ class RoundTripTests(unittest.TestCase):
             ("task", "Prompt execution: Build app\nStatus: In progress\n✓ Inspect repository\n"
                      "▶ Implement changes\n○ Run tests\n\n"
                      "15s elapsed; no new output for 2s of 900s allowed."),
+            ("activity", "Prompt execution: Build app\nStatus: In progress\n✓ Inspect repository\n"
+                         "▶ Implement changes\n○ Run tests\n\nActivity:\n▶ Reasoning\n"
+                         "  ✓ Inspecting files\n  • Coding and executing\n\n"
+                         "15s elapsed; no new output for 2s of 900s allowed."),
         ])
+        self.assertNotIn("secret", str(self.statuses))
 
     def test_failure_reports_engine_message(self):
         with self.assertRaisesRegex(RoundTripError, "No downloadable result"):
@@ -119,6 +128,38 @@ class RoundTripTests(unittest.TestCase):
                          "Copilot is executing the prompt.")
         self.assertEqual(format_task_status("Copilot task card closed.", []),
                          "Copilot task card closed; waiting for the final response.")
+
+    def test_activity_status_keeps_titles_and_omits_details_answers_and_code(self):
+        line = "ROUNDTRIP_REASONING:" + json.dumps({
+            "blocks": [{
+                "title": "Creating files", "active": True, "layout": "working",
+                "lines": ["private reasoning"],
+                "steps": [
+                    {"title": "Reviewing Python comments", "kind": "completed", "lines": []},
+                    {"title": "Coding and executing", "kind": "coding",
+                     "lines": ["print('secret')"], "total": 1},
+                    {"title": "Testing", "lines": ["test output"]},
+                ],
+            }],
+            "answers": [{"after": 1, "text": "generated reply"}],
+        })
+        blocks = parse_activity_event(line)
+        self.assertEqual(blocks, [{
+            "title": "Creating files", "active": True, "layout": "working", "steps": [
+                {"title": "Reviewing Python comments", "kind": "completed"},
+                {"title": "Coding and executing", "kind": "coding"},
+                {"title": "Testing", "kind": "thought"},
+            ],
+        }])
+        rendered = format_prompt_status("", [], blocks)
+        self.assertEqual(rendered, "Activity:\n▶ Creating files\n  ✓ Reviewing Python comments\n"
+                          "  • Coding and executing\n  • Testing")
+        for hidden in ("private reasoning", "secret", "test output", "generated reply"):
+            self.assertNotIn(hidden, rendered)
+
+    def test_activity_parser_rejects_other_or_malformed_lines(self):
+        for bad in ("ROUNDTRIP_REASONING:{", "ROUNDTRIP_REASONING:{}", "other"):
+            self.assertIsNone(parse_activity_event(bad))
 
 
 if __name__ == "__main__":
