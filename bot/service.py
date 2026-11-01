@@ -398,8 +398,6 @@ class Bot:
         if len(arg.split()) != 1:
             self.say(chat_id, "Usage: /delete <name|owner/name>")
             return
-        if self._cloudflare_unavailable(chat_id):
-            return
         self._spawn(chat_id, lambda: self._delete_app(chat_id, arg))
 
     def cmd_repo(self, chat_id: int, arg: str):
@@ -548,31 +546,86 @@ class Bot:
                                                url=f"https://{name}.{self.cfg.cloudflare_domain}"))
 
     def _delete_app(self, chat_id: int, ref: str):
-        """Delete the resources created for one app after validating its local checkout."""
-        owner, name = parse_repo_ref(ref, self._owner_default())
+        """Attempt every app cleanup independently and report each outcome."""
+        explicit_owner = "/" in ref.strip()
+        owner, name = parse_repo_ref(ref, "delete-owner")
         if not self._valid_route(name):
             raise RepoError("App names must be lowercase DNS labels containing only letters, digits and hyphens.")
-        full = f"{owner}/{name}"
+        owner_error = None
+        if not explicit_owner:
+            try:
+                owner = self._owner_default()
+            except GitHubError as error:
+                owner, owner_error = None, error
+        full = f"{owner}/{name}" if owner else name
         dest = local_path(self.cfg.repos_dir, name)
-        if self.gh.get_repo(owner, name) is None:
-            raise RepoError(f"GitHub repository {full} was not found.")
-        self.git.require_checkout(dest, owner, name)
 
-        stopped = self.deployer.stop(name, dest)
-        startup = self.deployer.remove_reboot(dest)
-        tunnel = CloudflareRoutes(self.cfg).delete_route(name)
-        self.gh.delete_repo(owner, name)
+        failed = False
         try:
-            shutil.rmtree(dest)
-        except OSError as error:
-            raise RepoError(f"GitHub repository and tunnel route were deleted, but {dest} could not be removed: "
-                            f"{error.strerror or error}") from None
-        if self.state.repo.lower() == full.lower():
-            self.state.repo = ""
-            self.state.save()
-        process = "Stopped the running app." if stopped else "No running app process was recorded."
-        self.say(chat_id, f"✅ Deleted {full}.\n{process}\n{startup}\n{tunnel}\n"
-                          f"GitHub: deleted {full}.\nLocal: deleted {dest}.")
+            stopped = self.deployer.stop(name, dest)
+            process = "Process: stopped the running app." if stopped else "Process: no running app was recorded."
+        except (DeployError, OSError) as error:
+            failed = True
+            process = f"Process: failed to stop: {error}"
+
+        try:
+            startup = self.deployer.remove_reboot(dest)
+        except (DeployError, OSError) as error:
+            failed = True
+            startup = f"Startup: failed to remove the reboot entry: {error}"
+
+        if owner_error is not None:
+            failed = True
+            github = f"GitHub: could not resolve the owner for {name}: {owner_error}"
+        else:
+            try:
+                deleted = self.gh.delete_repo(owner, name)
+                github = (f"GitHub: deleted {full}." if deleted
+                          else f"GitHub: {full} was not found; nothing to delete.")
+            except GitHubError as error:
+                failed = True
+                github = f"GitHub: failed to delete {full}: {error}"
+
+        try:
+            if dest.is_symlink():
+                raise GitError(f"{dest} is a symbolic link; refusing to remove it.")
+            if not dest.exists():
+                local = f"Local folder: {dest} was not found; nothing to delete."
+            else:
+                self.git.require_checkout(dest, owner or "", name)
+                shutil.rmtree(dest)
+                local = f"Local folder: deleted {dest}."
+        except (GitError, OSError) as error:
+            failed = True
+            local = f"Local folder: failed to delete {dest}: {error}"
+
+        if not self.cfg.cloudflare_enabled:
+            failed = True
+            tunnel = "Tunnel route: not attempted because Cloudflare is not configured."
+        else:
+            try:
+                result = CloudflareRoutes(self.cfg).delete_route(name, missing_ok=True)
+                tunnel = f"Tunnel route: {result}"
+            except CloudflareError as error:
+                failed = True
+                tunnel = f"Tunnel route: failed to delete: {error}"
+
+        active_matches = (self.state.repo.lower() == full.lower() if owner else
+                          self.state.repo.lower().endswith(f"/{name.lower()}"))
+        if active_matches:
+            try:
+                self.state.repo = ""
+                self.state.save()
+                active = "Active repository: cleared."
+            except OSError as error:
+                failed = True
+                active = f"Active repository: failed to clear: {error}"
+        else:
+            active = "Active repository: unchanged."
+
+        heading = (f"⚠️ Deletion attempted for {full}; some cleanup failed or was skipped."
+                   if failed else f"✅ Deletion completed for {full}.")
+        self.say(chat_id, "\n".join([heading, github, local, tunnel, process, startup, active]))
 
     def _request(self, chat_id: int, ref: str, request: str,
                  show_browser=None, temporary_chat=None):

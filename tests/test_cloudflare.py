@@ -161,6 +161,32 @@ class CloudflareRouteTests(unittest.TestCase):
             routes.delete_route("app")
         self.assertEqual(len(routes.calls), 2)
 
+    def test_delete_can_treat_a_missing_route_and_dns_as_a_noop(self):
+        routes = FakeRoutes([
+            [{"id": "tunnel-id", "name": "kurwalab-tunnel", "tun_type": "cfd_tunnel"}],
+            {"config": {"ingress": [{"service": "http_status:404"}]}},
+            [],
+        ])
+        self.assertEqual(
+            routes.delete_route("app", missing_ok=True),
+            "route https://app.kurwalab.fyi and its matching CNAME were not found; nothing to delete.",
+        )
+        self.assertEqual(len(routes.calls), 3)
+
+    def test_delete_missing_route_removes_an_orphaned_tunnel_cname(self):
+        routes = FakeRoutes([
+            [{"id": "tunnel-id", "name": "kurwalab-tunnel", "tun_type": "cfd_tunnel"}],
+            {"config": {"ingress": [{"service": "http_status:404"}]}},
+            [{"id": "dns-id", "type": "CNAME", "content": "tunnel-id.cfargotunnel.com"}],
+            {},
+        ])
+        self.assertEqual(
+            routes.delete_route("app", missing_ok=True),
+            "route https://app.kurwalab.fyi was not found; deleted its matching CNAME.",
+        )
+        self.assertEqual(routes.calls[3][:2],
+                         ("DELETE", "/zones/" + "b" * 32 + "/dns_records/dns-id"))
+
     def test_delete_does_not_remove_unrelated_dns(self):
         routes = FakeRoutes([
             [{"id": "tunnel-id", "name": "kurwalab-tunnel", "tun_type": "cfd_tunnel"}],

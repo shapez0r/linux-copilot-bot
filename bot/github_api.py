@@ -18,7 +18,7 @@ class GitHub:
         self._login = ""
         self.default_owner = owner
 
-    def _request(self, method: str, path: str, payload=None, allow_404=False):
+    def _request(self, method: str, path: str, payload=None, allow_404=False, not_found=None):
         data = json.dumps(payload).encode() if payload is not None else None
         request = urllib.request.Request(self._base + path, data=data, method=method, headers={
             "Authorization": f"Bearer {self._token}", "Accept": "application/vnd.github+json",
@@ -29,7 +29,7 @@ class GitHub:
                 return json.loads(content) if content else None
         except urllib.error.HTTPError as e:
             if e.code == 404 and allow_404:
-                return None
+                return not_found
             detail = ""
             try:
                 detail = json.load(e).get("message", "")
@@ -57,5 +57,6 @@ class GitHub:
         return self._request("POST", path, {"name": name, "private": private, "auto_init": False})
 
     def delete_repo(self, owner: str, name: str):
-        """Permanently delete a repository visible to the configured token."""
-        self._request("DELETE", f"/repos/{owner}/{name}")
+        """Delete a repository and return False when it is already absent."""
+        result = self._request("DELETE", f"/repos/{owner}/{name}", allow_404=True, not_found=False)
+        return result is not False

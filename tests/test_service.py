@@ -6,7 +6,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from support import git, make_config, make_origin
+from bot.cloudflare import CloudflareError
 from bot.deploy import DeployResult
+from bot.github_api import GitHubError
 from bot.gitops import Git, GitError
 from bot.roundtrip import Cancelled
 from bot.service import DEPLOY_NOTE, HELP, NEW_APP_PROMPT, Bot, Progress
@@ -47,6 +49,7 @@ class FakeGitHub:
 
     def __init__(self, existing, tmp):
         self.repos, self.created, self.deleted, self._tmp = dict(existing), [], [], tmp
+        self.delete_error = None
 
     def get_repo(self, owner, name):
         return self.repos.get(f"{owner}/{name}")
@@ -62,7 +65,9 @@ class FakeGitHub:
     def delete_repo(self, owner, name):
         full = f"{owner}/{name}"
         self.deleted.append(full)
-        self.repos.pop(full)
+        if self.delete_error:
+            raise self.delete_error
+        return self.repos.pop(full, None) is not None
 
 
 class FakeRoundTrip:
@@ -404,37 +409,85 @@ class ServiceTests(unittest.TestCase):
         with patch("bot.service.CloudflareRoutes") as routes:
             routes.return_value.delete_route.return_value = "Deleted route: https://app.kurwalab.fyi."
             self.say("/delete app")
-            routes.return_value.delete_route.assert_called_once_with("app")
+            routes.return_value.delete_route.assert_called_once_with("app", missing_ok=True)
         self.assertEqual(self.gh.deleted, ["me/app"])
         self.assertFalse(self.dest.exists())
         self.assertEqual(self.deployer.stops, [("app", self.dest)])
         self.assertEqual(self.deployer.removed_reboots, [self.dest])
         self.assertEqual(self.state.repo, "")
         self.assertEqual(State(self.tmp / "state.json", "x").repo, "")
-        self.assertIn("Deleted me/app", self.tg.sent[-1])
-        self.assertIn("Stopped the running app", self.tg.sent[-1])
+        self.assertIn("Deletion completed for me/app", self.tg.sent[-1])
+        self.assertIn("Process: stopped the running app", self.tg.sent[-1])
 
-    def test_delete_validates_arguments_credentials_and_app_name(self):
+    def test_delete_validates_arguments_and_app_name(self):
         self.say("/delete")
         self.assertIn("Usage: /delete", self.tg.sent[-1])
         self.say("/delete app extra")
         self.assertIn("Usage: /delete", self.tg.sent[-1])
-        self.say("/delete app")
-        self.assertIn("Configure Cloudflare", self.tg.sent[-1])
-        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
-                                   cloudflare_zone_id="b" * 32)
         self.say("/delete BadName")
         self.assertIn("lowercase DNS labels", self.tg.sent[-1])
         self.assertEqual(self.gh.deleted, [])
 
-    def test_delete_refuses_a_missing_local_checkout_before_remote_changes(self):
+    def test_delete_without_cloudflare_still_attempts_github_and_local_cleanup(self):
+        self.say("/repo app")
+        self.say("/delete app")
+        self.assertEqual(self.gh.deleted, ["me/app"])
+        self.assertFalse(self.dest.exists())
+        report = self.tg.sent[-1]
+        self.assertIn("GitHub: deleted me/app", report)
+        self.assertIn("Local folder: deleted", report)
+        self.assertIn("Cloudflare is not configured", report)
+
+    def test_delete_missing_local_folder_does_not_block_remote_deletions(self):
         self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
                                    cloudflare_zone_id="b" * 32)
         with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.delete_route.return_value = "Deleted route: https://app.kurwalab.fyi."
             self.say("/delete app")
-            routes.return_value.delete_route.assert_not_called()
+            routes.return_value.delete_route.assert_called_once_with("app", missing_ok=True)
+        self.assertIn("Local folder:", self.tg.sent[-1])
+        self.assertIn("was not found; nothing to delete", self.tg.sent[-1])
+        self.assertEqual(self.gh.deleted, ["me/app"])
+
+    def test_delete_reports_missing_resources_as_successful_noops(self):
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        self.gh.repos.clear()
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.delete_route.return_value = (
+                "route https://app.kurwalab.fyi and its matching CNAME were not found; nothing to delete.")
+            self.say("/delete app")
+        report = self.tg.sent[-1]
+        self.assertIn("Deletion completed for me/app", report)
+        self.assertIn("GitHub: me/app was not found", report)
+        self.assertIn("Local folder:", report)
+        self.assertIn("Tunnel route:", report)
+
+    def test_delete_attempts_other_resources_after_github_and_tunnel_failures(self):
+        self.say("/repo app")
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        self.gh.delete_error = GitHubError("denied")
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.delete_route.side_effect = CloudflareError("unavailable")
+            self.say("/delete app")
+        self.assertFalse(self.dest.exists())
+        report = self.tg.sent[-1]
+        self.assertIn("GitHub: failed to delete me/app", report)
+        self.assertIn("Local folder: deleted", report)
+        self.assertIn("Tunnel route: failed to delete", report)
+
+    def test_delete_local_safety_failure_does_not_block_remote_deletions(self):
+        self.dest.mkdir(parents=True)
+        (self.dest / "unrelated.txt").write_text("keep")
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.delete_route.return_value = "Deleted route: https://app.kurwalab.fyi."
+            self.say("/delete app")
+        self.assertTrue(self.dest.exists())
+        self.assertEqual(self.gh.deleted, ["me/app"])
         self.assertIn("not a Git checkout", self.tg.sent[-1])
-        self.assertEqual(self.gh.deleted, [])
 
     def test_request_runs_commits_pushes_and_redeploys(self):
         self.say("/repo app")

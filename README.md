@@ -18,7 +18,7 @@ A Telegram bot for an Ubuntu VM that turns chat messages from authorized users i
 - A Telegram bot token from [@BotFather](https://t.me/BotFather) and the numeric Telegram user id of each authorized user (for example from @userinfobot).
 - A GitHub token with read/write access to repository contents. Creating repositories requires permission to create repositories for the owner, and `/delete` requires permission to delete repositories.
 - A local app checkout to use as a new-repository template. The default is `<REPOS_DIR>/eurofish` (`/home/localadmin/repos/eurofish` with the default configuration).
-- For `/new`, `/delete`, and route commands, a remotely managed Cloudflare Tunnel and an API token with **Account / Cloudflare Tunnel / Edit** and **Zone / DNS / Edit** permissions.
+- For `/new`, route commands, and the tunnel portion of `/delete`, a remotely managed Cloudflare Tunnel and an API token with **Account / Cloudflare Tunnel / Edit** and **Zone / DNS / Edit** permissions.
 - The `crontab` command for installing and removing app reboot entries.
 
 ## Setup
@@ -32,7 +32,7 @@ make login          # sign in to Copilot once (see below)
 make run            # start the bot in the foreground
 ```
 
-Put the Cloudflare API token, account ID, and zone ID in `.env` to use `/new`, `/delete`, or `/cloudflare`. The tunnel is always `kurwalab-tunnel` and the domain is always `kurwalab.fyi`. Ordinary redeployment never changes routes; only these commands do.
+Put the Cloudflare API token, account ID, and zone ID in `.env` to use `/new` or `/cloudflare` and to let `/delete` remove tunnel routes. Without those settings, `/delete` still attempts the GitHub and local cleanup and reports that it skipped the route. The tunnel is always `kurwalab-tunnel` and the domain is always `kurwalab.fyi`. Ordinary redeployment never changes routes; only these commands do.
 
 ### Signing in to Copilot
 
@@ -51,7 +51,7 @@ Only user ids listed in `TELEGRAM_OWNER_ID` are served, and only in private chat
 | Message | Effect |
 | --- | --- |
 | `/new [public\|private] [model=<provider/model>] [template=<app>] name="<name\|owner/name>" prompt="<request>"` | Create a new GitHub repository (private by default), seed it from the selected local app (`eurofish` by default), run the request with the allocated port instruction, push the result, deploy it, publish `https://<name>.kurwalab.fyi`, and install reboot startup. The optional model applies only to this command; quote a model name containing spaces or punctuation, such as `model="Claude/Opus 5.5"`. Straight or typographic quotes are accepted. Refuses existing repositories. |
-| `/delete <name>` or `/delete <owner/name>` | Permanently delete an app after verifying its local checkout: stop its recorded process, remove its reboot entry, Cloudflare tunnel route and matching CNAME, delete its GitHub repository, and remove `<REPOS_DIR>/<name>`. Clears the active repository when it names the deleted app. Requires Cloudflare credentials and GitHub repository-delete permission. |
+| `/delete <name>` or `/delete <owner/name>` | Independently attempt to stop the app, remove its reboot entry, Cloudflare tunnel route and matching CNAME, GitHub repository, and verified local checkout at `<REPOS_DIR>/<name>`. Missing resources are successful no-ops; failures and skipped cleanup are reported without blocking other deletion attempts. Clears the active repository when it names the app. Cloudflare credentials are needed only for route cleanup, and deleting an existing GitHub repository requires repository-delete permission. |
 | `/repo <name>` or `/repo <owner/name>` | Select the active repository. A missing repository is created and seeded from `<REPOS_DIR>/eurofish`; an existing one is cloned or fast-forwarded. A GitHub URL is also accepted. |
 | `/repo` | Show the active repository. |
 | plain text | Run the text as a request against the active repository. |
@@ -82,7 +82,7 @@ One job runs at a time. Progress is shown in a single message that is edited as 
 - **Commit and push:** all changes are committed on the current branch with the first line of the request as the subject, and pushed to `origin`. If Copilot changed nothing, nothing is committed or deployed. A failed push leaves the commit locally and is reported; the next request pushes it.
 - **Redeploy:** the previous `make run` process group for the app is stopped, then `make run` is started detached in `/home/localadmin/repos/<name>` with output appended to `<STATE_DIR>/logs/<name>.log`. The redeploy counts as successful when the process is still running after `DEPLOY_SETTLE_SECONDS` or has exited with code 0; otherwise the log tail is sent. A repository without a `run` target is pushed but not started. Deployed apps do not receive the bot's tokens.
 - **New-app publish:** after a successful `/new` redeploy, the bot creates `<name>.kurwalab.fyi` on `kurwalab-tunnel`, targeting the allocated `127.0.0.1` port, and adds `@reboot cd <REPOS_DIR>/<name> && git pull && make run` to the bot user's crontab without duplicating it. If deployment, routing, or crontab setup fails, the report identifies the completed and failed stages.
-- **App deletion:** `/delete app` verifies that `<REPOS_DIR>/app` is the matching GitHub checkout, stops its recorded process, removes its exact reboot entry and Cloudflare route, deletes the GitHub repository, and then deletes the local checkout. Deletion stops on an error; when a remote deletion has already completed, the error reports which local cleanup remains.
+- **App deletion:** `/delete app` independently attempts to stop its recorded process, remove its exact reboot entry, delete its GitHub repository, remove a matching verified checkout at `<REPOS_DIR>/app`, and delete its Cloudflare route and tunnel CNAME. Missing resources need no cleanup. Every step is reported, and a failure or missing Cloudflare configuration does not block the other attempts.
 - **Routes on demand:** `/cloudflare eurofish 8080` creates or updates `eurofish.kurwalab.fyi` to `http://127.0.0.1:8080` on `kurwalab-tunnel` and maintains its proxied DNS CNAME. `/cloudflare list` shows named ingress rules, and `/cloudflare delete eurofish` removes that ingress rule and its matching tunnel CNAME. Route names must be one lowercase DNS label, and ports must be 1–65535. Other ingress rules are preserved. Ordinary deployment never changes routes.
 
 **Important:** the engine applies a returned ZIP as a full replacement. Everything in the checkout except `.git` is replaced, including untracked and ignored files such as `.env`, virtual environments, `node_modules`, and local databases. Keep runtime data and secrets outside the checkout and let `make run` rebuild dependencies.
@@ -105,7 +105,7 @@ Settings come from `.env` (or the file named by `BOT_ENV_FILE`); real environmen
 | `BOT_SHOW_BROWSER` | `false` | Default browser visibility. `browser` or `nobrowser` on `/fix` overrides it for that request. Without `DISPLAY` or `WAYLAND_DISPLAY`, a visible request runs hidden; use VNC or X forwarding to see it. |
 | `BOT_TEMPORARY_CHAT` | `true` | Default Temporary chat state. `tempchat` or `notempchat` on `/fix` overrides it for that request; disabling it saves the chat in your account. |
 | `DEPLOY_SETTLE_SECONDS` | `10` | How long `make run` must stay up to count as deployed. |
-| `CLOUDFLARE_API_TOKEN` | empty | Enables `/new` publishing and `/cloudflare` route management; requires Cloudflare Tunnel Edit and DNS Edit permissions. It is not passed to deployed apps. |
+| `CLOUDFLARE_API_TOKEN` | empty | Enables `/new` publishing and Cloudflare route management, including `/delete` route cleanup; requires Cloudflare Tunnel Edit and DNS Edit permissions. It is not passed to deployed apps. |
 | `CLOUDFLARE_ACCOUNT_ID` | empty | Account containing the tunnel; required with the Cloudflare token. |
 | `CLOUDFLARE_ZONE_ID` | empty | Zone containing the public hostname; required with the Cloudflare token. |
 | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL` | Copilot Telegram Bot | Identity on bot commits. |

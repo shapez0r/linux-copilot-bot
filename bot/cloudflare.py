@@ -188,14 +188,20 @@ class CloudflareRoutes:
             raise CloudflareError("the last tunnel route uses port 65535; no next port is available")
         return last_port + 1
 
-    def delete_route(self, app: str) -> str:
+    def delete_route(self, app: str, missing_ok: bool = False) -> str:
         """Delete one explicitly named ingress rule and its tunnel CNAME."""
         hostname = self._hostname(app)
         tunnel_id = self._resolve_tunnel()
         config, ingress = self._configuration(tunnel_id)
         updated = [rule for rule in ingress if (rule.get("hostname") or "").lower() != hostname]
         if len(updated) == len(ingress):
-            raise CloudflareError(f"route {hostname} was not found")
+            if not missing_ok:
+                raise CloudflareError(f"route {hostname} was not found")
+            record_id = self._deletable_dns_record(tunnel_id, hostname)
+            if record_id:
+                self._request("DELETE", f"/zones/{self._zone}/dns_records/{record_id}")
+                return f"route https://{hostname} was not found; deleted its matching CNAME."
+            return f"route https://{hostname} and its matching CNAME were not found; nothing to delete."
         record_id = self._deletable_dns_record(tunnel_id, hostname)
         config["ingress"] = updated
         self._request("PUT", f"/accounts/{self._account}/cfd_tunnel/{tunnel_id}/configurations",
