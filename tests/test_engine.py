@@ -159,13 +159,15 @@ class CompletionTests(unittest.TestCase):
         self.assertEqual(sum(1 for n in ast.walk(loop) if isinstance(n, ast.Call)
                              and isinstance(n.func, ast.Name) and n.func.id == 'download_candidates'), 1)
 
-    def test_output_signature_uses_a_pre_submit_baseline(self):
+    def test_output_signature_is_initialized_after_submission(self):
         source = SCRIPT.read_text()
-        baseline = source.index('baseline_signature, _, _ = read_screen(page, sel, prompt)')
+        filled = source.index('composer.fill(prompt)')
         submit = source.index('send_with_retry(page, composer, sel["send"])')
-        initialize = source.index('last_signature = baseline_signature')
-        self.assertLess(baseline, submit)
+        initialize = source.index('last_signature = None', submit)
+        first_snapshot = source.index('signature, blocks, answers = read_screen(page, sel, prompt)', initialize)
+        self.assertNotIn('read_screen(page, sel, prompt)', source[filled:submit])
         self.assertLess(submit, initialize)
+        self.assertLess(initialize, first_snapshot)
 
 
 class DownloadFlowTests(unittest.TestCase):

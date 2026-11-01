@@ -1726,8 +1726,6 @@ def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout)
             composer.fill(prompt)
             # Earlier turns of a continued chat must not be read as this prompt's response.
             prior_messages = mark_prior_output(page)
-            # Establish the pre-submit screen so the first rendered response counts as new output.
-            baseline_signature, _, _ = read_screen(page, sel, prompt)
             prior_keys = set()
             if continuing:
                 old_links = page.locator(sel["download"])
@@ -1752,7 +1750,7 @@ def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout)
             idle_limit = args.timeout
             started = time.monotonic()
             last_activity = started
-            last_signature = baseline_signature
+            last_signature = None
             last_live = None
             last_tasks = []
             live_blocks, live_answers = [], []

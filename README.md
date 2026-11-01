@@ -98,7 +98,7 @@ Settings come from `.env` (or the file named by `BOT_ENV_FILE`); real environmen
 | `STATE_DIR` | `~/.copilot-telegram-bot` | Active repository and model, process ids, app logs. |
 | `COPILOT_PROFILE` | `~/.copilot-repo-browser` | Browser profile created by `make login`. |
 | `COPILOT_MODEL` | `GPT/GPT-6` | Initial model label; change it later with `/model`. |
-| `COPILOT_TIMEOUT` | `900` | Seconds without a visible output change or task-card change before a run gives up; the pre-submit screen is the inactivity baseline. |
+| `COPILOT_TIMEOUT` | `900` | Seconds without a visible output change or task-card change before a run gives up; output detection starts after submission. |
 | `BOT_SHOW_BROWSER` | `false` | Default browser visibility. `browser` or `nobrowser` on `/fix` overrides it for that request. Without `DISPLAY` or `WAYLAND_DISPLAY`, a visible request runs hidden; use VNC or X forwarding to see it. |
 | `BOT_TEMPORARY_CHAT` | `true` | Default Temporary chat state. `tempchat` or `notempchat` on `/fix` overrides it for that request; disabling it saves the chat in your account. |
 | `DEPLOY_SETTLE_SECONDS` | `10` | How long `make run` must stay up to count as deployed. |
