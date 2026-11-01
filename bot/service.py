@@ -306,8 +306,9 @@ class Bot:
                 private = option == "private"
                 remaining = parts[1].lstrip() if len(parts) > 1 else ""
                 continue
-            match = re.match(r'''name=(?:"([^"]*)"|'([^']*)'|([^\s'" ]+))(?=\s|$)''', remaining,
-                             flags=re.IGNORECASE)
+            match = re.match(
+                r'''name=(?:"([^"]*)"|'([^']*)'|“([^”]*)”|‘([^’]*)’|([^\s'"“”‘’]+))(?=\s|$)''',
+                remaining, flags=re.IGNORECASE)
             if match:
                 if name is not None:
                     return remaining, private, None, None, None, None, "Specify name only once."
@@ -318,8 +319,9 @@ class Bot:
                 continue
             if option.startswith("name="):
                 return remaining, private, None, None, None, None, 'Use name="<name|owner/name>".'
-            match = re.match(r'''model=(?:"([^"]*)"|'([^']*)'|(\S+))(?=\s|$)''', remaining,
-                             flags=re.IGNORECASE)
+            match = re.match(
+                r'''model=(?:"([^"]*)"|'([^']*)'|“([^”]*)”|‘([^’]*)’|([^\s'"“”‘’]+))(?=\s|$)''',
+                remaining, flags=re.IGNORECASE)
             if match:
                 if model is not None:
                     return remaining, private, None, None, None, None, "Specify model only once."
@@ -331,8 +333,9 @@ class Bot:
                     'Use model=<provider/model>; quote names containing spaces, such as '
                     'model="Claude/Opus 5.5".'
                 )
-            match = re.match(r'''template=(?:"([^"]*)"|'([^']*)'|(\S+))(?=\s|$)''', remaining,
-                             flags=re.IGNORECASE)
+            match = re.match(
+                r'''template=(?:"([^"]*)"|'([^']*)'|“([^”]*)”|‘([^’]*)’|([^\s'"“”‘’]+))(?=\s|$)''',
+                remaining, flags=re.IGNORECASE)
             if match:
                 if template is not None:
                     return remaining, private, None, None, None, None, "Specify template only once."
@@ -341,8 +344,9 @@ class Bot:
                 continue
             if option.startswith("template="):
                 return remaining, private, None, None, None, None, "Use template=<app>, such as template=eurofish."
-            match = re.match(r'''prompt=(?:"([^"]*)"|'([^']*)'|([^\s'" ]+))(?=\s|$)''', remaining,
-                             flags=re.IGNORECASE)
+            match = re.match(
+                r'''prompt=(?:"([^"]*)"|'([^']*)'|“([^”]*)”|‘([^’]*)’|([^\s'"“”‘’]+))(?=\s|$)''',
+                remaining, flags=re.IGNORECASE)
             if match:
                 if prompt is not None:
                     return remaining, private, None, None, None, None, "Specify prompt only once."
@@ -350,9 +354,14 @@ class Bot:
                 if not prompt:
                     return remaining, private, None, None, None, None, 'Use prompt="<request>" with a nonempty request.'
                 remaining = remaining[match.end():].lstrip()
+                if match.group(5) is not None and remaining:
+                    if re.search(r"(?:^|\s)prompt=", remaining, flags=re.IGNORECASE):
+                        return remaining, private, None, None, None, None, "Specify prompt only once."
+                    prompt = f"{prompt} {remaining}"
+                    remaining = ""
                 continue
             if option.startswith("prompt="):
-                return remaining, private, None, None, None, None, 'Use prompt="<request>"; quote requests containing spaces.'
+                return remaining, private, None, None, None, None, 'Use prompt="<request>" with a nonempty request.'
             break
         return remaining, private, model, template, name, prompt, ""
 

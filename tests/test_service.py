@@ -246,6 +246,24 @@ class ServiceTests(unittest.TestCase):
                 remaining, private, model, template, name, prompt, error = Bot._new_options(options)
                 self.assertEqual((remaining, name, prompt, error), ("", "fresh-app", request, ""))
 
+    def test_new_options_accept_smart_quotes_and_a_final_unquoted_prompt(self):
+        for options in (
+                'model=“Claude/Opus 5.5” template=simple-arkanoid '
+                'name=seabattle prompt=Simple sea battle game',
+                'model=“Claude/Opus 5.5” template=“simple-arkanoid” '
+                'name=“seabattle” prompt=Simple sea battle game',
+                'model=“Claude/Opus 5.5” template=“simple-arkanoid” '
+                'name=“seabattle-game” prompt=Simple sea battle game'):
+            with self.subTest(options=options):
+                remaining, private, model, template, name, prompt, error = Bot._new_options(options)
+                self.assertEqual(remaining, "")
+                self.assertTrue(private)
+                self.assertEqual(model, "Claude/Opus 5.5")
+                self.assertEqual(template, "simple-arkanoid")
+                self.assertIn(name, ("seabattle", "seabattle-game"))
+                self.assertEqual(prompt, "Simple sea battle game")
+                self.assertEqual(error, "")
+
     def test_new_prompt_option_creates_app_with_separate_request(self):
         self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf",
                                    cloudflare_account_id="a" * 32, cloudflare_zone_id="b" * 32)
