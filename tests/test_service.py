@@ -118,6 +118,14 @@ class ServiceTests(unittest.TestCase):
         self.bot.handle_update(update(42))
         self.assertEqual(self.tg.sent, [HELP])
 
+    def test_multiple_authorized_users_private_only(self):
+        self.bot.cfg = make_config(self.tmp, owner_ids=(42, 7))
+        def update(sender, chat_type="private"):
+            return {"message": {"from": {"id": sender}, "chat": {"id": sender, "type": chat_type}, "text": "/help"}}
+        for sender, kind in ((42, "private"), (7, "private"), (8, "private"), (7, "group")):
+            self.bot.handle_update(update(sender, kind))
+        self.assertEqual(self.tg.sent, [HELP, HELP])
+
     def test_request_without_repository_asks_to_select_one(self):
         self.say("add a login page")
         self.assertIn("Select a repository first", self.tg.sent[-1])

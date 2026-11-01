@@ -128,7 +128,7 @@ class Bot:
         message = update.get("message") or {}
         sender = (message.get("from") or {}).get("id")
         chat = message.get("chat") or {}
-        if sender != self.cfg.owner_id or chat.get("type") != "private":
+        if sender not in (self.cfg.owner_ids or (self.cfg.owner_id,)) or chat.get("type") != "private":
             log.warning("ignored message from user %s", sender)
             return
         text = (message.get("text") or "").strip()

@@ -15,7 +15,7 @@ A Telegram bot for an Ubuntu VM that turns chat messages from its owner into rep
 
 - Ubuntu with Python 3.9+, `python3-venv`, Git, and `make`.
 - A Microsoft 365 account with access to Copilot Chat.
-- A Telegram bot token from [@BotFather](https://t.me/BotFather) and your numeric Telegram user id (for example from @userinfobot).
+- A Telegram bot token from [@BotFather](https://t.me/BotFather) and the numeric Telegram user IDs to authorize (for example from @userinfobot).
 - A GitHub token with read/write access to repository contents. Creating repositories also requires permission to create repositories for the owner.
 - A reference app checkout at `<REPOS_DIR>/eurofish` (by default `/home/localadmin/repos/eurofish`) for new repositories.
 - For manually requested public routes, a remotely managed Cloudflare Tunnel and an API token with **Account / Cloudflare Tunnel / Edit** and **Zone / DNS / Edit** permissions.
@@ -45,7 +45,7 @@ Edit `deploy/copilot-telegram-bot.service` (user and paths), install it under `/
 
 ## Using the bot
 
-Only the owner (`TELEGRAM_OWNER_ID`) in a private chat is served; every other message is ignored.
+Only users listed in `TELEGRAM_OWNER_ID` in private chats are served; every other message is ignored. The configured users share the active repository, model, and single-job queue.
 
 | Message | Effect |
 | --- | --- |
@@ -88,7 +88,7 @@ Settings come from `.env` (or the file named by `BOT_ENV_FILE`); real environmen
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | required | Bot token. |
-| `TELEGRAM_OWNER_ID` | required | Numeric id of the only accepted user. |
+| `TELEGRAM_OWNER_ID` | required | One numeric user ID or comma-separated IDs (for example `123456,789012`). |
 | `GITHUB_TOKEN` | required | Used for GitHub API calls and Git over HTTPS through `GIT_ASKPASS` (including private repository clones); it is never written into remote URLs. |
 | `GITHUB_OWNER` | token's account | Owner for bare repository names. |
 | `REPOS_DIR` | `/home/localadmin/repos` | Parent of app checkouts and the `eurofish` reference app used for new repositories. |
@@ -110,7 +110,7 @@ Without `.env` values or `/fix` overrides, requests use `nobrowser` and `tempcha
 
 ## Security
 
-- The bot obeys only `TELEGRAM_OWNER_ID`. Anyone who controls that Telegram account can make Copilot-written code run on the VM.
+- The bot obeys only IDs listed in `TELEGRAM_OWNER_ID`. Anyone who controls an authorized Telegram account can make Copilot-written code run on the VM.
 - A request can create or change a `Makefile` that the bot then runs. Use a dedicated unprivileged VM user, restrict the GitHub token to the repositories involved, and keep `.env` and the browser profile readable only by that user.
 - Upload only repositories approved for your organization's Copilot environment.
 - Telegram, GitHub, and Cloudflare API tokens are redacted from errors and messages and are removed from the environment of deployed apps.
