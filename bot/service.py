@@ -30,15 +30,19 @@ NEW_APP_PROMPT = (
     "but running on the {port}\n\n"
 )
 
-NEW_USAGE = "Usage: /new [public|private] [model=<provider/model>] <name|owner/name> <request>"
+NEW_USAGE = (
+    "Usage: /new [public|private] [model=<provider/model>] [template=<app>] "
+    "<name|owner/name> <request>"
+)
 
 HELP = """Send a request as plain text and I will change the active repository with Copilot, commit, push and redeploy it with `make run`.
 
-/new [public|private] [model=<provider/model>] <name|owner/name> <request> - create, build, deploy and publish a new app
+/new [public|private] [model=<provider/model>] [template=<app>] <name|owner/name> <request> - create, build, deploy and publish a new app
 /repo [public|private] <name|owner/name> - select a repository; a missing one is created from the eurofish reference app
 /repo - show the active repository
 /fix <repo> <request> - select a repository and run a request in one message
 /fix [browser|nobrowser] [tempchat|notempchat] <request> - run against the active repository with per-request browser/chat options
+/list - list running apps
 /cloudflare <subdomain> <port> - route <subdomain>.kurwalab.fyi to http://127.0.0.1:<port>
 /cloudflare list - list tunnel routes
 /cloudflare delete <subdomain> - delete a tunnel route by name
@@ -151,6 +155,8 @@ class Bot:
             self.cmd_repo(chat_id, arg)
         elif command == "fix":
             self.cmd_fix(chat_id, arg)
+        elif command == "list":
+            self.cmd_list(chat_id, arg)
         elif command == "cloudflare":
             self.cmd_cloudflare(chat_id, arg)
         elif command == "model":
@@ -228,6 +234,16 @@ class Bot:
             lines.append(f"App: {self.deployer.status(name, local_path(self.cfg.repos_dir, name))}")
         self.say(chat_id, "\n".join(lines))
 
+    def cmd_list(self, chat_id: int, arg: str):
+        if arg:
+            self.say(chat_id, "Usage: /list")
+            return
+        apps = self.deployer.running_apps()
+        if not apps:
+            self.say(chat_id, "No apps are running.")
+            return
+        self.say(chat_id, "\n".join(["Running apps:", *(f"- {app} (pid {pid})" for app, pid in apps)]))
+
     def cmd_cancel(self, chat_id: int):
         if self._lock.locked():
             self._cancel.set()
@@ -276,9 +292,9 @@ class Bot:
 
     @staticmethod
     def _new_options(arg: str):
-        """Read leading visibility and per-run model options in either order."""
+        """Read leading visibility, model and template options in any order."""
         remaining = arg.lstrip()
-        private, model = True, None
+        private, model, template = True, None, None
         while remaining:
             parts = remaining.split(None, 1)
             option = parts[0].lower()
@@ -290,25 +306,38 @@ class Bot:
                              flags=re.IGNORECASE)
             if match:
                 if model is not None:
-                    return remaining, private, None, "Specify model only once."
+                    return remaining, private, None, None, "Specify model only once."
                 model = next(value for value in match.groups() if value is not None).strip()
                 remaining = remaining[match.end():].lstrip()
                 continue
             if option.startswith("model="):
-                return remaining, private, None, (
+                return remaining, private, None, None, (
                     'Use model=<provider/model>; quote names containing spaces, such as '
                     'model="Claude/Opus 5.5".'
                 )
+            match = re.match(r'''template=(?:"([^"]*)"|'([^']*)'|(\S+))(?=\s|$)''', remaining,
+                             flags=re.IGNORECASE)
+            if match:
+                if template is not None:
+                    return remaining, private, None, None, "Specify template only once."
+                template = next(value for value in match.groups() if value is not None).strip()
+                remaining = remaining[match.end():].lstrip()
+                continue
+            if option.startswith("template="):
+                return remaining, private, None, None, "Use template=<app>, such as template=eurofish."
             break
-        return remaining, private, model, ""
+        return remaining, private, model, template, ""
 
     def cmd_new(self, chat_id: int, arg: str):
-        arg, private, model, error = self._new_options(arg)
+        arg, private, model, template, error = self._new_options(arg)
         if error:
             self.say(chat_id, error)
             return
         if model is not None and not self._valid_model(model):
             self.say(chat_id, "Use a provider/model pair such as GPT/GPT-6.")
+            return
+        if template is not None and not self._valid_route(template):
+            self.say(chat_id, "Template app names must be lowercase DNS labels containing only letters, digits and hyphens.")
             return
         parts = arg.split(None, 1)
         if len(parts) != 2 or not parts[1].strip():
@@ -317,7 +346,8 @@ class Bot:
         if self._cloudflare_unavailable(chat_id):
             return
         ref, request = parts[0], parts[1].strip()
-        self._spawn(chat_id, lambda: self._new_app(chat_id, ref, request, private, model))
+        self._spawn(chat_id, lambda: self._new_app(
+            chat_id, ref, request, private, model, template or NEW_REPO_TEMPLATE))
 
     def cmd_repo(self, chat_id: int, arg: str):
         arg, private = self._creation_options(arg)
@@ -362,8 +392,9 @@ class Bot:
     def _owner_default(self) -> str:
         return self.cfg.github_owner or self.gh.login
 
-    def _prepare(self, owner: str, name: str, progress: Progress, new_only: bool = False, private: bool = True):
-        """Create a repository from the reference app, or clone and update an existing repository."""
+    def _prepare(self, owner: str, name: str, progress: Progress, new_only: bool = False, private: bool = True,
+                 template_name: str = NEW_REPO_TEMPLATE):
+        """Create a repository from a local app template, or update an existing checkout."""
         progress.update(f"Looking up {owner}/{name} on GitHub...")
         repo = self.gh.get_repo(owner, name)
         if new_only and repo is not None:
@@ -374,11 +405,11 @@ class Bot:
             repo = self.gh.create_repo(owner, name, private=private)
         dest = local_path(self.cfg.repos_dir, name)
         if created:
-            template = self.cfg.repos_dir / NEW_REPO_TEMPLATE
+            template = self.cfg.repos_dir / template_name
             progress.update(f"Copying {template} into the new repository...")
             branch = self.git.seed_from_template(repo["clone_url"], dest, template,
                                                  repo.get("default_branch") or "main")
-            return dest, branch, f"created from {NEW_REPO_TEMPLATE}"
+            return dest, branch, f"created from {template_name}"
         progress.update(f"Preparing {dest}...")
         cloned = self.git.ensure_clone(repo["clone_url"], dest, owner, name)
         branch = self.git.sync(dest)
@@ -394,13 +425,19 @@ class Bot:
         self.say(chat_id, f"\u2705 {owner}/{name} is {how} at {dest} (branch {branch}) and now active."
                  + (" Send your next message describing what to build." if new_only else ""))
 
-    def _new_app(self, chat_id: int, ref: str, request: str, private: bool, model=None):
+    def _new_app(self, chat_id: int, ref: str, request: str, private: bool, model=None,
+                 template: str = NEW_REPO_TEMPLATE):
         owner, name = parse_repo_ref(ref, self._owner_default())
         if not self._valid_route(name):
             raise RepoError("App names must be lowercase DNS labels containing only letters, digits and hyphens.")
+        if name == template:
+            raise RepoError("The new app name must differ from its template app name.")
         full = f"{owner}/{name}"
         progress = Progress(self.tg, chat_id, self.cfg)
-        dest, _, _ = self._prepare(owner, name, progress, new_only=True, private=private)
+        if not (self.cfg.repos_dir / template).is_dir():
+            raise RepoError(f"Template app is not available locally: {template}")
+        dest, _, _ = self._prepare(owner, name, progress, new_only=True, private=private,
+                                   template_name=template)
         self.state.repo = full
         self.state.save()
         routes = CloudflareRoutes(self.cfg)

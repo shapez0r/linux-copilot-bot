@@ -82,6 +82,17 @@ class Deployer:
             return f"running (pid {pid})"
         return "not running"
 
+    def running_apps(self) -> list[tuple[str, int]]:
+        """Return app names and process ids for verified live deployments."""
+        apps = []
+        for pid_file in self._run_dir.glob("*.pid"):
+            app = pid_file.stem
+            pid = self._read_pid(app)
+            repo_dir = self._cfg.repos_dir / app
+            if pid and _alive(pid) and _cwd(pid) == repo_dir.resolve():
+                apps.append((app, pid))
+        return sorted(apps)
+
     def stop(self, app: str, repo_dir: Path) -> bool:
         """Stop the process group started by an earlier deploy; True when a group was signalled."""
         pid = self._read_pid(app)

@@ -2,7 +2,7 @@
 
 A Telegram bot for an Ubuntu VM that turns chat messages from authorized users into repository changes. For each request it:
 
-1. selects an existing GitHub repository and clones it, or creates a new one from the local `eurofish` reference app, at `/home/localadmin/repos/<name>`;
+1. selects an existing GitHub repository and clones it, or creates a new one from a selected local app template (`eurofish` by default), at `/home/localadmin/repos/<name>`;
 2. takes the message as the prompt;
 3. sends the repository to Microsoft 365 Copilot Chat through the Playwright round-trip engine and applies the returned repository;
 4. commits and pushes the result to GitHub;
@@ -17,7 +17,7 @@ A Telegram bot for an Ubuntu VM that turns chat messages from authorized users i
 - A Microsoft 365 account with access to Copilot Chat.
 - A Telegram bot token from [@BotFather](https://t.me/BotFather) and the numeric Telegram user id of each authorized user (for example from @userinfobot).
 - A GitHub token with read/write access to repository contents. Creating repositories also requires permission to create repositories for the owner.
-- A reference app checkout at `<REPOS_DIR>/eurofish` (by default `/home/localadmin/repos/eurofish`) for new repositories.
+- A local app checkout to use as a new-repository template. The default is `<REPOS_DIR>/eurofish` (`/home/localadmin/repos/eurofish` with the default configuration).
 - For `/new` and route commands, a remotely managed Cloudflare Tunnel and an API token with **Account / Cloudflare Tunnel / Edit** and **Zone / DNS / Edit** permissions.
 - The `crontab` command for installing each new app's reboot entry.
 
@@ -50,12 +50,13 @@ Only user ids listed in `TELEGRAM_OWNER_ID` are served, and only in private chat
 
 | Message | Effect |
 | --- | --- |
-| `/new [public\|private] [model=<provider/model>] <name\|owner/name> <request>` | Create a new GitHub repository (private by default), seed it from `<REPOS_DIR>/eurofish`, run the request with the allocated port instruction, push the result, deploy it, publish `https://<name>.kurwalab.fyi`, and install reboot startup. The optional model applies only to this command; quote a model name containing spaces, such as `model="Claude/Opus 5.5"`. Refuses existing repositories. |
+| `/new [public\|private] [model=<provider/model>] [template=<app>] <name\|owner/name> <request>` | Create a new GitHub repository (private by default), seed it from the selected local app (`eurofish` by default), run the request with the allocated port instruction, push the result, deploy it, publish `https://<name>.kurwalab.fyi`, and install reboot startup. The optional model applies only to this command; quote a model name containing spaces or punctuation, such as `model="Claude/Opus 5.5"`. Refuses existing repositories. |
 | `/repo <name>` or `/repo <owner/name>` | Select the active repository. A missing repository is created and seeded from `<REPOS_DIR>/eurofish`; an existing one is cloned or fast-forwarded. A GitHub URL is also accepted. |
 | `/repo` | Show the active repository. |
 | plain text | Run the text as a request against the active repository. |
 | `/fix <repo> <request>` | Select a repository and run a request in one message. |
 | `/fix [browser\|nobrowser] [tempchat\|notempchat] <request>` | Run a request against the active repository with one or both per-request options. Options may be supplied in either order. |
+| `/list` | List deployed apps whose recorded process is currently running from the expected repository checkout. |
 | `/cloudflare <subdomain> <port>` | Create or update `<subdomain>.kurwalab.fyi` on `kurwalab-tunnel`, targeting `http://127.0.0.1:<port>`; requires Cloudflare credentials. |
 | `/cloudflare list` | List named ingress routes on `kurwalab-tunnel`. |
 | `/cloudflare delete <subdomain>` | Delete the named ingress route and its matching tunnel CNAME. |
@@ -63,13 +64,13 @@ Only user ids listed in `TELEGRAM_OWNER_ID` are served, and only in private chat
 | `/status` | Show repository, model, job state, and whether the app is running. |
 | `/cancel` | Ask Copilot to stop and discard the running job. |
 
-Use `public` or `private` before the name when creating a repository; the default is `private`. For `/new`, `model=<provider/model>` may appear before or after the visibility option and overrides the active model only while creating that app. Existing repositories keep their visibility. Private repositories are cloned using `GITHUB_TOKEN` through `GIT_ASKPASS`, without storing credentials in remote URLs.
+Use `public` or `private` before the name when creating a repository; the default is `private`. For `/new`, `model=<provider/model>` and `template=<app>` may appear before or after the visibility option and in either order. The model overrides the active model only while creating that app. The template must name an existing local app directory directly under `<REPOS_DIR>`. Existing repositories keep their visibility. Private repositories are cloned using `GITHUB_TOKEN` through `GIT_ASKPASS`, without storing credentials in remote URLs.
 
 A bare name uses `GITHUB_OWNER`, or the token's account when it is not set. The checkout directory is `<REPOS_DIR>/<repository name>`, so two repositories with the same name under different owners cannot be used side by side; the bot refuses a directory that belongs to another repository.
 
 ### New repository template
 
-For every missing repository, the bot creates an empty GitHub repository, copies the contents of `<REPOS_DIR>/eurofish` into the new checkout, excludes every `.git` entry, and pushes the copy as the single `Initial commit`. The reference app must exist and contain files that Git can commit. `/new` then reads the ordered tunnel ingress list, chooses one more than the last local HTTP route port (or `8080` when none exists), selects its per-command model or the active model, and prefixes the request with `Instead of this app, let's create another app, with the same architecture, stack and styling, but running on the <port>`. App names must be lowercase DNS labels containing only letters, digits, and hyphens.
+For every missing repository, the bot creates an empty GitHub repository, copies a local template app into the new checkout, excludes every `.git` entry, and pushes the copy as the single `Initial commit`. `/repo` always uses `<REPOS_DIR>/eurofish`; `/new` uses that default unless `template=<app>` selects another directory under `<REPOS_DIR>`. The template must exist and contain files that Git can commit. `/new` then reads the ordered tunnel ingress list, chooses one more than the last local HTTP route port (or `8080` when none exists), selects its per-command model or the active model, and prefixes the request with `Instead of this app, let's create another app, with the same architecture, stack and styling, but running on the <port>`. App and template names must be lowercase DNS labels containing only letters, digits, and hyphens.
 
 One job runs at a time. Progress is shown in a single message that is edited as the job advances. Its first line is `Currently doing: ...`, using the latest visible reasoning paragraph, active step, task, or bot stage. Each displayed bot stage, task, plan item, activity, and step carries a stable first-seen timestamp with second precision, the bot host's local timezone name, and its UTC offset. A compact stage is shown until Copilot exposes structured output, then the current task and plan, activity or step names, reasoning-duration labels such as `Reasoned for 12s`, and interleaved live answers take its place. Other reasoning and code-execution details are omitted. Once structured output is visible, repetitive inactivity text stays hidden. Ordinary requests end with the commit, change summary, and redeploy result; `/new` also returns Copilot's final output, provisioning status, and public app URL.
 
@@ -94,7 +95,7 @@ Settings come from `.env` (or the file named by `BOT_ENV_FILE`); real environmen
 | `TELEGRAM_OWNER_ID` | required | Comma-separated numeric ids of accepted users. |
 | `GITHUB_TOKEN` | required | Used for GitHub API calls and Git over HTTPS through `GIT_ASKPASS` (including private repository clones); it is never written into remote URLs. |
 | `GITHUB_OWNER` | token's account | Owner for bare repository names. |
-| `REPOS_DIR` | `/home/localadmin/repos` | Parent of app checkouts and the `eurofish` reference app used for new repositories. |
+| `REPOS_DIR` | `/home/localadmin/repos` | Parent of app checkouts and local app templates; `eurofish` is the default template. |
 | `STATE_DIR` | `~/.copilot-telegram-bot` | Active repository and model, process ids, app logs. |
 | `COPILOT_PROFILE` | `~/.copilot-repo-browser` | Browser profile created by `make login`. |
 | `COPILOT_MODEL` | `GPT/GPT-6` | Initial model label; change it later with `/model`. |

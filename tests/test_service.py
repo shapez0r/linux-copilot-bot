@@ -74,7 +74,7 @@ class FakeRoundTrip:
 
 class FakeDeployer:
     def __init__(self, ok=True):
-        self.ok, self.calls, self.reboots = ok, [], []
+        self.ok, self.calls, self.reboots, self.running = ok, [], [], []
 
     def redeploy(self, app, repo_dir):
         self.calls.append((app, Path(repo_dir)))
@@ -86,6 +86,9 @@ class FakeDeployer:
 
     def status(self, app, repo_dir):
         return "not running"
+
+    def running_apps(self):
+        return self.running
 
 
 class ServiceTests(unittest.TestCase):
@@ -196,10 +199,39 @@ class ServiceTests(unittest.TestCase):
         with patch("bot.service.CloudflareRoutes") as routes:
             routes.return_value.next_port.return_value = 8082
             routes.return_value.prepare.return_value = "Tunnel configured."
-            self.say('/new model="Claude/Opus 5.5" public model-app build it')
+            self.say('/new model="Claude/Opus 5.5 (Preview)" public model-app build it')
         self.assertEqual(self.gh.created, [("me/model-app", False)])
-        self.assertEqual(self.rt.calls[0][2], "Claude/Opus 5.5")
+        self.assertEqual(self.rt.calls[0][2], "Claude/Opus 5.5 (Preview)")
         self.assertEqual(self.state.model, "GPT/GPT-6")
+
+    def test_new_can_copy_a_selected_local_app_template(self):
+        source = self.cfg.repos_dir / "source-app"
+        source.mkdir()
+        (source / "README.md").write_text("selected template\n")
+        (source / "app.txt").write_text("source content\n")
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.next_port.return_value = 8082
+            routes.return_value.prepare.return_value = "Tunnel configured."
+            self.say('/new template="source-app" template-copy build it')
+        dest = self.cfg.repos_dir / "template-copy"
+        self.assertEqual((dest / "README.md").read_text(), "selected template\n")
+        self.assertEqual((dest / "app.txt").read_text(), "source content\n")
+        self.assertNotIn(".git", git("ls-tree", "-r", "--name-only", "HEAD", cwd=dest).splitlines())
+
+    def test_new_rejects_invalid_missing_or_repeated_templates(self):
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        self.say("/new template=../source new-app build it")
+        self.assertIn("Template app names", self.tg.sent[-1])
+        self.say("/new template=missing new-app build it")
+        self.assertIn("not available locally", self.tg.sent[-1])
+        self.say("/new template=eurofish template=eurofish new-app build it")
+        self.assertIn("only once", self.tg.sent[-1])
+        self.say("/new template=eurofish eurofish build it")
+        self.assertIn("must differ", self.tg.sent[-1])
+        self.assertEqual(self.gh.created, [])
 
     def test_new_rejects_invalid_or_repeated_model_options(self):
         self.say("/new model=invalid model-app build it")
@@ -346,6 +378,15 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("Unknown command", self.tg.sent[-1])
         self.say("/fix")
         self.assertIn("Usage", self.tg.sent[-1])
+
+    def test_list_reports_running_apps(self):
+        self.say("/list")
+        self.assertEqual(self.tg.sent[-1], "No apps are running.")
+        self.deployer.running = [("alpha", 101), ("beta", 202)]
+        self.say("/list")
+        self.assertEqual(self.tg.sent[-1], "Running apps:\n- alpha (pid 101)\n- beta (pid 202)")
+        self.say("/list extra")
+        self.assertEqual(self.tg.sent[-1], "Usage: /list")
 
     def test_second_job_is_refused_while_one_runs(self):
         release = threading.Event()

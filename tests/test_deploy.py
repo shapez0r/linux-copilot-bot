@@ -42,9 +42,11 @@ class DeployTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertFalse(_alive(first))
         self.assertTrue(_alive(second))
+        self.assertEqual(self.deployer.running_apps(), [("app", second)])
         self.assertIn("started", self.deployer.log_tail("app"))
         self.assertTrue(self.deployer.stop("app", self.repo))
         self.assertEqual(self.deployer.status("app", self.repo), "not running")
+        self.assertEqual(self.deployer.running_apps(), [])
 
     def test_failing_run_reports_the_log(self):
         self.makefile("echo boom; exit 3")
