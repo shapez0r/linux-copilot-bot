@@ -5,6 +5,7 @@ import logging
 import re
 import threading
 import time
+from datetime import datetime, timezone
 
 from .config import Config, redact
 from .cloudflare import CloudflareError, CloudflareRoutes
@@ -46,13 +47,32 @@ class Progress:
     """One Telegram message that is edited as a job advances, throttled to respect rate limits."""
 
     MIN_INTERVAL = 3.0
+    ACTIVE_MARKS = ("\U0001f504", "\u23f3", "\u231b")
 
     def __init__(self, tg: Telegram, chat_id: int, cfg: Config):
         self._tg, self._chat, self._cfg = tg, chat_id, cfg
         self._id, self._shown, self._pending, self._last = None, "", "", 0.0
+        self._status, self._ongoing, self._last_model_output, self._frame = "", False, None, 0
 
-    def update(self, text: str):
-        self._pending = redact(text, self._cfg.secrets)
+    def begin_prompt(self):
+        """Add activity and model-output metadata while Copilot handles a prompt."""
+        self._ongoing, self._last_model_output = True, None
+
+    def end_prompt(self):
+        self._ongoing = False
+        self._pending = self._status
+
+    def update(self, text: str, model_output: bool = False):
+        self._status = redact(text, self._cfg.secrets)
+        if model_output:
+            self._last_model_output = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        if self._ongoing:
+            mark = self.ACTIVE_MARKS[self._frame % len(self.ACTIVE_MARKS)]
+            self._frame += 1
+            last_output = self._last_model_output or "not received yet"
+            self._pending = f"{mark} {self._status}\nLast model output: {last_output}"
+        else:
+            self._pending = self._status
         if self._id is None or time.monotonic() - self._last >= self.MIN_INTERVAL:
             self.flush()
 
@@ -328,17 +348,26 @@ class Bot:
         self.state.save()
         if self._cancel.is_set():
             raise Cancelled()
+        progress.begin_prompt()
         progress.update(f"{full}: sending the repository to Copilot...")
         try:
             result = self.roundtrip.run(dest, request + DEPLOY_NOTE, self.state.model,
-                                        lambda stage, msg: progress.update(f"{full}: {msg}"), self._cancel,
+                                        lambda stage, msg: progress.update(
+                                            f"{full}: {msg}", model_output=stage in ("task", "reasoning")),
+                                        self._cancel,
                                         show_browser, temporary_chat)
         except Cancelled:
+            progress.end_prompt()
             progress.flush()
             if self.git.is_dirty(dest):
                 self.say(chat_id, "\u26a0\ufe0f The checkout has uncommitted changes from the interrupted run; "
                                   f"review {dest} before the next request.")
             raise
+        except Exception:
+            progress.end_prompt()
+            progress.flush()
+            raise
+        progress.end_prompt()
         progress.update(f"{full}: committing and pushing...")
         pushed = self.git.commit_and_push(dest, request)
         if pushed is None:

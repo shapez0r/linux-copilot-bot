@@ -8,7 +8,7 @@ from support import git, make_config, make_origin
 from bot.deploy import DeployResult
 from bot.gitops import Git
 from bot.roundtrip import Cancelled
-from bot.service import DEPLOY_NOTE, HELP, Bot
+from bot.service import DEPLOY_NOTE, HELP, Bot, Progress
 from bot.state import State
 
 
@@ -122,6 +122,19 @@ class ServiceTests(unittest.TestCase):
         self.say("add a login page")
         self.assertIn("Select a repository first", self.tg.sent[-1])
         self.assertEqual(self.rt.calls, [])
+
+    def test_prompt_progress_has_activity_and_last_model_output(self):
+        progress = Progress(self.tg, 1, self.cfg)
+        progress.MIN_INTERVAL = 0
+        progress.begin_prompt()
+        progress.update("me/app: waiting for Copilot")
+        self.assertIn("Last model output: not received yet", self.tg.sent[-1])
+        progress.update("me/app: Copilot is working", model_output=True)
+        self.assertRegex(self.tg.edits[-1], r"^[\U0001f504\u23f3\u231b] ")
+        self.assertRegex(self.tg.edits[-1], r"Last model output: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$")
+        progress.end_prompt()
+        progress.flush()
+        self.assertNotIn("Last model output:", self.tg.edits[-1])
 
     def test_repo_command_clones_and_persists_selection(self):
         self.say("/repo app")
