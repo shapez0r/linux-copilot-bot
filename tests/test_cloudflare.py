@@ -100,6 +100,35 @@ class CloudflareRouteTests(unittest.TestCase):
         ])
         self.assertEqual(routes.list_routes(), "No routes configured on kurwalab-tunnel.")
 
+    def test_next_port_follows_the_last_local_route(self):
+        routes = FakeRoutes([
+            [{"id": "tunnel-id", "name": "kurwalab-tunnel", "tun_type": "cfd_tunnel"}],
+            {"config": {"ingress": [
+                {"hostname": "first.kurwalab.fyi", "service": "http://127.0.0.1:9000"},
+                {"hostname": "external.example.com", "service": "https://example.net"},
+                {"hostname": "last.kurwalab.fyi", "service": "http://127.0.0.1:8083"},
+                {"service": "http_status:404"},
+            ]}},
+        ])
+        self.assertEqual(routes.next_port(), 8084)
+
+    def test_next_port_starts_at_8080_for_an_empty_route_list(self):
+        routes = FakeRoutes([
+            [{"id": "tunnel-id", "name": "kurwalab-tunnel", "tun_type": "cfd_tunnel"}],
+            {"config": {"ingress": [{"service": "http_status:404"}]}},
+        ])
+        self.assertEqual(routes.next_port(), 8080)
+
+    def test_next_port_rejects_exhausted_port_range(self):
+        routes = FakeRoutes([
+            [{"id": "tunnel-id", "name": "kurwalab-tunnel", "tun_type": "cfd_tunnel"}],
+            {"config": {"ingress": [
+                {"hostname": "last.kurwalab.fyi", "service": "http://127.0.0.1:65535"},
+            ]}},
+        ])
+        with self.assertRaisesRegex(CloudflareError, "no next port"):
+            routes.next_port()
+
     def test_delete_removes_named_ingress_and_matching_dns(self):
         routes = FakeRoutes([
             [{"id": "tunnel-id", "name": "kurwalab-tunnel", "tun_type": "cfd_tunnel"}],

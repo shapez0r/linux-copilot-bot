@@ -7,7 +7,7 @@ A Telegram bot for an Ubuntu VM that turns chat messages from authorized users i
 3. sends the repository to Microsoft 365 Copilot Chat through the Playwright round-trip engine and applies the returned repository;
 4. commits and pushes the result to GitHub;
 5. redeploys the app by running `make run` from `/home/localadmin/repos/<name>`;
-6. leaves Cloudflare routes unchanged; routes are managed only with `/cloudflare`.
+6. for `/new`, allocates the next tunnel port, creates the Cloudflare route, and adds reboot startup to the user crontab.
 
 **Experimental:** the engine drives Copilot's browser UI, so UI changes can interrupt it. Changes are pushed without review; review the commits on GitHub afterwards.
 
@@ -18,7 +18,8 @@ A Telegram bot for an Ubuntu VM that turns chat messages from authorized users i
 - A Telegram bot token from [@BotFather](https://t.me/BotFather) and the numeric Telegram user id of each authorized user (for example from @userinfobot).
 - A GitHub token with read/write access to repository contents. Creating repositories also requires permission to create repositories for the owner.
 - A reference app checkout at `<REPOS_DIR>/eurofish` (by default `/home/localadmin/repos/eurofish`) for new repositories.
-- For manually requested public routes, a remotely managed Cloudflare Tunnel and an API token with **Account / Cloudflare Tunnel / Edit** and **Zone / DNS / Edit** permissions.
+- For `/new` and route commands, a remotely managed Cloudflare Tunnel and an API token with **Account / Cloudflare Tunnel / Edit** and **Zone / DNS / Edit** permissions.
+- The `crontab` command for installing each new app's reboot entry.
 
 ## Setup
 
@@ -31,7 +32,7 @@ make login          # sign in to Copilot once (see below)
 make run            # start the bot in the foreground
 ```
 
-To enable the tunnel integration, put the Cloudflare API token, account ID, and zone ID in `.env`. The tunnel is always `kurwalab-tunnel` and the domain is always `kurwalab.fyi`. Without credentials, `/cloudflare` is unavailable. Redeployment never changes routes.
+Put the Cloudflare API token, account ID, and zone ID in `.env` to use `/new` or `/cloudflare`. The tunnel is always `kurwalab-tunnel` and the domain is always `kurwalab.fyi`. Ordinary redeployment never changes routes; only `/new` and `/cloudflare` do.
 
 ### Signing in to Copilot
 
@@ -49,7 +50,7 @@ Only user ids listed in `TELEGRAM_OWNER_ID` are served, and only in private chat
 
 | Message | Effect |
 | --- | --- |
-| `/new <name>` or `/new <owner/name>` | Create a new GitHub repository (private by default), seed its initial commit from `<REPOS_DIR>/eurofish`, and make it active. Refuses to overwrite or select an existing repository. |
+| `/new <name> <request>` or `/new <owner/name> <request>` | Create a new GitHub repository (private by default), seed it from `<REPOS_DIR>/eurofish`, run the request with the allocated port instruction, push the result, deploy it, publish `https://<name>.kurwalab.fyi`, and install reboot startup. Refuses existing repositories. |
 | `/repo <name>` or `/repo <owner/name>` | Select the active repository. A missing repository is created and seeded from `<REPOS_DIR>/eurofish`; an existing one is cloned or fast-forwarded. A GitHub URL is also accepted. |
 | `/repo` | Show the active repository. |
 | plain text | Run the text as a request against the active repository. |
@@ -68,9 +69,9 @@ A bare name uses `GITHUB_OWNER`, or the token's account when it is not set. The 
 
 ### New repository template
 
-For every missing repository, the bot creates an empty GitHub repository, copies the contents of `<REPOS_DIR>/eurofish` into the new checkout, excludes every `.git` entry, and pushes the copy as the single `Initial commit`. The reference app must exist and contain files that Git can commit. The next request can ask Copilot to keep the same architecture and stack while turning the copy into a different app.
+For every missing repository, the bot creates an empty GitHub repository, copies the contents of `<REPOS_DIR>/eurofish` into the new checkout, excludes every `.git` entry, and pushes the copy as the single `Initial commit`. The reference app must exist and contain files that Git can commit. `/new <name> <request>` then reads the ordered tunnel ingress list, chooses one more than the last local HTTP route port (or `8080` when none exists), and prefixes the request with `Instead of this app, let's create another app, with the same architecture, stack and styling, but running on the <port>`. App names must be lowercase DNS labels containing only letters, digits, and hyphens.
 
-One job runs at a time. Progress is shown in a single message that is edited as the job advances. Its first line is `Currently doing: ...`, using the latest visible reasoning paragraph, active step, task, or bot stage. Each displayed bot stage, task, plan item, activity, and step carries a stable first-seen timestamp with second precision, the bot host's local timezone name, and its UTC offset. A compact stage is shown until Copilot exposes structured output, then the current task and plan, activity or step names, reasoning-duration labels such as `Reasoned for 12s`, and interleaved live answers take its place. Other reasoning and code-execution details are omitted. Once structured output is visible, repetitive inactivity text stays hidden; the final message contains the commit, change summary, and redeploy result.
+One job runs at a time. Progress is shown in a single message that is edited as the job advances. Its first line is `Currently doing: ...`, using the latest visible reasoning paragraph, active step, task, or bot stage. Each displayed bot stage, task, plan item, activity, and step carries a stable first-seen timestamp with second precision, the bot host's local timezone name, and its UTC offset. A compact stage is shown until Copilot exposes structured output, then the current task and plan, activity or step names, reasoning-duration labels such as `Reasoned for 12s`, and interleaved live answers take its place. Other reasoning and code-execution details are omitted. Once structured output is visible, repetitive inactivity text stays hidden. Ordinary requests end with the commit, change summary, and redeploy result; `/new` also returns Copilot's final output, provisioning status, and public app URL.
 
 ### What a request does
 
@@ -78,7 +79,8 @@ One job runs at a time. Progress is shown in a single message that is edited as 
 - **Round-trip:** the engine uploads a ZIP of the committed `HEAD`, asks Copilot for the complete fixed repository, validates the returned ZIP, and replaces the worktree. The bot appends a note asking Copilot to keep a Makefile whose `run` target starts one HTTP server in the foreground and to keep secrets and runtime data outside the repository.
 - **Commit and push:** all changes are committed on the current branch with the first line of the request as the subject, and pushed to `origin`. If Copilot changed nothing, nothing is committed or deployed. A failed push leaves the commit locally and is reported; the next request pushes it.
 - **Redeploy:** the previous `make run` process group for the app is stopped, then `make run` is started detached in `/home/localadmin/repos/<name>` with output appended to `<STATE_DIR>/logs/<name>.log`. The redeploy counts as successful when the process is still running after `DEPLOY_SETTLE_SECONDS` or has exited with code 0; otherwise the log tail is sent. A repository without a `run` target is pushed but not started. Deployed apps do not receive the bot's tokens.
-- **Routes on demand:** `/cloudflare eurofish 8080` creates or updates `eurofish.kurwalab.fyi` to `http://127.0.0.1:8080` on `kurwalab-tunnel` and maintains its proxied DNS CNAME. `/cloudflare list` shows named ingress rules, and `/cloudflare delete eurofish` removes that ingress rule and its matching tunnel CNAME. Route names must be one lowercase DNS label, and ports must be 1–65535. Other ingress rules are preserved. Deployment never changes routes.
+- **New-app publish:** after a successful `/new` redeploy, the bot creates `<name>.kurwalab.fyi` on `kurwalab-tunnel`, targeting the allocated `127.0.0.1` port, and adds `@reboot cd <REPOS_DIR>/<name> && git pull && make run` to the bot user's crontab without duplicating it. If deployment, routing, or crontab setup fails, the report identifies the completed and failed stages.
+- **Routes on demand:** `/cloudflare eurofish 8080` creates or updates `eurofish.kurwalab.fyi` to `http://127.0.0.1:8080` on `kurwalab-tunnel` and maintains its proxied DNS CNAME. `/cloudflare list` shows named ingress rules, and `/cloudflare delete eurofish` removes that ingress rule and its matching tunnel CNAME. Route names must be one lowercase DNS label, and ports must be 1–65535. Other ingress rules are preserved. Ordinary deployment never changes routes.
 
 **Important:** the engine applies a returned ZIP as a full replacement. Everything in the checkout except `.git` is replaced, including untracked and ignored files such as `.env`, virtual environments, `node_modules`, and local databases. Keep runtime data and secrets outside the checkout and let `make run` rebuild dependencies.
 
@@ -100,7 +102,7 @@ Settings come from `.env` (or the file named by `BOT_ENV_FILE`); real environmen
 | `BOT_SHOW_BROWSER` | `false` | Default browser visibility. `browser` or `nobrowser` on `/fix` overrides it for that request. Without `DISPLAY` or `WAYLAND_DISPLAY`, a visible request runs hidden; use VNC or X forwarding to see it. |
 | `BOT_TEMPORARY_CHAT` | `true` | Default Temporary chat state. `tempchat` or `notempchat` on `/fix` overrides it for that request; disabling it saves the chat in your account. |
 | `DEPLOY_SETTLE_SECONDS` | `10` | How long `make run` must stay up to count as deployed. |
-| `CLOUDFLARE_API_TOKEN` | empty | Enables `/cloudflare` route listing, creation, updates, and deletion; requires Cloudflare Tunnel Edit and DNS Edit permissions. It is not passed to deployed apps. |
+| `CLOUDFLARE_API_TOKEN` | empty | Enables `/new` publishing and `/cloudflare` route management; requires Cloudflare Tunnel Edit and DNS Edit permissions. It is not passed to deployed apps. |
 | `CLOUDFLARE_ACCOUNT_ID` | empty | Account containing the tunnel; required with the Cloudflare token. |
 | `CLOUDFLARE_ZONE_ID` | empty | Zone containing the public hostname; required with the Cloudflare token. |
 | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL` | Copilot Telegram Bot | Identity on bot commits. |
@@ -124,7 +126,7 @@ Without `.env` values or `/fix` overrides, requests use `nobrowser` and `tempcha
 | `bot/service.py` | Authorized-user commands and the request pipeline. |
 | `bot/telegram_api.py`, `bot/github_api.py` | Telegram long polling and GitHub REST clients (standard library only). |
 | `bot/gitops.py`, `bot/repos.py` | Seed, clone, sync, commit, push; repository references. |
-| `bot/roundtrip.py`, `bot/deploy.py` | Engine subprocess runner; detached `make run` management and listener discovery. |
+| `bot/roundtrip.py`, `bot/deploy.py` | Engine subprocess runner; detached `make run` management and reboot crontab entries. |
 | `bot/cloudflare.py` | Cloudflare tunnel ingress and DNS route management. |
 | `bin/git-askpass` | Supplies GitHub credentials to Git from the environment. |
 | `deploy/` | systemd unit. |

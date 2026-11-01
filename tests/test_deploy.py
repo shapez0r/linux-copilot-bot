@@ -76,5 +76,20 @@ class DeployTests(unittest.TestCase):
         self.assertTrue(result.ok, result.message)
         self.assertTrue(_alive(self.pid()))
 
+    def test_reboot_entry_is_added_once_without_replacing_other_entries(self):
+        current = mock.Mock(returncode=0, stdout="MAILTO=ops@example.com\n", stderr="")
+        installed = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch("bot.deploy.subprocess.run", side_effect=[current, installed]) as run:
+            message = self.deployer.ensure_reboot(self.repo)
+        line = f"@reboot cd {self.repo} && git pull && make run"
+        self.assertIn(line, message)
+        self.assertEqual(run.call_args_list[1].kwargs["input"], f"MAILTO=ops@example.com\n{line}\n")
+
+        current.stdout += line + "\n"
+        with mock.patch("bot.deploy.subprocess.run", return_value=current) as run:
+            message = self.deployer.ensure_reboot(self.repo)
+        self.assertIn("already contains", message)
+        run.assert_called_once()
+
 if __name__ == "__main__":
     unittest.main()

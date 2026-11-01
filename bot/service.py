@@ -8,7 +8,7 @@ import time
 
 from .config import Config, redact
 from .cloudflare import CloudflareError, CloudflareRoutes
-from .deploy import Deployer
+from .deploy import DeployError, Deployer
 from .github_api import GitHub, GitHubError
 from .gitops import Git, GitError
 from .repos import RepoError, local_path, parse_repo_ref
@@ -25,10 +25,14 @@ DEPLOY_NOTE = (
     "target starts one HTTP server in the foreground, and keep secrets and runtime data outside the repository."
 )
 NEW_REPO_TEMPLATE = "eurofish"
+NEW_APP_PROMPT = (
+    "Instead of this app, let's create another app, with the same architecture, stack and styling, "
+    "but running on the {port}\n\n"
+)
 
 HELP = """Send a request as plain text and I will change the active repository with Copilot, commit, push and redeploy it with `make run`.
 
-/new [public|private] <name|owner/name> - create a repository and select it; send your next message to start working
+/new [public|private] <name|owner/name> <request> - create, build, deploy and publish a new app
 /repo [public|private] <name|owner/name> - select a repository; a missing one is created from the eurofish reference app
 /repo - show the active repository
 /fix <repo> <request> - select a repository and run a request in one message
@@ -41,7 +45,7 @@ HELP = """Send a request as plain text and I will change the active repository w
 /cancel - stop the running job
 /help - show this message"""
 
-_BOT_ERRORS = (RepoError, GitError, GitHubError, RoundTripError, CloudflareError)
+_BOT_ERRORS = (RepoError, GitError, GitHubError, RoundTripError, CloudflareError, DeployError)
 
 
 class Progress:
@@ -266,10 +270,14 @@ class Bot:
 
     def cmd_new(self, chat_id: int, arg: str):
         arg, private = self._creation_options(arg)
-        if not arg:
-            self.say(chat_id, "Usage: /new [public|private] <name|owner/name>")
+        parts = arg.split(None, 1)
+        if len(parts) != 2 or not parts[1].strip():
+            self.say(chat_id, "Usage: /new [public|private] <name|owner/name> <request>")
             return
-        self._spawn(chat_id, lambda: self._select_repo(chat_id, arg, new_only=True, private=private))
+        if self._cloudflare_unavailable(chat_id):
+            return
+        ref, request = parts[0], parts[1].strip()
+        self._spawn(chat_id, lambda: self._new_app(chat_id, ref, request, private))
 
     def cmd_repo(self, chat_id: int, arg: str):
         arg, private = self._creation_options(arg)
@@ -346,6 +354,69 @@ class Bot:
         self.say(chat_id, f"\u2705 {owner}/{name} is {how} at {dest} (branch {branch}) and now active."
                  + (" Send your next message describing what to build." if new_only else ""))
 
+    def _new_app(self, chat_id: int, ref: str, request: str, private: bool):
+        owner, name = parse_repo_ref(ref, self._owner_default())
+        if not self._valid_route(name):
+            raise RepoError("App names must be lowercase DNS labels containing only letters, digits and hyphens.")
+        full = f"{owner}/{name}"
+        progress = Progress(self.tg, chat_id, self.cfg)
+        dest, _, _ = self._prepare(owner, name, progress, new_only=True, private=private)
+        self.state.repo = full
+        self.state.save()
+        routes = CloudflareRoutes(self.cfg)
+        progress.update(f"{full}: checking tunnel routes for the next port...")
+        port = routes.next_port()
+        prompt = NEW_APP_PROMPT.format(port=port) + request + DEPLOY_NOTE
+        if self._cancel.is_set():
+            raise Cancelled()
+        progress.update(f"{full}: sending the repository to Copilot for port {port}...")
+        try:
+            result = self.roundtrip.run(
+                dest, prompt, self.state.model,
+                lambda stage, msg: progress.update(self._repo_progress(full, msg), stage), self._cancel)
+        except Cancelled:
+            progress.flush()
+            if self.git.is_dirty(dest):
+                self.say(chat_id, "\u26a0\ufe0f The checkout has uncommitted changes from the interrupted run; "
+                                  f"review {dest} before the next request.")
+            raise
+        progress.update(f"{full}: committing and pushing...")
+        pushed = self.git.commit_and_push(dest, request)
+        if pushed is None:
+            progress.flush()
+            output = (result.get("chat_response") or "(no final text returned)").strip()
+            self.say(chat_id, f"Copilot returned no changes to commit for {full}; nothing was deployed.\n\n"
+                              f"Copilot output:\n{output}")
+            return
+        sha, pushed_branch = pushed
+        progress.update(f"{full}: deploying with make run on port {port}...")
+        deploy = self.deployer.redeploy(name, dest)
+        if not deploy.ok:
+            progress.flush()
+            self.say(chat_id, self._new_app_report(full, sha, pushed_branch, result, deploy.message,
+                                                   error="The app was not routed because deployment failed."))
+            return
+        progress.update(f"{full}: creating https://{name}.{self.cfg.cloudflare_domain}...")
+        try:
+            tunnel = routes.prepare(name, port)
+        except CloudflareError as error:
+            progress.flush()
+            self.say(chat_id, self._new_app_report(full, sha, pushed_branch, result, deploy.message,
+                                                   error=f"Tunnel setup failed: {error}"))
+            return
+        progress.update(f"{full}: adding reboot startup to crontab...")
+        try:
+            startup = self.deployer.ensure_reboot(dest)
+        except DeployError as error:
+            progress.flush()
+            self.say(chat_id, self._new_app_report(full, sha, pushed_branch, result, deploy.message,
+                                                   tunnel=tunnel, error=f"Crontab setup failed: {error}"))
+            return
+        progress.flush()
+        self.say(chat_id, self._new_app_report(full, sha, pushed_branch, result, deploy.message,
+                                               tunnel=tunnel, startup=startup,
+                                               url=f"https://{name}.{self.cfg.cloudflare_domain}"))
+
     def _request(self, chat_id: int, ref: str, request: str,
                  show_browser=None, temporary_chat=None):
         owner, name = parse_repo_ref(ref, self._owner_default())
@@ -395,4 +466,21 @@ class Bot:
         if diff_lines:
             lines.append(f"Changes: {diff_lines[-1].strip()}")
         lines.append(("Deploy: " if deploy.ok else "Pushed, but the redeploy failed: ") + deploy.message)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _new_app_report(full: str, sha: str, branch: str, result: dict, deploy_message: str,
+                        tunnel: str = "", startup: str = "", url: str = "", error: str = "") -> str:
+        mark = "\u26a0\ufe0f" if error else "\u2705"
+        lines = [f"{mark} {full}: commit {sha} pushed to {branch}.", f"Deploy: {deploy_message}"]
+        if tunnel:
+            lines.append(tunnel)
+        if startup:
+            lines.append(startup)
+        if url:
+            lines.append(f"App: {url}")
+        if error:
+            lines.append(error)
+        output = (result.get("chat_response") or "(no final text returned)").strip()
+        lines.extend(["", "Copilot output:", output])
         return "\n".join(lines)

@@ -11,6 +11,8 @@ from .config import Config
 
 API = "https://api.cloudflare.com/client/v4"
 _DNS_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_LOCAL_HTTP = re.compile(r"^http://127\.0\.0\.1:(\d{1,5})/?$")
+FIRST_APP_PORT = 8080
 
 
 class CloudflareError(RuntimeError):
@@ -168,6 +170,23 @@ class CloudflareRoutes:
         if not routes:
             return f"No routes configured on {self._tunnel_name}."
         return f"Routes on {self._tunnel_name}:\n" + "\n".join(f"- {route}" for route in routes)
+
+    def next_port(self) -> int:
+        """Return the port after the last local HTTP route, or 8080 when the list is empty."""
+        tunnel_id = self._resolve_tunnel()
+        _, ingress = self._configuration(tunnel_id)
+        last_port = None
+        for rule in ingress:
+            if not rule.get("hostname"):
+                continue
+            match = _LOCAL_HTTP.fullmatch(str(rule.get("service", "")))
+            if match and 1 <= int(match.group(1)) <= 65535:
+                last_port = int(match.group(1))
+        if last_port is None:
+            return FIRST_APP_PORT
+        if last_port == 65535:
+            raise CloudflareError("the last tunnel route uses port 65535; no next port is available")
+        return last_port + 1
 
     def delete_route(self, app: str) -> str:
         """Delete one explicitly named ingress rule and its tunnel CNAME."""

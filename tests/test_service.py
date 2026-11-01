@@ -9,7 +9,7 @@ from support import git, make_config, make_origin
 from bot.deploy import DeployResult
 from bot.gitops import Git
 from bot.roundtrip import Cancelled
-from bot.service import DEPLOY_NOTE, HELP, Bot, Progress
+from bot.service import DEPLOY_NOTE, HELP, NEW_APP_PROMPT, Bot, Progress
 from bot.state import State
 
 
@@ -74,11 +74,15 @@ class FakeRoundTrip:
 
 class FakeDeployer:
     def __init__(self, ok=True):
-        self.ok, self.calls = ok, []
+        self.ok, self.calls, self.reboots = ok, [], []
 
     def redeploy(self, app, repo_dir):
         self.calls.append((app, Path(repo_dir)))
         return DeployResult(self.ok, "`make run` is running (pid 1)." if self.ok else "`make run` exited with code 2.")
+
+    def ensure_reboot(self, repo_dir):
+        self.reboots.append(Path(repo_dir))
+        return f"Startup: added `@reboot cd {repo_dir} && git pull && make run` to crontab."
 
     def status(self, app, repo_dir):
         return "not running"
@@ -163,17 +167,35 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.state.repo, "me/brand-new")
         self.assertIn("created from eurofish", self.tg.sent[-1])
 
-    def test_new_creates_selects_and_accepts_followup_request(self):
-        self.say("/new fresh-app")
+    def test_new_creates_builds_deploys_routes_and_reports_output(self):
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.next_port.return_value = 8081
+            routes.return_value.prepare.return_value = (
+                "Tunnel: https://fresh-app.kurwalab.fyi -> http://127.0.0.1:8081.")
+            self.say("/new fresh-app build a starter app")
         self.assertEqual(self.gh.created, [("me/fresh-app", True)])
         self.assertEqual(self.state.repo, "me/fresh-app")
-        self.assertIn("Send your next message", self.tg.sent[-1])
-        self.say("build a starter app")
         self.assertEqual(len(self.rt.calls), 1)
         self.assertEqual(self.rt.calls[0][0], self.cfg.repos_dir / "fresh-app")
+        self.assertEqual(self.rt.calls[0][1],
+                         NEW_APP_PROMPT.format(port=8081) + "build a starter app" + DEPLOY_NOTE)
+        routes.return_value.next_port.assert_called_once_with()
+        routes.return_value.prepare.assert_called_once_with("fresh-app", 8081)
+        self.assertEqual(self.deployer.calls, [("fresh-app", self.cfg.repos_dir / "fresh-app")])
+        self.assertEqual(self.deployer.reboots, [self.cfg.repos_dir / "fresh-app"])
+        report = self.tg.sent[-1]
+        self.assertIn("https://fresh-app.kurwalab.fyi", report)
+        self.assertIn("Copilot output:\nAdded it.", report)
 
     def test_visibility_choice_for_new_and_repo(self):
-        self.say("/new public open-app")
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.next_port.return_value = 8080
+            routes.return_value.prepare.return_value = "Tunnel configured."
+            self.say("/new public open-app build it")
         self.assertEqual(self.gh.created, [("me/open-app", False)])
         self.say("/repo private closed-app")
         self.assertEqual(self.gh.created[-1], ("me/closed-app", True))
@@ -182,13 +204,27 @@ class ServiceTests(unittest.TestCase):
         self.say("/new public")
         self.assertIn("Usage: /new", self.tg.sent[-1])
 
-    def test_new_refuses_existing_repo_and_requires_name(self):
+    def test_new_refuses_existing_repo_and_requires_name_and_request(self):
         self.say("/new")
         self.assertIn("Usage: /new", self.tg.sent[-1])
         self.say("/new app")
+        self.assertIn("Usage: /new", self.tg.sent[-1])
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        self.say("/new app build it")
         self.assertIn("already exists", self.tg.sent[-1])
         self.assertEqual(self.gh.created, [])
         self.assertEqual(self.state.repo, "")
+
+    def test_new_requires_cloudflare_and_a_dns_safe_app_name(self):
+        self.say("/new fresh-app build it")
+        self.assertIn("Configure Cloudflare", self.tg.sent[-1])
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        for name in ("bad_name", "BadName", "bad.name"):
+            self.say(f"/new {name} build it")
+            self.assertIn("lowercase DNS labels", self.tg.sent[-1])
+        self.assertEqual(self.gh.created, [])
 
     def test_request_runs_commits_pushes_and_redeploys(self):
         self.say("/repo app")
