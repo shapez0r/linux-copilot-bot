@@ -1,4 +1,4 @@
-"""GitHub REST client for looking up and creating repositories."""
+"""GitHub REST client for managing repositories."""
 from __future__ import annotations
 
 import json
@@ -25,7 +25,8 @@ class GitHub:
             "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "copilot-telegram-bot"})
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
-                return json.load(response)
+                content = response.read()
+                return json.loads(content) if content else None
         except urllib.error.HTTPError as e:
             if e.code == 404 and allow_404:
                 return None
@@ -54,3 +55,7 @@ class GitHub:
         """Create an empty repository for the local app template's initial commit."""
         path = "/user/repos" if owner.lower() == self.login.lower() else f"/orgs/{owner}/repos"
         return self._request("POST", path, {"name": name, "private": private, "auto_init": False})
+
+    def delete_repo(self, owner: str, name: str):
+        """Permanently delete a repository visible to the configured token."""
+        self._request("DELETE", f"/repos/{owner}/{name}")

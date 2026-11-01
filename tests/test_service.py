@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from support import git, make_config, make_origin
 from bot.deploy import DeployResult
-from bot.gitops import Git
+from bot.gitops import Git, GitError
 from bot.roundtrip import Cancelled
 from bot.service import DEPLOY_NOTE, HELP, NEW_APP_PROMPT, Bot, Progress
 from bot.state import State
@@ -21,6 +21,10 @@ class LocalGit(Git):
             return False
         self.run("clone", url, str(dest))
         return True
+
+    def require_checkout(self, dest, owner, name):
+        if not (Path(dest) / ".git").is_dir():
+            raise GitError(f"{dest} exists but is not a Git checkout.")
 
 
 class FakeTelegram:
@@ -42,7 +46,7 @@ class FakeGitHub:
     login = "me"
 
     def __init__(self, existing, tmp):
-        self.repos, self.created, self._tmp = dict(existing), [], tmp
+        self.repos, self.created, self.deleted, self._tmp = dict(existing), [], [], tmp
 
     def get_repo(self, owner, name):
         return self.repos.get(f"{owner}/{name}")
@@ -54,6 +58,11 @@ class FakeGitHub:
         repo = {"clone_url": str(origin), "default_branch": "main"}
         self.repos[f"{owner}/{name}"] = repo
         return repo
+
+    def delete_repo(self, owner, name):
+        full = f"{owner}/{name}"
+        self.deleted.append(full)
+        self.repos.pop(full)
 
 
 class FakeRoundTrip:
@@ -75,6 +84,7 @@ class FakeRoundTrip:
 class FakeDeployer:
     def __init__(self, ok=True):
         self.ok, self.calls, self.reboots, self.running = ok, [], [], []
+        self.stops, self.removed_reboots, self.stop_result = [], [], False
 
     def redeploy(self, app, repo_dir):
         self.calls.append((app, Path(repo_dir)))
@@ -89,6 +99,14 @@ class FakeDeployer:
 
     def running_apps(self):
         return self.running
+
+    def stop(self, app, repo_dir):
+        self.stops.append((app, Path(repo_dir)))
+        return self.stop_result
+
+    def remove_reboot(self, repo_dir):
+        self.removed_reboots.append(Path(repo_dir))
+        return "Startup: removed the reboot entry."
 
 
 class ServiceTests(unittest.TestCase):
@@ -276,6 +294,46 @@ class ServiceTests(unittest.TestCase):
             self.say(f"/new {name} build it")
             self.assertIn("lowercase DNS labels", self.tg.sent[-1])
         self.assertEqual(self.gh.created, [])
+
+    def test_delete_removes_app_resources_and_clears_active_repository(self):
+        self.say("/repo app")
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        self.deployer.stop_result = True
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.delete_route.return_value = "Deleted route: https://app.kurwalab.fyi."
+            self.say("/delete app")
+            routes.return_value.delete_route.assert_called_once_with("app")
+        self.assertEqual(self.gh.deleted, ["me/app"])
+        self.assertFalse(self.dest.exists())
+        self.assertEqual(self.deployer.stops, [("app", self.dest)])
+        self.assertEqual(self.deployer.removed_reboots, [self.dest])
+        self.assertEqual(self.state.repo, "")
+        self.assertEqual(State(self.tmp / "state.json", "x").repo, "")
+        self.assertIn("Deleted me/app", self.tg.sent[-1])
+        self.assertIn("Stopped the running app", self.tg.sent[-1])
+
+    def test_delete_validates_arguments_credentials_and_app_name(self):
+        self.say("/delete")
+        self.assertIn("Usage: /delete", self.tg.sent[-1])
+        self.say("/delete app extra")
+        self.assertIn("Usage: /delete", self.tg.sent[-1])
+        self.say("/delete app")
+        self.assertIn("Configure Cloudflare", self.tg.sent[-1])
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        self.say("/delete BadName")
+        self.assertIn("lowercase DNS labels", self.tg.sent[-1])
+        self.assertEqual(self.gh.deleted, [])
+
+    def test_delete_refuses_a_missing_local_checkout_before_remote_changes(self):
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        with patch("bot.service.CloudflareRoutes") as routes:
+            self.say("/delete app")
+            routes.return_value.delete_route.assert_not_called()
+        self.assertIn("not a Git checkout", self.tg.sent[-1])
+        self.assertEqual(self.gh.deleted, [])
 
     def test_request_runs_commits_pushes_and_redeploys(self):
         self.say("/repo app")

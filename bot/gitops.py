@@ -50,12 +50,16 @@ class Git:
             dest.parent.mkdir(parents=True, exist_ok=True)
             self.run("clone", url, str(dest))
             return True
-        if not (dest / ".git").exists():
+        self.require_checkout(dest, owner, name)
+        return False
+
+    def require_checkout(self, dest: Path, owner: str, name: str):
+        """Require dest to be a nonsymlink checkout of github.com/<owner>/<name>."""
+        if dest.is_symlink() or not dest.is_dir() or not (dest / ".git").exists():
             raise GitError(f"{dest} exists but is not a Git checkout.")
         origin = self.run("remote", "get-url", "origin", cwd=dest)
         if not same_remote(origin, owner, name):
             raise GitError(f"{dest} is a checkout of a different repository ({redact(origin, self._cfg.secrets)}).")
-        return False
 
     def seed_from_template(self, url: str, dest: Path, template: Path, branch: str = "main") -> str:
         """Create and push a repository whose first commit copies template without Git metadata."""

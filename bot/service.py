@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import threading
 import time
 
@@ -38,6 +39,7 @@ NEW_USAGE = (
 HELP = """Send a request as plain text and I will change the active repository with Copilot, commit, push and redeploy it with `make run`.
 
 /new [public|private] [model=<provider/model>] [template=<app>] <name|owner/name> <request> - create, build, deploy and publish a new app
+/delete <name|owner/name> - permanently delete an app's GitHub repository, local checkout and tunnel route
 /repo [public|private] <name|owner/name> - select a repository; a missing one is created from the eurofish reference app
 /repo - show the active repository
 /fix <repo> <request> - select a repository and run a request in one message
@@ -151,6 +153,8 @@ class Bot:
             self.say(chat_id, HELP)
         elif command == "new":
             self.cmd_new(chat_id, arg)
+        elif command == "delete":
+            self.cmd_delete(chat_id, arg)
         elif command == "repo":
             self.cmd_repo(chat_id, arg)
         elif command == "fix":
@@ -349,6 +353,14 @@ class Bot:
         self._spawn(chat_id, lambda: self._new_app(
             chat_id, ref, request, private, model, template or NEW_REPO_TEMPLATE))
 
+    def cmd_delete(self, chat_id: int, arg: str):
+        if len(arg.split()) != 1:
+            self.say(chat_id, "Usage: /delete <name|owner/name>")
+            return
+        if self._cloudflare_unavailable(chat_id):
+            return
+        self._spawn(chat_id, lambda: self._delete_app(chat_id, arg))
+
     def cmd_repo(self, chat_id: int, arg: str):
         arg, private = self._creation_options(arg)
         if not arg:
@@ -493,6 +505,33 @@ class Bot:
         self.say(chat_id, self._new_app_report(full, sha, pushed_branch, result, deploy.message,
                                                tunnel=tunnel, startup=startup,
                                                url=f"https://{name}.{self.cfg.cloudflare_domain}"))
+
+    def _delete_app(self, chat_id: int, ref: str):
+        """Delete the resources created for one app after validating its local checkout."""
+        owner, name = parse_repo_ref(ref, self._owner_default())
+        if not self._valid_route(name):
+            raise RepoError("App names must be lowercase DNS labels containing only letters, digits and hyphens.")
+        full = f"{owner}/{name}"
+        dest = local_path(self.cfg.repos_dir, name)
+        if self.gh.get_repo(owner, name) is None:
+            raise RepoError(f"GitHub repository {full} was not found.")
+        self.git.require_checkout(dest, owner, name)
+
+        stopped = self.deployer.stop(name, dest)
+        startup = self.deployer.remove_reboot(dest)
+        tunnel = CloudflareRoutes(self.cfg).delete_route(name)
+        self.gh.delete_repo(owner, name)
+        try:
+            shutil.rmtree(dest)
+        except OSError as error:
+            raise RepoError(f"GitHub repository and tunnel route were deleted, but {dest} could not be removed: "
+                            f"{error.strerror or error}") from None
+        if self.state.repo.lower() == full.lower():
+            self.state.repo = ""
+            self.state.save()
+        process = "Stopped the running app." if stopped else "No running app process was recorded."
+        self.say(chat_id, f"✅ Deleted {full}.\n{process}\n{startup}\n{tunnel}\n"
+                          f"GitHub: deleted {full}.\nLocal: deleted {dest}.")
 
     def _request(self, chat_id: int, ref: str, request: str,
                  show_browser=None, temporary_chat=None):

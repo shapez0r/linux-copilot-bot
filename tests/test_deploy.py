@@ -93,5 +93,20 @@ class DeployTests(unittest.TestCase):
         self.assertIn("already contains", message)
         run.assert_called_once()
 
+    def test_reboot_entry_is_removed_without_changing_other_entries(self):
+        line = f"@reboot cd {self.repo} && git pull && make run"
+        current = mock.Mock(returncode=0, stdout=f"MAILTO=ops@example.com\n{line}\n", stderr="")
+        installed = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch("bot.deploy.subprocess.run", side_effect=[current, installed]) as run:
+            message = self.deployer.remove_reboot(self.repo)
+        self.assertIn("removed", message)
+        self.assertEqual(run.call_args_list[1].kwargs["input"], "MAILTO=ops@example.com\n")
+
+        current.stdout = "MAILTO=ops@example.com\n"
+        with mock.patch("bot.deploy.subprocess.run", return_value=current) as run:
+            message = self.deployer.remove_reboot(self.repo)
+        self.assertIn("no reboot entry", message)
+        run.assert_called_once()
+
 if __name__ == "__main__":
     unittest.main()

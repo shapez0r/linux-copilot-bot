@@ -82,6 +82,7 @@ class GitOpsTests(unittest.TestCase):
             self.git.ensure_clone("unused", self.dest, "me", "app")
         git("remote", "set-url", "origin", "https://github.com/me/app.git", cwd=self.dest)
         self.assertFalse(self.git.ensure_clone("unused", self.dest, "me", "app"))
+        self.git.require_checkout(self.dest, "me", "app")
 
     def test_askpass_is_executable_even_after_permissions_are_lost(self):
         helper = self.tmp / "git-askpass"

@@ -159,6 +159,23 @@ class Deployer:
     def ensure_reboot(self, repo_dir: Path) -> str:
         """Add an idempotent user-crontab entry that updates and starts the app at reboot."""
         line = f"@reboot cd {shlex.quote(str(repo_dir))} && git pull && make run"
+        entries = self._read_crontab()
+        if line in entries:
+            return f"Startup: crontab already contains `{line}`."
+        self._write_crontab([*entries, line])
+        return f"Startup: added `{line}` to crontab."
+
+    def remove_reboot(self, repo_dir: Path) -> str:
+        """Remove the exact reboot entry installed for an app."""
+        line = f"@reboot cd {shlex.quote(str(repo_dir))} && git pull && make run"
+        entries = self._read_crontab()
+        if line not in entries:
+            return "Startup: no reboot entry was present."
+        self._write_crontab([entry for entry in entries if entry != line])
+        return "Startup: removed the reboot entry."
+
+    @staticmethod
+    def _read_crontab() -> list[str]:
         try:
             current = subprocess.run(["crontab", "-l"], text=True, stdin=subprocess.DEVNULL,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
@@ -167,10 +184,11 @@ class Deployer:
         if current.returncode != 0 and "no crontab" not in current.stderr.lower():
             detail = current.stderr.strip() or f"exit code {current.returncode}"
             raise DeployError(f"cannot read the user crontab: {detail[-400:]}")
-        entries = current.stdout.splitlines() if current.returncode == 0 else []
-        if line in entries:
-            return f"Startup: crontab already contains `{line}`."
-        content = "\n".join([*entries, line]) + "\n"
+        return current.stdout.splitlines() if current.returncode == 0 else []
+
+    @staticmethod
+    def _write_crontab(entries: list[str]):
+        content = "\n".join(entries) + "\n"
         try:
             installed = subprocess.run(["crontab", "-"], input=content, text=True, stdout=subprocess.PIPE,
                                        stderr=subprocess.PIPE, timeout=30)
@@ -179,7 +197,6 @@ class Deployer:
         if installed.returncode != 0:
             detail = installed.stderr.strip() or f"exit code {installed.returncode}"
             raise DeployError(f"cannot update the user crontab: {detail[-400:]}")
-        return f"Startup: added `{line}` to crontab."
 
     def log_tail(self, app: str, lines: int = 15) -> str:
         try:
