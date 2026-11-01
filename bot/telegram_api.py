@@ -52,14 +52,17 @@ class Telegram:
         return self._call("getUpdates", {"offset": offset, "timeout": poll_seconds,
                                          "allowed_updates": ["message"]}, timeout=poll_seconds + 10)
 
-    def send_message(self, chat_id: int, text: str) -> int:
+    def send_message(self, chat_id: int, text: str, reply_markup=None) -> int:
         """Send one message (at most MESSAGE_LIMIT characters) and return its id."""
-        return self._call("sendMessage", {"chat_id": chat_id, "text": text,
-                                          "disable_web_page_preview": True})["message_id"]
+        payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        return self._call("sendMessage", payload)["message_id"]
 
-    def send_long(self, chat_id: int, text: str):
-        for part in chunk_text(text):
-            self.send_message(chat_id, part)
+    def send_long(self, chat_id: int, text: str, reply_markup=None):
+        parts = chunk_text(text)
+        for index, part in enumerate(parts):
+            self.send_message(chat_id, part, reply_markup if index == len(parts) - 1 else None)
 
     def edit_message(self, chat_id: int, message_id: int, text: str):
         self._call("editMessageText", {"chat_id": chat_id, "message_id": message_id,

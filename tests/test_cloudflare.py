@@ -100,6 +100,23 @@ class CloudflareRouteTests(unittest.TestCase):
         ])
         self.assertEqual(routes.list_routes(), "No routes configured on kurwalab-tunnel.")
 
+    def test_app_routes_returns_only_local_http_apps_under_the_configured_domain(self):
+        routes = FakeRoutes([
+            [{"id": "tunnel-id", "name": "kurwalab-tunnel", "tun_type": "cfd_tunnel"}],
+            {"config": {"ingress": [
+                {"hostname": "alpha.kurwalab.fyi", "service": "http://127.0.0.1:8080"},
+                {"hostname": "nested.alpha.kurwalab.fyi", "service": "http://127.0.0.1:8081"},
+                {"hostname": "remote.kurwalab.fyi", "service": "https://example.com"},
+                {"hostname": "other.example.com", "service": "http://127.0.0.1:8082"},
+                {"service": "http_status:404"},
+            ]}},
+        ])
+        self.assertEqual(routes.app_routes(), [{
+            "app": "alpha",
+            "hostname": "alpha.kurwalab.fyi",
+            "service": "http://127.0.0.1:8080",
+        }])
+
     def test_next_port_follows_the_last_local_route(self):
         routes = FakeRoutes([
             [{"id": "tunnel-id", "name": "kurwalab-tunnel", "tun_type": "cfd_tunnel"}],

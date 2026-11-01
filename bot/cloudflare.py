@@ -171,6 +171,22 @@ class CloudflareRoutes:
             return f"No routes configured on {self._tunnel_name}."
         return f"Routes on {self._tunnel_name}:\n" + "\n".join(f"- {route}" for route in routes)
 
+    def app_routes(self) -> list[dict]:
+        """Return local HTTP routes whose hostnames are app labels under the configured domain."""
+        tunnel_id = self._resolve_tunnel()
+        _, ingress = self._configuration(tunnel_id)
+        suffix = f".{self._domain}".lower()
+        apps = []
+        for rule in ingress:
+            hostname = str(rule.get("hostname") or "").lower()
+            service = str(rule.get("service") or "")
+            if not hostname.endswith(suffix) or not _LOCAL_HTTP.fullmatch(service):
+                continue
+            app = hostname[:-len(suffix)]
+            if _DNS_LABEL.fullmatch(app):
+                apps.append({"app": app, "hostname": hostname, "service": service})
+        return apps
+
     def next_port(self) -> int:
         """Return the port after the last local HTTP route, or 8080 when the list is empty."""
         tunnel_id = self._resolve_tunnel()

@@ -48,8 +48,20 @@ Edit `deploy/copilot-telegram-bot.service` (user and paths), install it under `/
 
 Only user ids listed in `TELEGRAM_OWNER_ID` are served, and only in private chats; every other message is ignored. Separate multiple ids with commas. Authorized users share the active repository, model, and single job slot.
 
+Send `/start` or `/menu` to open the persistent app-management keyboard. The guided **Create an app** flow:
+
+1. asks for a lowercase app name;
+2. offers `Claude/Sonnet 5.5`, `Claude/Opus 5.5`, `GPT/GPT-6`, `GPT/GPT-6.1 Sol`, or a free-form provider/model value;
+3. loads template choices from local HTTP routes on the configured Cloudflare tunnel and keeps only apps that also have a local checkout under `REPOS_DIR`;
+4. explains that the template's styling, architecture, and stack are retained by default but can be changed in the app description;
+5. accepts the description, then shows the existing edited progress message while Copilot builds, commits, deploys, and publishes the app;
+6. returns the final public app link when provisioning succeeds.
+
+Apps created through the guided flow are private GitHub repositories. Use the `/new public ...` command when a public repository is required. The menu also provides running-app listing, guided fixes, confirmed app deletion, repository selection, model selection, status, and Cloudflare route listing, creation, and deletion. Command forms remain available for automation and direct use.
+
 | Message | Effect |
 | --- | --- |
+| `/start` or `/menu` | Show the guided app-management keyboard. |
 | `/new [public\|private] [model=<provider/model>] [template=<app>] name="<name\|owner/name>" prompt="<request>"` | Create a new GitHub repository (private by default), seed it from the selected local app (`eurofish` by default), run the request with the allocated port instruction, push the result, deploy it, publish `https://<name>.kurwalab.fyi`, and install reboot startup. The optional model applies only to this command; quote a model name containing spaces or punctuation, such as `model="Claude/Opus 5.5"`. Straight or typographic quotes are accepted. Refuses existing repositories. |
 | `/delete <name>` or `/delete <owner/name>` | Independently attempt to stop the app, remove its reboot entry, Cloudflare tunnel route and matching CNAME, GitHub repository, and verified local checkout at `<REPOS_DIR>/<name>`. Missing resources are successful no-ops; failures and skipped cleanup are reported without blocking other deletion attempts. Clears the active repository when it names the app. Cloudflare credentials are needed only for route cleanup, and deleting an existing GitHub repository requires repository-delete permission. |
 | `/repo <name>` or `/repo <owner/name>` | Select the active repository. A missing repository is created and seeded from `<REPOS_DIR>/eurofish`; an existing one is cloned or fast-forwarded. A GitHub URL is also accepted. |
@@ -71,7 +83,7 @@ A bare name uses `GITHUB_OWNER`, or the token's account when it is not set. The 
 
 ### New repository template
 
-For every missing repository, the bot creates an empty GitHub repository, copies a local template app into the new checkout, excludes every `.git` entry, and pushes the copy as the single `Initial commit`. `/repo` always uses `<REPOS_DIR>/eurofish`; `/new` uses that default unless `template=<app>` selects another directory under `<REPOS_DIR>`. The template must exist and contain files that Git can commit. `/new` then reads the ordered tunnel ingress list, chooses one more than the last local HTTP route port (or `8080` when none exists), selects its per-command model or the active model, and prefixes the request with `Instead of this app, let's create another app, with the same architecture, stack and styling, but running on the <port>`. App and template names must be lowercase DNS labels containing only letters, digits, and hyphens.
+For every missing repository, the bot creates an empty GitHub repository, copies a local template app into the new checkout, excludes every `.git` entry, and pushes the copy as the single `Initial commit`. `/repo` always uses `<REPOS_DIR>/eurofish`; `/new` uses that default unless `template=<app>` selects another directory under `<REPOS_DIR>`. The template must exist and contain files that Git can commit. The guided creation flow derives its template buttons from one-label hostnames under `kurwalab.fyi` that route to local HTTP ports and have matching local app directories. `/new` then reads the ordered tunnel ingress list, chooses one more than the last local HTTP route port (or `8080` when none exists), selects its per-command model or the active model, and tells Copilot to preserve the selected template's architecture, stack, and styling by default while honoring requested changes. App and template names must be lowercase DNS labels containing only letters, digits, and hyphens.
 
 One job runs at a time. Progress is shown in a single message that is edited as the job advances. Its first line is `Currently doing: ...`, using the latest visible reasoning paragraph, active step, task, or bot stage. Each displayed bot stage, task, plan item, activity, and step carries a stable first-seen timestamp with second precision, the bot host's local timezone name, and its UTC offset. A compact stage is shown until Copilot exposes structured output, then the current task and plan, activity or step names, reasoning-duration labels such as `Reasoned for 12s`, and interleaved live answers take its place. Other reasoning and code-execution details are omitted. Once structured output is visible, repetitive inactivity text stays hidden. Ordinary requests end with the commit, change summary, and redeploy result; `/new` also returns Copilot's final output, provisioning status, and public app URL.
 
@@ -126,8 +138,8 @@ Without `.env` values or `/fix` overrides, requests use `nobrowser` and `tempcha
 | Path | Purpose |
 | --- | --- |
 | `engine/copilot_repo_roundtrip.py` | Playwright round-trip engine (`login` and `fix`), the single automation engine. |
-| `bot/service.py` | Authorized-user commands and the request pipeline. |
-| `bot/telegram_api.py`, `bot/github_api.py` | Telegram long polling and GitHub REST clients (standard library only). |
+| `bot/service.py` | Authorized-user menus, guided conversations, commands, and the request pipeline. |
+| `bot/telegram_api.py`, `bot/github_api.py` | Telegram long polling, reply keyboards, and GitHub REST clients (standard library only). |
 | `bot/gitops.py`, `bot/repos.py` | Seed, clone, sync, commit, push; repository references. |
 | `bot/roundtrip.py`, `bot/deploy.py` | Engine subprocess runner; detached `make run` management and reboot crontab entries. |
 | `bot/cloudflare.py` | Cloudflare tunnel ingress and DNS route management. |

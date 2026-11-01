@@ -1,7 +1,8 @@
 import unittest
+from unittest.mock import patch
 
 from support import make_config  # noqa: F401
-from bot.telegram_api import MESSAGE_LIMIT, chunk_text
+from bot.telegram_api import MESSAGE_LIMIT, Telegram, chunk_text
 
 
 class ChunkTests(unittest.TestCase):
@@ -18,6 +19,15 @@ class ChunkTests(unittest.TestCase):
     def test_unbroken_text_is_cut_at_the_limit(self):
         parts = chunk_text("x" * (MESSAGE_LIMIT * 2 + 5))
         self.assertEqual([len(p) for p in parts], [MESSAGE_LIMIT, MESSAGE_LIMIT, 5])
+
+    def test_send_long_attaches_a_keyboard_only_to_the_last_chunk(self):
+        telegram = Telegram("token")
+        keyboard = {"keyboard": [[{"text": "Menu"}]]}
+        with patch.object(telegram, "_call", return_value={"message_id": 1}) as call:
+            telegram.send_long(7, "x" * (MESSAGE_LIMIT + 1), reply_markup=keyboard)
+        payloads = [item.args[1] for item in call.call_args_list]
+        self.assertNotIn("reply_markup", payloads[0])
+        self.assertEqual(payloads[1]["reply_markup"], keyboard)
 
 
 if __name__ == "__main__":

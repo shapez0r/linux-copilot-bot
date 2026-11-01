@@ -11,7 +11,8 @@ from bot.deploy import DeployResult
 from bot.github_api import GitHubError
 from bot.gitops import Git, GitError
 from bot.roundtrip import Cancelled
-from bot.service import DEPLOY_NOTE, HELP, NEW_APP_PROMPT, Bot, Progress
+from bot.service import (CONFIRM_DELETE, CREATE_APP, CUSTOM_MODEL, DELETE_APP, DEPLOY_NOTE,
+                         FIX_APP, HELP, KNOWN_MODELS, MAIN_KEYBOARD, NEW_APP_PROMPT, Bot, Progress)
 from bot.state import State
 
 
@@ -31,14 +32,16 @@ class LocalGit(Git):
 
 class FakeTelegram:
     def __init__(self):
-        self.sent, self.edits = [], []
+        self.sent, self.edits, self.markups = [], [], []
 
-    def send_message(self, chat_id, text):
+    def send_message(self, chat_id, text, reply_markup=None):
         self.sent.append(text)
+        self.markups.append(reply_markup)
         return len(self.sent)
 
-    def send_long(self, chat_id, text):
+    def send_long(self, chat_id, text, reply_markup=None):
         self.sent.append(text)
+        self.markups.append(reply_markup)
 
     def edit_message(self, chat_id, message_id, text):
         self.edits.append(text)
@@ -152,6 +155,70 @@ class ServiceTests(unittest.TestCase):
         self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42, 77}))
         self.bot.handle_update(update(77))
         self.assertEqual(self.tg.sent, [HELP, HELP])
+
+    def test_start_shows_the_app_management_menu(self):
+        self.say("/start")
+        self.assertIn("Create and manage apps", self.tg.sent[-1])
+        self.assertEqual(self.tg.markups[-1], MAIN_KEYBOARD)
+
+    def test_create_app_menu_guides_name_model_template_prompt_and_returns_link(self):
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.app_routes.return_value = [
+                {"app": "eurofish", "hostname": "eurofish.kurwalab.fyi",
+                 "service": "http://127.0.0.1:8080"},
+            ]
+            routes.return_value.next_port.return_value = 8081
+            routes.return_value.prepare.return_value = (
+                "Tunnel: https://menu-app.kurwalab.fyi -> http://127.0.0.1:8081.")
+            self.say(CREATE_APP)
+            self.say("menu-app")
+            self.say(KNOWN_MODELS[0])
+            self.say("eurofish")
+            self.assertIn("styling, architecture and stack", self.tg.sent[-1])
+            self.say("Build a task board with a different color palette")
+        self.assertEqual(self.rt.calls[0][2], "Claude/Sonnet 5.5")
+        self.assertEqual(self.rt.calls[0][1],
+                         NEW_APP_PROMPT.format(port=8081) +
+                         "Build a task board with a different color palette" + DEPLOY_NOTE)
+        self.assertTrue(any("App: https://menu-app.kurwalab.fyi" in message for message in self.tg.sent))
+        self.assertEqual(self.tg.markups[-1], MAIN_KEYBOARD)
+
+    def test_create_app_menu_accepts_a_custom_model(self):
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.app_routes.return_value = [
+                {"app": "eurofish", "hostname": "eurofish.kurwalab.fyi",
+                 "service": "http://127.0.0.1:8080"},
+            ]
+            routes.return_value.next_port.return_value = 8081
+            routes.return_value.prepare.return_value = "Tunnel configured."
+            self.say(CREATE_APP)
+            self.say("custom-model-app")
+            self.say(CUSTOM_MODEL)
+            self.say("Other/Model 1")
+            self.say("eurofish")
+            self.say("Build it")
+        self.assertEqual(self.rt.calls[0][2], "Other/Model 1")
+
+    def test_fix_app_menu_selects_an_app_accepts_a_prompt_and_restores_the_menu(self):
+        self.state.repo = "me/app"
+        self.say(FIX_APP)
+        self.say("me/app")
+        self.say("Improve the empty state")
+        self.assertEqual(self.rt.calls[0][0], self.dest)
+        self.assertEqual(self.rt.calls[0][1], "Improve the empty state" + DEPLOY_NOTE)
+        self.assertEqual(self.tg.markups[-1], MAIN_KEYBOARD)
+
+    def test_delete_app_menu_requires_confirmation(self):
+        self.say(DELETE_APP)
+        self.say("app")
+        self.assertEqual(self.gh.deleted, [])
+        self.say(CONFIRM_DELETE)
+        self.assertEqual(self.gh.deleted, ["me/app"])
+        self.assertEqual(self.tg.markups[-1], MAIN_KEYBOARD)
 
     def test_progress_stages_have_a_current_header_and_zoned_timestamp(self):
         with patch("bot.roundtrip.format_timestamp", return_value="2026-11-01 16:21:21 UTC+00:00"):

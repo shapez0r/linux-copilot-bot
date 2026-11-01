@@ -27,17 +27,71 @@ DEPLOY_NOTE = (
 )
 NEW_REPO_TEMPLATE = "eurofish"
 NEW_APP_PROMPT = (
-    "Instead of this app, let's create another app, with the same architecture, stack and styling, "
-    "but running on the {port}\n\n"
+    "Use this app as the template for a new app running on port {port}. Keep its architecture, stack and "
+    "styling by default, but change any of them when the request below asks for it.\n\n"
 )
+KNOWN_MODELS = (
+    "Claude/Sonnet 5.5",
+    "Claude/Opus 5.5",
+    "GPT/GPT-6",
+    "GPT/GPT-6.1 Sol",
+)
+
+CREATE_APP = "➕ Create an app"
+LIST_APPS = "📱 List apps"
+FIX_APP = "🛠 Fix an app"
+DELETE_APP = "🗑 Delete an app"
+TUNNEL_ROUTES = "☁️ Tunnel routes"
+SELECT_REPOSITORY = "📂 Select repository"
+SET_MODEL = "🤖 Set model"
+SHOW_STATUS = "ℹ️ Status"
+CANCEL_ACTION = "❌ Cancel / stop"
+BACK_TO_MENU = "⬅️ Main menu"
+CUSTOM_MODEL = "⌨️ Enter another model"
+LIST_ROUTES = "📋 List routes"
+ADD_ROUTE = "➕ Add or update route"
+DELETE_ROUTE = "🗑 Delete route"
+CONFIRM_DELETE = "✅ Yes, delete it"
+KEEP_APP = "↩️ No, keep it"
+
+
+def _keyboard(rows):
+    """Build a persistent Telegram reply keyboard from button-label rows."""
+    return {
+        "keyboard": [[{"text": label} for label in row] for row in rows],
+        "resize_keyboard": True,
+        "is_persistent": True,
+    }
+
+
+MAIN_KEYBOARD = _keyboard([
+    [CREATE_APP, LIST_APPS],
+    [FIX_APP, DELETE_APP],
+    [TUNNEL_ROUTES, SELECT_REPOSITORY],
+    [SET_MODEL, SHOW_STATUS],
+    [CANCEL_ACTION],
+])
+MODEL_KEYBOARD = _keyboard([
+    [KNOWN_MODELS[0], KNOWN_MODELS[1]],
+    [KNOWN_MODELS[2], KNOWN_MODELS[3]],
+    [CUSTOM_MODEL],
+    [BACK_TO_MENU],
+])
+ROUTES_KEYBOARD = _keyboard([
+    [LIST_ROUTES],
+    [ADD_ROUTE, DELETE_ROUTE],
+    [BACK_TO_MENU],
+])
+CANCEL_KEYBOARD = _keyboard([[CANCEL_ACTION], [BACK_TO_MENU]])
 
 NEW_USAGE = (
     "Usage: /new [public|private] [model=<provider/model>] [template=<app>] "
     'name="<name|owner/name>" prompt="<request>"'
 )
 
-HELP = """Send a request as plain text and I will change the active repository with Copilot, commit, push and redeploy it with `make run`.
+HELP = """Use the buttons below to create and manage apps. You can also send a request as plain text to change the active repository, commit, push and redeploy it with `make run`.
 
+/menu - show the app-management menu
 /new [public|private] [model=<provider/model>] [template=<app>] name="<name|owner/name>" prompt="<request>" - create, build, deploy and publish a new app
 /delete <name|owner/name> - permanently delete an app's GitHub repository, local checkout and tunnel route
 /repo [public|private] <name|owner/name> - select a repository; a missing one is created from the eurofish reference app
@@ -94,6 +148,7 @@ class Bot:
         self._lock = threading.Lock()
         self._cancel = threading.Event()
         self._worker = None
+        self._dialogs = {}
 
     # ---- Telegram loop -------------------------------------------------
 
@@ -140,17 +195,44 @@ class Bot:
         except TelegramError as e:
             log.warning("send failed: %s", redact(str(e), self.cfg.secrets))
 
+    def say_keyboard(self, chat_id: int, text: str, keyboard):
+        try:
+            self.tg.send_long(chat_id, redact(text, self.cfg.secrets), reply_markup=keyboard)
+        except TelegramError as e:
+            log.warning("send failed: %s", redact(str(e), self.cfg.secrets))
+
+    def show_menu(self, chat_id: int, text: str = "What would you like to do?"):
+        self._dialogs.pop(chat_id, None)
+        self.say_keyboard(chat_id, text, MAIN_KEYBOARD)
+
     # ---- Commands ------------------------------------------------------
 
     def handle_text(self, chat_id: int, text: str):
+        if text == BACK_TO_MENU:
+            self.show_menu(chat_id)
+            return
+        if text == CANCEL_ACTION:
+            self.cmd_cancel(chat_id)
+            return
+        if text in (CREATE_APP, LIST_APPS, FIX_APP, DELETE_APP, TUNNEL_ROUTES,
+                    SELECT_REPOSITORY, SET_MODEL, SHOW_STATUS, LIST_ROUTES, ADD_ROUTE, DELETE_ROUTE):
+            self._handle_menu_button(chat_id, text)
+            return
+        if chat_id in self._dialogs and not text.startswith("/"):
+            self._handle_dialog(chat_id, text)
+            return
         if not text.startswith("/"):
             self.start_request(chat_id, "", text)
             return
         parts = re.split(r"\s+", text, maxsplit=1)
         command = parts[0][1:].split("@")[0].lower()
         arg = parts[1].strip() if len(parts) > 1 else ""
-        if command in ("start", "help"):
-            self.say(chat_id, HELP)
+        if command == "start":
+            self.show_menu(chat_id, "Welcome. Create and manage apps with the buttons below.")
+        elif command == "help":
+            self.say_keyboard(chat_id, HELP, MAIN_KEYBOARD)
+        elif command == "menu":
+            self.show_menu(chat_id)
         elif command == "new":
             self.cmd_new(chat_id, arg)
         elif command == "delete":
@@ -171,6 +253,333 @@ class Bot:
             self.cmd_cancel(chat_id)
         else:
             self.say(chat_id, "Unknown command. Send /help for the list.")
+
+    def _handle_menu_button(self, chat_id: int, label: str):
+        """Start a guided action selected from a reply-keyboard button."""
+        if label == LIST_APPS:
+            self.cmd_list(chat_id, "")
+        elif label == SHOW_STATUS:
+            self.cmd_status(chat_id)
+        elif label == TUNNEL_ROUTES:
+            self._dialogs.pop(chat_id, None)
+            self.say_keyboard(chat_id, "Manage Cloudflare Tunnel routes.", ROUTES_KEYBOARD)
+        elif label == LIST_ROUTES:
+            self.cmd_cloudflare(chat_id, "list")
+        elif label == CREATE_APP:
+            if self._cloudflare_unavailable(chat_id) or self._job_blocks_dialog(chat_id):
+                return
+            self._dialogs[chat_id] = {"flow": "create", "step": "name", "data": {}}
+            self.say_keyboard(
+                chat_id,
+                "Enter the new app name. Use a lowercase DNS label such as `invoice-dashboard`.",
+                CANCEL_KEYBOARD,
+            )
+        elif label == FIX_APP:
+            if self._job_blocks_dialog(chat_id):
+                return
+            choices = self._app_choices(include_active=True)
+            self._dialogs[chat_id] = {"flow": "fix", "step": "repo", "data": {}}
+            self.say_keyboard(
+                chat_id,
+                "Choose an app or enter its repository as `name` or `owner/name`.",
+                self._choice_keyboard(choices),
+            )
+        elif label == DELETE_APP:
+            if self._job_blocks_dialog(chat_id):
+                return
+            choices = self._app_choices(include_active=True)
+            self._dialogs[chat_id] = {"flow": "delete", "step": "name", "data": {}}
+            self.say_keyboard(
+                chat_id,
+                "Choose the app to delete, or enter its name. You will be asked to confirm.",
+                self._choice_keyboard(choices),
+            )
+        elif label == SELECT_REPOSITORY:
+            if self._job_blocks_dialog(chat_id):
+                return
+            self._dialogs[chat_id] = {"flow": "repo", "step": "repo", "data": {}}
+            self.say_keyboard(chat_id, "Enter `name` or `owner/name` to select a repository.", CANCEL_KEYBOARD)
+        elif label == SET_MODEL:
+            self._dialogs[chat_id] = {"flow": "model", "step": "model", "data": {}}
+            self.say_keyboard(chat_id, f"Choose a model. Current model: {self.state.model}", MODEL_KEYBOARD)
+        elif label == ADD_ROUTE:
+            if self._cloudflare_unavailable(chat_id) or self._job_blocks_dialog(chat_id):
+                return
+            self._dialogs[chat_id] = {"flow": "route-add", "step": "name", "data": {}}
+            self.say_keyboard(chat_id, "Enter the lowercase subdomain for the route.", CANCEL_KEYBOARD)
+        elif label == DELETE_ROUTE:
+            if self._cloudflare_unavailable(chat_id) or self._job_blocks_dialog(chat_id):
+                return
+            self._dialogs[chat_id] = {"flow": "route-delete", "step": "name", "data": {}}
+            self.say_keyboard(chat_id, "Enter the lowercase subdomain of the route to delete.", CANCEL_KEYBOARD)
+
+    def _job_blocks_dialog(self, chat_id: int) -> bool:
+        if not self._lock.locked():
+            return False
+        self.say(chat_id, "A job is already running. Wait for it or use Cancel / stop.")
+        return True
+
+    def _app_choices(self, include_active: bool = False):
+        choices = []
+        if include_active and self.state.repo:
+            choices.append(self.state.repo)
+        choices.extend(app for app, _ in self.deployer.running_apps())
+        return list(dict.fromkeys(choices))
+
+    @staticmethod
+    def _choice_keyboard(choices, extra_rows=None):
+        rows = [choices[index:index + 2] for index in range(0, len(choices), 2)]
+        rows.extend(extra_rows or [])
+        rows.extend([[CANCEL_ACTION], [BACK_TO_MENU]])
+        return _keyboard(rows)
+
+    def _handle_dialog(self, chat_id: int, text: str):
+        dialog = self._dialogs[chat_id]
+        flow, step = dialog["flow"], dialog["step"]
+        if flow == "create":
+            self._handle_create_dialog(chat_id, dialog, text)
+        elif flow == "fix":
+            self._handle_fix_dialog(chat_id, dialog, text)
+        elif flow == "delete":
+            self._handle_delete_dialog(chat_id, dialog, text)
+        elif flow == "repo":
+            self._handle_repo_dialog(chat_id, text)
+        elif flow == "model":
+            self._handle_model_dialog(chat_id, dialog, text)
+        elif flow == "route-add":
+            self._handle_route_add_dialog(chat_id, dialog, text)
+        elif flow == "route-delete":
+            self._handle_route_delete_dialog(chat_id, dialog, text)
+        else:
+            self.show_menu(chat_id, "That action expired. Choose another action.")
+
+    def _handle_create_dialog(self, chat_id: int, dialog: dict, text: str):
+        step, data = dialog["step"], dialog["data"]
+        if step == "name":
+            try:
+                _, name = parse_repo_ref(text, "owner")
+            except RepoError as error:
+                self.say(chat_id, str(error))
+                return
+            if not self._valid_route(name):
+                self.say(chat_id, "App names must be lowercase DNS labels containing only letters, digits and hyphens.")
+                return
+            data["ref"] = text.strip()
+            dialog["step"] = "model"
+            self.say_keyboard(chat_id, "Choose the model that will create the app.", MODEL_KEYBOARD)
+            return
+        if step == "model":
+            if text == CUSTOM_MODEL:
+                dialog["step"] = "custom-model"
+                self.say_keyboard(chat_id, "Enter a provider/model value, such as `Provider/Model name`.",
+                                  CANCEL_KEYBOARD)
+                return
+            if text not in KNOWN_MODELS:
+                self.say_keyboard(chat_id, "Choose a listed model or select Enter another model.", MODEL_KEYBOARD)
+                return
+            data["model"] = text
+            self._begin_template_selection(chat_id, dialog)
+            return
+        if step == "custom-model":
+            if not self._valid_model(text):
+                self.say(chat_id, "Use a provider/model pair such as GPT/GPT-6.")
+                return
+            data["model"] = text.strip()
+            self._begin_template_selection(chat_id, dialog)
+            return
+        if step == "template":
+            if text not in data["templates"]:
+                self.say(chat_id, "Choose one of the templates loaded from the tunnel routes.")
+                return
+            data["template"] = text
+            dialog["step"] = "prompt"
+            self.say_keyboard(
+                chat_id,
+                "Describe the app to create. The template's styling, architecture and stack are used by default; "
+                "include any changes you want in this prompt.",
+                CANCEL_KEYBOARD,
+            )
+            return
+        if step == "prompt":
+            request = text.strip()
+            if not request:
+                self.say(chat_id, "Enter a nonempty app description.")
+                return
+            self._dialogs.pop(chat_id, None)
+            started = self._spawn(
+                chat_id,
+                lambda: self._new_app(chat_id, data["ref"], request, True,
+                                      data["model"], data["template"]),
+                after=lambda: self.show_menu(chat_id, "App creation finished. Choose the next action."),
+            )
+            if not started:
+                self.show_menu(chat_id, "App creation could not start because another job is running.")
+
+    def _begin_template_selection(self, chat_id: int, dialog: dict):
+        dialog["step"] = "loading-templates"
+        self.say_keyboard(chat_id, "Loading template apps from the Cloudflare tunnel routes...", CANCEL_KEYBOARD)
+        started = self._spawn(chat_id, lambda: self._load_template_choices(chat_id, dialog))
+        if not started:
+            self._dialogs.pop(chat_id, None)
+
+    def _load_template_choices(self, chat_id: int, dialog: dict):
+        try:
+            route_apps = CloudflareRoutes(self.cfg).app_routes()
+        except CloudflareError as error:
+            self.show_menu(chat_id, f"Could not load template routes: {error}")
+            return
+        templates = list(dict.fromkeys(
+            route["app"] for route in route_apps
+            if (self.cfg.repos_dir / route["app"]).is_dir()
+        ))
+        if not templates:
+            self.show_menu(
+                chat_id,
+                "No template is available. A template needs both a local app checkout and a local HTTP route "
+                "on the configured Cloudflare tunnel.",
+            )
+            return
+        if self._dialogs.get(chat_id) is not dialog:
+            return
+        dialog["data"]["templates"] = templates
+        dialog["step"] = "template"
+        self.say_keyboard(
+            chat_id,
+            "Choose a currently published app as the template. Its styling, architecture and stack are copied "
+            "by default, and you can request changes in the next step.",
+            self._choice_keyboard(templates),
+        )
+
+    def _handle_fix_dialog(self, chat_id: int, dialog: dict, text: str):
+        if dialog["step"] == "repo":
+            try:
+                parse_repo_ref(text, "owner")
+            except RepoError as error:
+                self.say(chat_id, str(error))
+                return
+            dialog["data"]["repo"] = text.strip()
+            dialog["step"] = "prompt"
+            self.say_keyboard(chat_id, "Describe what should be fixed or changed in this app.", CANCEL_KEYBOARD)
+            return
+        request = text.strip()
+        if not request:
+            self.say(chat_id, "Enter a nonempty fix request.")
+            return
+        repo = dialog["data"]["repo"]
+        self._dialogs.pop(chat_id, None)
+        started = self._spawn(chat_id, lambda: self._request(chat_id, repo, request),
+                              after=lambda: self.show_menu(chat_id, "Fix finished. Choose the next action."))
+        if not started:
+            self.show_menu(chat_id, "The fix could not start because another job is running.")
+
+    def _handle_delete_dialog(self, chat_id: int, dialog: dict, text: str):
+        if dialog["step"] == "name":
+            try:
+                _, name = parse_repo_ref(text, "owner")
+            except RepoError as error:
+                self.say(chat_id, str(error))
+                return
+            if not self._valid_route(name):
+                self.say(chat_id, "App names must be lowercase DNS labels containing only letters, digits and hyphens.")
+                return
+            dialog["data"]["ref"] = text.strip()
+            dialog["step"] = "confirm"
+            self.say_keyboard(
+                chat_id,
+                f"Delete {text.strip()} from GitHub, the local checkout, deployment startup and tunnel routes?",
+                _keyboard([[CONFIRM_DELETE], [KEEP_APP], [CANCEL_ACTION]]),
+            )
+            return
+        if text in (KEEP_APP, CANCEL_ACTION):
+            self.show_menu(chat_id, "Deletion cancelled.")
+            return
+        if text != CONFIRM_DELETE:
+            self.say(chat_id, "Choose Yes, delete it or No, keep it.")
+            return
+        ref = dialog["data"]["ref"]
+        self._dialogs.pop(chat_id, None)
+        started = self._spawn(
+            chat_id,
+            lambda: self._delete_app(chat_id, ref),
+            after=lambda: self.show_menu(chat_id, "Deletion attempt finished. Choose the next action."),
+        )
+        if not started:
+            self.show_menu(chat_id, "Deletion could not start because another job is running.")
+
+    def _handle_repo_dialog(self, chat_id: int, text: str):
+        try:
+            parse_repo_ref(text, "owner")
+        except RepoError as error:
+            self.say(chat_id, str(error))
+            return
+        self._dialogs.pop(chat_id, None)
+        started = self._spawn(chat_id, lambda: self._select_repo(chat_id, text),
+                              after=lambda: self.show_menu(chat_id, "Repository selection finished."))
+        if not started:
+            self.show_menu(chat_id, "Repository selection could not start because another job is running.")
+
+    def _handle_model_dialog(self, chat_id: int, dialog: dict, text: str):
+        if dialog["step"] == "model" and text == CUSTOM_MODEL:
+            dialog["step"] = "custom-model"
+            self.say_keyboard(chat_id, "Enter a provider/model value.", CANCEL_KEYBOARD)
+            return
+        if dialog["step"] == "model" and text not in KNOWN_MODELS:
+            self.say_keyboard(chat_id, "Choose a listed model or select Enter another model.", MODEL_KEYBOARD)
+            return
+        if not self._valid_model(text):
+            self.say(chat_id, "Use a provider/model pair such as GPT/GPT-6.")
+            return
+        self.state.model = text.strip()
+        self.state.save()
+        self.show_menu(chat_id, f"Model set to {self.state.model}.")
+
+    def _handle_route_add_dialog(self, chat_id: int, dialog: dict, text: str):
+        if dialog["step"] == "name":
+            if not self._valid_route(text):
+                self.say(chat_id, "Subdomain must be a lowercase DNS label (letters, digits, hyphens).")
+                return
+            dialog["data"]["name"] = text
+            dialog["step"] = "port"
+            self.say_keyboard(chat_id, "Enter the local HTTP port (1-65535).", CANCEL_KEYBOARD)
+            return
+        if not text.isascii() or not text.isdecimal() or not 1 <= int(text) <= 65535:
+            self.say(chat_id, "Port must be an integer from 1 to 65535.")
+            return
+        name, port = dialog["data"]["name"], int(text)
+        self._dialogs.pop(chat_id, None)
+        started = self._spawn(
+            chat_id,
+            lambda: self.say(chat_id, CloudflareRoutes(self.cfg).prepare(name, port)),
+            after=lambda: self.show_menu(chat_id, "Route update finished. Choose the next action."),
+        )
+        if not started:
+            self.show_menu(chat_id, "The route update could not start because another job is running.")
+
+    def _handle_route_delete_dialog(self, chat_id: int, dialog: dict, text: str):
+        if dialog["step"] == "name":
+            if not self._valid_route(text):
+                self.say(chat_id, "Subdomain must be a lowercase DNS label (letters, digits, hyphens).")
+                return
+            dialog["data"]["name"] = text
+            dialog["step"] = "confirm"
+            self.say_keyboard(chat_id, f"Delete the tunnel route for {text}?",
+                              _keyboard([[CONFIRM_DELETE], [KEEP_APP], [CANCEL_ACTION]]))
+            return
+        if text in (KEEP_APP, CANCEL_ACTION):
+            self.show_menu(chat_id, "Route deletion cancelled.")
+            return
+        if text != CONFIRM_DELETE:
+            self.say(chat_id, "Choose Yes, delete it or No, keep it.")
+            return
+        name = dialog["data"]["name"]
+        self._dialogs.pop(chat_id, None)
+        started = self._spawn(
+            chat_id,
+            lambda: self.say(chat_id, CloudflareRoutes(self.cfg).delete_route(name)),
+            after=lambda: self.show_menu(chat_id, "Route deletion finished. Choose the next action."),
+        )
+        if not started:
+            self.show_menu(chat_id, "Route deletion could not start because another job is running.")
 
     def cmd_cloudflare(self, chat_id: int, arg: str):
         """Manage only routes explicitly requested by an authorized user."""
@@ -249,6 +658,9 @@ class Bot:
         self.say(chat_id, "\n".join(["Running apps:", *(f"- {app} (pid {pid})" for app, pid in apps)]))
 
     def cmd_cancel(self, chat_id: int):
+        if chat_id in self._dialogs:
+            self.show_menu(chat_id, "Action cancelled.")
+            return
         if self._lock.locked():
             self._cancel.set()
             self.say(chat_id, "Cancelling; Copilot is asked to stop.")
@@ -418,10 +830,10 @@ class Bot:
 
     # ---- Job execution -------------------------------------------------
 
-    def _spawn(self, chat_id: int, job):
+    def _spawn(self, chat_id: int, job, after=None):
         if not self._lock.acquire(blocking=False):
             self.say(chat_id, "A job is already running. Wait for it or send /cancel.")
-            return
+            return False
         self._cancel.clear()
 
         def run():
@@ -435,10 +847,16 @@ class Bot:
                 log.exception("job failed")
                 self.say(chat_id, f"\u274c Internal error: {e.__class__.__name__}. See the bot log.")
             finally:
+                if after is not None:
+                    try:
+                        after()
+                    except Exception:
+                        log.exception("post-job UI update failed")
                 self._lock.release()
 
         self._worker = threading.Thread(target=run, name="job", daemon=True)
         self._worker.start()
+        return True
 
     def _owner_default(self) -> str:
         return self.cfg.github_owner or self.gh.login
