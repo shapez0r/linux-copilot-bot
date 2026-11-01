@@ -6,7 +6,7 @@ A Telegram bot for an Ubuntu VM that turns chat messages from authorized users i
 2. takes the message as the prompt;
 3. sends the repository to Microsoft 365 Copilot Chat through the Playwright round-trip engine and applies the returned repository;
 4. commits and pushes the result to GitHub;
-5. registers and restarts an enabled systemd user service that runs `make run` from `/home/localadmin/repos/<name>`;
+5. registers and restarts an enabled systemd system service that runs `make run` from `/home/localadmin/repos/<name>`;
 6. for `/new`, allocates the next tunnel port and creates the Cloudflare route.
 
 **Experimental:** the engine drives Copilot's browser UI, so UI changes can interrupt it. Changes are pushed without review; review the commits on GitHub afterwards.
@@ -19,7 +19,7 @@ A Telegram bot for an Ubuntu VM that turns chat messages from authorized users i
 - A GitHub token with read/write access to repository contents. Creating repositories requires permission to create repositories for the owner, and `/delete` requires permission to delete repositories.
 - A local app checkout to use as a new-repository template. The default is `<REPOS_DIR>/eurofish` (`/home/localadmin/repos/eurofish` with the default configuration).
 - For `/new`, route commands, and the tunnel portion of `/delete`, a remotely managed Cloudflare Tunnel and an API token with **Account / Cloudflare Tunnel / Edit** and **Zone / DNS / Edit** permissions.
-- A systemd user manager. Enable lingering for the bot's Linux account so its enabled services start at boot.
+- systemd and non-interactive `sudo` permission for the bot's Linux account to install, remove, enable, and control its system services.
 
 ## Setup
 
@@ -27,10 +27,9 @@ A Telegram bot for an Ubuntu VM that turns chat messages from authorized users i
 make setup          # virtual environment, Playwright, Chromium
 make system-deps    # Chromium's operating-system libraries (sudo)
 sudo mkdir -p /home/localadmin/repos && sudo chown "$USER" /home/localadmin/repos
-sudo loginctl enable-linger "$USER"   # let user services run without an interactive login
 cp .env.example .env && chmod 600 .env   # then fill in the required values
 make login          # sign in to Copilot once (see below)
-make run            # first run registers and enables the bot's user service
+make run            # first run uses sudo to register and enable the bot service
 ```
 
 Put the Cloudflare API token, account ID, and zone ID in `.env` to use `/new` or `/cloudflare` and to let `/delete` remove tunnel routes. Without those settings, `/delete` still attempts the GitHub and local cleanup and reports that it skipped the route. The tunnel is always `kurwalab-tunnel` and the domain is always `kurwalab.fyi`. Ordinary redeployment never changes routes; only these commands do.
@@ -43,14 +42,14 @@ A VM usually has no display. Either run `make login` over `ssh -X` (or a VNC ses
 
 ### Running as a service
 
-The first foreground `make run` installs and enables `~/.config/systemd/user/copilot-telegram-bot.service` unless the bot is already running under systemd. It does not start a duplicate process. Stop the foreground run, then start the registered service:
+The first foreground `make run` uses non-interactive `sudo` to install and enable `/etc/systemd/system/copilot-telegram-bot.service` unless the bot is already running under systemd. It does not start a duplicate process. Configure the bot account for passwordless access to the required `install`, `rm`, and `systemctl` commands so registration and later app management can run without a terminal. Stop the foreground run, then start the registered service:
 
 ```bash
-systemctl --user start copilot-telegram-bot
-systemctl --user status copilot-telegram-bot
+sudo systemctl start copilot-telegram-bot
+sudo systemctl status copilot-telegram-bot
 ```
 
-The generated unit sets the repository as `WorkingDirectory` and starts it with `make run`. `deploy/copilot-telegram-bot.service` is an equivalent editable template. Enabled user services start at boot when lingering is enabled. The bot and app services use the checked-out files as they are; they do not run `git pull` during startup.
+The generated unit runs under the account that launched the bot, sets the repository as `WorkingDirectory`, and starts it with `make run`. `deploy/copilot-telegram-bot.service` is an equivalent editable template whose `User`, `Group`, `HOME`, and paths must match the installation account. Enabled services start at boot through `multi-user.target`. The bot and app services use the checked-out files as they are; they do not run `git pull` during startup.
 
 ## Using the bot
 
@@ -81,7 +80,7 @@ Apps created through the guided flow are private GitHub repositories. Use the `/
 | `/fix [browser\|nobrowser] [tempchat\|notempchat] <request>` | Run a request against the sender's active repository with one or both per-request options. Options may be supplied in either order. Regular users are restricted to apps they created. |
 | `/list` | List every direct app folder under `REPOS_DIR` except the bot repository, using each app's current systemd state. Administrators see name, status, folder, tunnel port, and tunnel URL; regular users see name, status, and tunnel URL. Missing routes are identified, and route details are marked unavailable when Cloudflare is not configured or cannot be reached. Available to all configured users. |
 | `/app start <name>` or `/app stop <name>` | Start or stop an app through its systemd service. Administrators may control every app; regular users may control only apps recorded as their own. Starting an unregistered owned app registers and enables its service first. |
-| `/register [all\|<name>]` | **Admin only.** Register and enable services for every app folder or one named app. The bot repository is excluded. Registration requires a usable `make run` target, does not start a stopped app, assigns previously unowned apps to `kurwalab.fyi admins`, and removes the exact legacy reboot crontab entry when present. |
+| `/register [all\|<name>]` | **Admin only.** Register and enable services for every app folder or one named app. The bot repository is excluded. Registration requires non-interactive `sudo` and a usable `make run` target, does not start a stopped app, assigns previously unowned apps to `kurwalab.fyi admins`, and removes the matching reboot crontab entry when present. |
 | `/cloudflare <subdomain> <port>` | **Admin only.** Create or update `<subdomain>.kurwalab.fyi` on `kurwalab-tunnel`, targeting `http://127.0.0.1:<port>`; requires Cloudflare credentials. |
 | `/cloudflare list` | **Admin only.** List named ingress routes on `kurwalab-tunnel`. |
 | `/cloudflare delete <subdomain>` | **Admin only.** Delete the named ingress route and its matching tunnel CNAME. |
@@ -104,9 +103,9 @@ One job runs at a time. Progress is shown in a single message that is edited as 
 - **Prepare:** the checkout must be on a branch with no uncommitted changes; the bot fast-forwards it to `origin`.
 - **Round-trip:** the engine uploads a ZIP of the committed `HEAD`, asks Copilot for the complete fixed repository, validates the returned ZIP, and replaces the worktree. The bot appends a note asking Copilot to keep a Makefile whose `run` target starts one HTTP server in the foreground and to keep secrets and runtime data outside the repository.
 - **Commit and push:** all changes are committed on the current branch with the first line of the request as the subject, and pushed to `origin`. If Copilot changed nothing, nothing is committed or deployed. A failed push leaves the commit locally and is reported; the next request pushes it.
-- **Redeploy:** the bot writes and enables `~/.config/systemd/user/copilot-app-<name>.service`, then asks systemd to restart it. The unit sets the app repository as `WorkingDirectory`, executes `make run`, restarts on failure, removes bot secrets from its environment, and appends output to `<STATE_DIR>/logs/<name>.log`. The redeploy counts as successful only when systemd reports the service active through `DEPLOY_SETTLE_SECONDS`; otherwise the systemd state and log tail are sent. A repository without a usable `run` target is pushed but not started.
+- **Redeploy:** the bot uses non-interactive `sudo` to write and enable `/etc/systemd/system/copilot-app-<name>.service`, then asks systemd to restart it. The unit sets the app repository as `WorkingDirectory`, executes `make run`, restarts on failure, removes bot secrets from its environment, and appends output to `<STATE_DIR>/logs/<name>.log`. The redeploy counts as successful only when systemd reports the service active through `DEPLOY_SETTLE_SECONDS`; otherwise the systemd state and log tail are sent. A repository without a usable `run` target is pushed but not started.
 - **New-app publish:** after a successful `/new` service restart, the bot creates `<name>.kurwalab.fyi` on `kurwalab-tunnel`, targeting the allocated `127.0.0.1` port. If deployment or routing fails, the report identifies the completed and failed stages.
-- **App deletion:** `/delete app` independently attempts to stop, disable, and remove its systemd unit, delete its GitHub repository, remove a matching verified checkout at `<REPOS_DIR>/app`, and delete its Cloudflare route and tunnel CNAME. The exact legacy reboot crontab line is also removed when present. Missing resources need no cleanup. Every step is reported, and a failure or missing Cloudflare configuration does not block the other attempts.
+- **App deletion:** `/delete app` independently attempts to stop, disable, and remove its systemd unit, delete its GitHub repository, remove a matching verified checkout at `<REPOS_DIR>/app`, and delete its Cloudflare route and tunnel CNAME. The matching reboot crontab line is also removed when present. Missing resources need no cleanup. Every step is reported, and a failure or missing Cloudflare configuration does not block the other attempts.
 - **Routes on demand:** `/cloudflare eurofish 8080` creates or updates `eurofish.kurwalab.fyi` to `http://127.0.0.1:8080` on `kurwalab-tunnel` and maintains its proxied DNS CNAME. `/cloudflare list` shows named ingress rules, and `/cloudflare delete eurofish` removes that ingress rule and its matching tunnel CNAME. Route names must be one lowercase DNS label, and ports must be 1–65535. Other ingress rules are preserved. Ordinary deployment never changes routes.
 
 **Important:** the engine applies a returned ZIP as a full replacement. Everything in the checkout except `.git` is replaced, including untracked and ignored files such as `.env`, virtual environments, `node_modules`, and local databases. Keep runtime data and secrets outside the checkout and let `make run` rebuild dependencies.
@@ -142,7 +141,7 @@ Without `.env` values or `/fix` overrides, requests use `nobrowser` and `tempcha
 ## Security
 
 - The bot obeys only Telegram user ids in `TELEGRAM_ADMIN_IDS` and `TELEGRAM_USER_IDS`. Administrators can manage every app and infrastructure setting; regular users can execute Copilot-written code only through apps recorded as their own.
-- A request can create or change a `Makefile` that the bot then runs. Use a dedicated unprivileged VM user, restrict the GitHub token to the repositories involved, and keep `.env` and the browser profile readable only by that user.
+- A request can create or change a `Makefile` that the bot then runs. Use a dedicated unprivileged VM user, restrict its passwordless sudo rules to the required service-management commands, restrict the GitHub token to the repositories involved, and keep `.env` and the browser profile readable only by that user.
 - Upload only repositories approved for your organization's Copilot environment.
 - Telegram, GitHub, and Cloudflare API tokens are redacted from errors and messages. App units explicitly unset these token variables and `VIRTUAL_ENV`.
 
@@ -154,10 +153,10 @@ Without `.env` values or `/fix` overrides, requests use `nobrowser` and `tempcha
 | `bot/service.py`, `bot/state.py` | Role-aware menus, permissions, app ownership, per-user selections, guided conversations, commands, and the request pipeline. |
 | `bot/telegram_api.py`, `bot/github_api.py` | Telegram long polling, reply keyboards, and GitHub REST clients (standard library only). |
 | `bot/gitops.py`, `bot/repos.py` | Seed, clone, sync, commit, push; repository references. |
-| `bot/roundtrip.py`, `bot/deploy.py` | Engine subprocess runner; systemd user-unit registration, lifecycle control, status, and app logs. |
+| `bot/roundtrip.py`, `bot/deploy.py` | Engine subprocess runner; sudo-backed systemd system-unit registration, lifecycle control, status, and app logs. |
 | `bot/cloudflare.py` | Cloudflare tunnel ingress and DNS route management. |
 | `bin/git-askpass` | Supplies GitHub credentials to Git from the environment. |
-| `deploy/` | Editable systemd user-unit template for the bot. |
+| `deploy/` | Editable systemd system-unit template for the bot. |
 
 ## Tests
 

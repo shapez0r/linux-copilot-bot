@@ -17,6 +17,13 @@ class FakeSystemdDeployer(Deployer):
         self.enabled = set()
         self.states = {}
 
+    def _write_unit(self, path, content):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+
+    def _remove_unit(self, path):
+        path.unlink(missing_ok=True)
+
     def _systemctl(self, args, check=True):
         self.calls.append(tuple(args))
         command = args[0]
@@ -59,22 +66,37 @@ class DeployTests(unittest.TestCase):
         self.assertIn("make run", result.message)
         self.assertFalse(self.deployer.service_path("app").exists())
 
-    def test_registration_writes_and_enables_a_user_service(self):
+    def test_registration_writes_and_enables_a_system_service(self):
         self.makefile()
-        with mock.patch.object(self.deployer, "_remove_legacy_reboot", return_value=True):
+        with mock.patch.object(self.deployer, "_remove_reboot_entry", return_value=True):
             message = self.deployer.ensure_service("app", self.repo)
         unit = self.deployer.service_path("app").read_text()
         self.assertIn(f"WorkingDirectory={self.repo}", unit)
         self.assertRegex(unit, r"ExecStart=/.+/make run")
         self.assertIn("UnsetEnvironment=TELEGRAM_BOT_TOKEN GITHUB_TOKEN CLOUDFLARE_API_TOKEN", unit)
-        self.assertIn("WantedBy=default.target", unit)
-        self.assertIn("legacy crontab entry was removed", message)
+        self.assertIn("WantedBy=multi-user.target", unit)
+        self.assertIn("User=", unit)
+        self.assertIn("Group=", unit)
+        self.assertIn("matching crontab entry was removed", message)
         self.assertIn(self.deployer.service_name("app"), self.deployer.enabled)
         self.assertIn(("daemon-reload",), self.deployer.calls)
 
+    def test_privileged_commands_use_noninteractive_sudo(self):
+        deployer = Deployer(make_config(self.tmp), self.bot_repo)
+        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with mock.patch("bot.deploy.subprocess.run", return_value=completed) as run:
+            deployer._systemctl(["daemon-reload"])
+        self.assertEqual(run.call_args.args[0], ["sudo", "-n", "--", "systemctl", "daemon-reload"])
+
+        with mock.patch.object(deployer, "_sudo", return_value=completed) as sudo:
+            deployer._write_unit(Path("/etc/systemd/system/example.service"), "[Unit]\n")
+        command = sudo.call_args.args[0]
+        self.assertEqual(command[:5], ["install", "-D", "-m", "0644", "--"])
+        self.assertEqual(command[-1], "/etc/systemd/system/example.service")
+
     def test_registration_is_idempotent(self):
         self.makefile()
-        with mock.patch.object(self.deployer, "_remove_legacy_reboot", return_value=False):
+        with mock.patch.object(self.deployer, "_remove_reboot_entry", return_value=False):
             self.deployer.ensure_service("app", self.repo)
             self.deployer.calls.clear()
             message = self.deployer.ensure_service("app", self.repo)
@@ -84,7 +106,7 @@ class DeployTests(unittest.TestCase):
 
     def test_redeploy_restarts_service_and_reports_systemd_state(self):
         self.makefile()
-        with mock.patch.object(self.deployer, "_remove_legacy_reboot", return_value=False), \
+        with mock.patch.object(self.deployer, "_remove_reboot_entry", return_value=False), \
              mock.patch("bot.deploy.time.monotonic", side_effect=[0, 2, 2]):
             result = self.deployer.redeploy("app", self.repo)
         self.assertTrue(result.ok, result.message)
@@ -94,7 +116,7 @@ class DeployTests(unittest.TestCase):
 
     def test_start_and_stop_use_the_app_service(self):
         self.makefile()
-        with mock.patch.object(self.deployer, "_remove_legacy_reboot", return_value=False), \
+        with mock.patch.object(self.deployer, "_remove_reboot_entry", return_value=False), \
              mock.patch("bot.deploy.time.monotonic", side_effect=[0, 2, 2]):
             self.assertTrue(self.deployer.start("app", self.repo).ok)
         self.assertTrue(self.deployer.stop("app", self.repo))
@@ -114,7 +136,7 @@ class DeployTests(unittest.TestCase):
 
     def test_unregister_disables_and_removes_the_service(self):
         self.makefile()
-        with mock.patch.object(self.deployer, "_remove_legacy_reboot", return_value=False):
+        with mock.patch.object(self.deployer, "_remove_reboot_entry", return_value=False):
             self.deployer.ensure_service("app", self.repo)
             message = self.deployer.unregister("app", self.repo)
         self.assertIn("disabled and removed", message)
@@ -123,7 +145,7 @@ class DeployTests(unittest.TestCase):
 
     def test_bot_registration_uses_make_run_without_starting_a_duplicate(self):
         (self.bot_repo / "Makefile").write_text("run:\n\tpython3 -m bot\n")
-        with mock.patch.object(self.deployer, "_remove_legacy_reboot", return_value=False):
+        with mock.patch.object(self.deployer, "_remove_reboot_entry", return_value=False):
             message = self.deployer.ensure_bot_service(self.bot_repo)
         unit = (self.deployer._unit_dir / BOT_SERVICE).read_text()
         self.assertIn(f"WorkingDirectory={self.bot_repo}", unit)
@@ -150,7 +172,7 @@ class DeployTests(unittest.TestCase):
                  SimpleNamespace(returncode=0), current, installed,
              ]) as run:
             message = self.deployer.ensure_service("app", self.repo)
-        self.assertIn("legacy crontab entry was removed", message)
+        self.assertIn("matching crontab entry was removed", message)
         self.assertEqual(run.call_args_list[-1].kwargs["input"], "MAILTO=ops@example.com\n")
 
     def test_app_env_drops_secrets_and_the_bot_virtualenv(self):

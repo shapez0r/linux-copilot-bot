@@ -1,11 +1,14 @@
-"""Registers and controls bot-managed applications as systemd user services."""
+"""Registers and controls bot-managed applications as systemd system services."""
 from __future__ import annotations
 
+import grp
 import os
+import pwd
 import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -76,7 +79,12 @@ class Deployer:
         self._cfg = cfg
         self._bot_repo_dir = Path(bot_repo_dir).resolve()
         self._log_dir = cfg.state_dir / "logs"
-        self._unit_dir = Path.home() / ".config" / "systemd" / "user"
+        self._unit_dir = Path("/etc/systemd/system")
+        uid = int(os.environ.get("SUDO_UID", os.getuid())) if os.geteuid() == 0 else os.getuid()
+        account = pwd.getpwuid(uid)
+        self._service_user = account.pw_name
+        self._service_group = grp.getgrgid(account.pw_gid).gr_name
+        self._service_home = Path(account.pw_dir)
 
     def log_path(self, app: str) -> Path:
         return self._log_dir / f"{app}.log"
@@ -119,16 +127,12 @@ class Deployer:
         if self.is_bot_repo(resolved):
             raise DeployError("the bot repository is not an app")
 
-    def _systemctl(self, args: list[str], check: bool = True):
-        command = ["systemctl", "--user", *args]
-        env = os.environ.copy()
-        runtime = Path(f"/run/user/{os.getuid()}")
-        if runtime.is_dir():
-            env.setdefault("XDG_RUNTIME_DIR", str(runtime))
+    def _sudo(self, args: list[str], check: bool = True):
+        command = ["sudo", "-n", "--", *args]
         try:
             done = subprocess.run(
                 command, text=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, timeout=SYSTEMD_TIMEOUT_SECONDS, env=env,
+                stderr=subprocess.PIPE, timeout=SYSTEMD_TIMEOUT_SECONDS,
             )
         except (OSError, subprocess.TimeoutExpired) as error:
             raise DeployError(f"cannot run {' '.join(command)}: {error}") from None
@@ -136,6 +140,9 @@ class Deployer:
             detail = done.stderr.strip() or done.stdout.strip() or f"exit code {done.returncode}"
             raise DeployError(f"{' '.join(command)} failed: {detail[-600:]}")
         return done
+
+    def _systemctl(self, args: list[str], check: bool = True):
+        return self._sudo(["systemctl", *args], check=check)
 
     def _state(self, service: str) -> ServiceState:
         done = self._systemctl([
@@ -199,6 +206,9 @@ class Deployer:
             "",
             "[Service]",
             "Type=simple",
+            f"User={self._service_user}",
+            f"Group={self._service_group}",
+            f"Environment=HOME={_unit_path(str(self._service_home))}",
             f"WorkingDirectory={_unit_path(str(repo_dir.resolve()))}",
             f"ExecStart={_unit_path(make)} run",
             "Restart=on-failure",
@@ -208,7 +218,7 @@ class Deployer:
             "StandardError=inherit",
             "",
             "[Install]",
-            "WantedBy=default.target",
+            "WantedBy=multi-user.target",
             "",
         ])
 
@@ -220,6 +230,9 @@ class Deployer:
             "",
             "[Service]",
             "Type=simple",
+            f"User={self._service_user}",
+            f"Group={self._service_group}",
+            f"Environment=HOME={_unit_path(str(self._service_home))}",
             f"WorkingDirectory={_unit_path(str(repo_dir.resolve()))}",
             f"ExecStart={_unit_path(make)} run",
             "Restart=on-failure",
@@ -227,29 +240,41 @@ class Deployer:
             "TimeoutStopSec=90",
             "",
             "[Install]",
-            "WantedBy=default.target",
+            "WantedBy=multi-user.target",
             "",
         ])
 
-    def _install_unit(self, service: str, content: str) -> bool:
+    def _write_unit(self, path: Path, content: str):
+        temporary = None
         try:
-            self._unit_dir.mkdir(parents=True, exist_ok=True)
-            path = self._unit_dir / service
-            changed = not path.is_file() or path.read_text(encoding="utf-8") != content
-            if changed:
-                temporary = path.with_suffix(path.suffix + ".tmp")
-                temporary.write_text(content, encoding="utf-8")
-                temporary.replace(path)
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as output:
+                output.write(content)
+                temporary = Path(output.name)
+            self._sudo(["install", "-D", "-m", "0644", "--", str(temporary), str(path)])
         except OSError as error:
-            raise DeployError(f"cannot write systemd service {service}: {error}") from None
+            raise DeployError(f"cannot prepare systemd service {path.name}: {error}") from None
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+    def _remove_unit(self, path: Path):
+        self._sudo(["rm", "-f", "--", str(path)])
+
+    def _install_unit(self, service: str, content: str) -> bool:
+        path = self._unit_dir / service
+        try:
+            changed = not path.is_file() or path.read_text(encoding="utf-8") != content
+        except OSError as error:
+            raise DeployError(f"cannot read systemd service {service}: {error}") from None
         if changed:
+            self._write_unit(path, content)
             self._systemctl(["daemon-reload"])
         enabled = self._systemctl(["is-enabled", service], check=False).returncode == 0
         if not enabled:
             self._systemctl(["enable", service])
         return changed or not enabled
 
-    def _remove_legacy_reboot(self, repo_dir: Path) -> bool:
+    def _remove_reboot_entry(self, repo_dir: Path) -> bool:
         """Remove the exact app startup line when crontab is available."""
         crontab = shutil.which("crontab")
         if not crontab:
@@ -276,19 +301,19 @@ class Deployer:
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=SYSTEMD_TIMEOUT_SECONDS,
             )
         except (OSError, subprocess.TimeoutExpired) as error:
-            raise DeployError(f"cannot remove the legacy reboot entry: {error}") from None
+            raise DeployError(f"cannot remove the matching reboot entry: {error}") from None
         if installed.returncode != 0:
             detail = installed.stderr.strip() or f"exit code {installed.returncode}"
-            raise DeployError(f"cannot remove the legacy reboot entry: {detail[-400:]}")
+            raise DeployError(f"cannot remove the matching reboot entry: {detail[-400:]}")
         return True
 
     def ensure_bot_service(self, repo_dir: Path) -> str:
         """Install and enable the bot unit without starting a second bot process."""
         repo_dir = Path(repo_dir).resolve()
         changed = self._install_unit(BOT_SERVICE, self._bot_unit(repo_dir))
-        removed = self._remove_legacy_reboot(repo_dir)
+        removed = self._remove_reboot_entry(repo_dir)
         action = "registered and enabled" if changed else "already registered and enabled"
-        suffix = " The legacy crontab entry was removed." if removed else ""
+        suffix = " The matching crontab entry was removed." if removed else ""
         return f"Bot service {BOT_SERVICE} is {action}.{suffix}"
 
     def ensure_service(self, app: str, repo_dir: Path) -> str:
@@ -299,9 +324,9 @@ class Deployer:
             raise DeployError(f"{repo_dir} has no usable `make run` target")
         service = self.service_name(app)
         changed = self._install_unit(service, self._app_unit(app, repo_dir))
-        removed = self._remove_legacy_reboot(repo_dir)
+        removed = self._remove_reboot_entry(repo_dir)
         action = "registered and enabled" if changed else "already registered and enabled"
-        suffix = " The legacy crontab entry was removed." if removed else ""
+        suffix = " The matching crontab entry was removed." if removed else ""
         return f"Service {service} is {action}.{suffix}"
 
     def _wait_running(self, app: str) -> DeployResult:
@@ -346,7 +371,7 @@ class Deployer:
             return DeployResult(False, str(error))
 
     def unregister(self, app: str, repo_dir: Path) -> str:
-        """Disable and remove an app unit and its exact legacy crontab entry."""
+        """Disable and remove an app unit and its matching crontab entry."""
         repo_dir = Path(repo_dir)
         self._validate_repo(app, repo_dir, must_exist=False)
         service = self.service_name(app)
@@ -354,19 +379,16 @@ class Deployer:
         registered = path.is_file() or self.service_state(app).registered
         if registered:
             self._systemctl(["disable", "--now", service])
-            try:
-                path.unlink(missing_ok=True)
-            except OSError as error:
-                raise DeployError(f"cannot remove systemd service {service}: {error}") from None
+            self._remove_unit(path)
             self._systemctl(["daemon-reload"])
             self._systemctl(["reset-failed", service], check=False)
-        removed = self._remove_legacy_reboot(repo_dir)
+        removed = self._remove_reboot_entry(repo_dir)
         if registered:
             message = f"Service: disabled and removed {service}."
         else:
             message = "Service: no systemd unit was registered."
         if removed:
-            message += " The legacy crontab entry was removed."
+            message += " The matching crontab entry was removed."
         return message
 
     def log_tail(self, app: str, lines: int = 15) -> str:
