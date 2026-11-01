@@ -211,6 +211,44 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("https://fresh-app.kurwalab.fyi", report)
         self.assertIn("Copilot output:\nAdded it.", report)
 
+    def test_new_name_option_creates_and_publishes_the_named_app(self):
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.next_port.return_value = 8084
+            routes.return_value.prepare.return_value = "Tunnel configured."
+            self.say('/new name="org/named-app" public template="eurofish" '
+                     'model="Claude/Opus 5.5" build a starter app')
+        self.assertEqual(self.gh.created, [("org/named-app", False)])
+        self.assertEqual(self.state.repo, "org/named-app")
+        self.assertEqual(self.rt.calls[0][0], self.cfg.repos_dir / "named-app")
+        self.assertEqual(self.rt.calls[0][1],
+                         NEW_APP_PROMPT.format(port=8084) + "build a starter app" + DEPLOY_NOTE)
+        self.assertEqual(self.rt.calls[0][2], "Claude/Opus 5.5")
+        routes.return_value.prepare.assert_called_once_with("named-app", 8084)
+
+    def test_new_name_option_parses_quotes_order_and_preserves_request(self):
+        for options in ('name="fresh-app" public', "private name='fresh-app'",
+                        'template=eurofish name=fresh-app model=GPT/GPT-6'):
+            with self.subTest(options=options):
+                remaining, private, model, template, name, error = Bot._new_options(
+                    options + ' build "a page" with name="Title"')
+                self.assertEqual(name, "fresh-app")
+                self.assertEqual(remaining, 'build "a page" with name="Title"')
+                self.assertEqual(error, "")
+
+    def test_new_rejects_missing_malformed_or_repeated_name_options(self):
+        for command in ('/new name=', '/new name="" build it',
+                        '/new name="two words" build it', '/new name="unclosed build it',
+                        '/new name=one name=two build it', '/new name="fresh-app"'):
+            with self.subTest(command=command):
+                self.say(command)
+                self.assertTrue("Use name=" in self.tg.sent[-1] or
+                                "Specify name only once" in self.tg.sent[-1] or
+                                "Usage: /new" in self.tg.sent[-1])
+        self.assertEqual(self.gh.created, [])
+        self.assertEqual(self.rt.calls, [])
+
     def test_new_model_option_overrides_only_the_new_app_run(self):
         self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
                                    cloudflare_zone_id="b" * 32)

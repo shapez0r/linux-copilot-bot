@@ -33,12 +33,12 @@ NEW_APP_PROMPT = (
 
 NEW_USAGE = (
     "Usage: /new [public|private] [model=<provider/model>] [template=<app>] "
-    "<name|owner/name> <request>"
+    'name="<name|owner/name>" <request>'
 )
 
 HELP = """Send a request as plain text and I will change the active repository with Copilot, commit, push and redeploy it with `make run`.
 
-/new [public|private] [model=<provider/model>] [template=<app>] <name|owner/name> <request> - create, build, deploy and publish a new app
+/new [public|private] [model=<provider/model>] [template=<app>] name="<name|owner/name>" <request> - create, build, deploy and publish a new app
 /delete <name|owner/name> - permanently delete an app's GitHub repository, local checkout and tunnel route
 /repo [public|private] <name|owner/name> - select a repository; a missing one is created from the eurofish reference app
 /repo - show the active repository
@@ -296,9 +296,9 @@ class Bot:
 
     @staticmethod
     def _new_options(arg: str):
-        """Read leading visibility, model and template options in any order."""
+        """Read leading visibility, name, model and template options in any order."""
         remaining = arg.lstrip()
-        private, model, template = True, None, None
+        private, model, template, name = True, None, None, None
         while remaining:
             parts = remaining.split(None, 1)
             option = parts[0].lower()
@@ -306,16 +306,28 @@ class Bot:
                 private = option == "private"
                 remaining = parts[1].lstrip() if len(parts) > 1 else ""
                 continue
+            match = re.match(r'''name=(?:"([^"]*)"|'([^']*)'|([^\s'" ]+))(?=\s|$)''', remaining,
+                             flags=re.IGNORECASE)
+            if match:
+                if name is not None:
+                    return remaining, private, None, None, None, "Specify name only once."
+                name = next(value for value in match.groups() if value is not None).strip()
+                if not name or len(name.split()) != 1:
+                    return remaining, private, None, None, None, 'Use name="<name|owner/name>" without spaces.'
+                remaining = remaining[match.end():].lstrip()
+                continue
+            if option.startswith("name="):
+                return remaining, private, None, None, None, 'Use name="<name|owner/name>".'
             match = re.match(r'''model=(?:"([^"]*)"|'([^']*)'|(\S+))(?=\s|$)''', remaining,
                              flags=re.IGNORECASE)
             if match:
                 if model is not None:
-                    return remaining, private, None, None, "Specify model only once."
+                    return remaining, private, None, None, None, "Specify model only once."
                 model = next(value for value in match.groups() if value is not None).strip()
                 remaining = remaining[match.end():].lstrip()
                 continue
             if option.startswith("model="):
-                return remaining, private, None, None, (
+                return remaining, private, None, None, None, (
                     'Use model=<provider/model>; quote names containing spaces, such as '
                     'model="Claude/Opus 5.5".'
                 )
@@ -323,17 +335,17 @@ class Bot:
                              flags=re.IGNORECASE)
             if match:
                 if template is not None:
-                    return remaining, private, None, None, "Specify template only once."
+                    return remaining, private, None, None, None, "Specify template only once."
                 template = next(value for value in match.groups() if value is not None).strip()
                 remaining = remaining[match.end():].lstrip()
                 continue
             if option.startswith("template="):
-                return remaining, private, None, None, "Use template=<app>, such as template=eurofish."
+                return remaining, private, None, None, None, "Use template=<app>, such as template=eurofish."
             break
-        return remaining, private, model, template, ""
+        return remaining, private, model, template, name, ""
 
     def cmd_new(self, chat_id: int, arg: str):
-        arg, private, model, template, error = self._new_options(arg)
+        arg, private, model, template, name, error = self._new_options(arg)
         if error:
             self.say(chat_id, error)
             return
@@ -343,7 +355,7 @@ class Bot:
         if template is not None and not self._valid_route(template):
             self.say(chat_id, "Template app names must be lowercase DNS labels containing only letters, digits and hyphens.")
             return
-        parts = arg.split(None, 1)
+        parts = [name, arg] if name is not None else arg.split(None, 1)
         if len(parts) != 2 or not parts[1].strip():
             self.say(chat_id, NEW_USAGE)
             return
