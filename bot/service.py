@@ -32,6 +32,7 @@ HELP = """Send a request as plain text and I will change the active repository w
 /repo - show the active repository
 /fix <repo> <request> - select a repository and run a request in one message
 /fix [browser|nobrowser] [tempchat|notempchat] <request> - run against the active repository with per-request browser/chat options
+/cloudflare list - show current kurwalab-tunnel hostname routes
 /cloudflare <subdomain> <port> - route <subdomain>.kurwalab.fyi to http://127.0.0.1:<port>
 /model <provider/model> - choose the Copilot model (for example GPT/GPT-6)
 /status - show repository, model, job and app state
@@ -153,6 +154,13 @@ class Bot:
     def cmd_cloudflare(self, chat_id: int, arg: str):
         """Route only the hostname and port explicitly supplied by the owner."""
         parts = arg.split()
+        if parts == ["list"]:
+            if not self.cfg.cloudflare_enabled:
+                self.say(chat_id, "Configure Cloudflare API token, account ID and zone ID first.")
+                return
+            self._spawn(chat_id, lambda: self.tg.send_long(
+                chat_id, redact(CloudflareRoutes(self.cfg).list_routes(), self.cfg.secrets)))
+            return
         if len(parts) != 2:
             self.say(chat_id, "Usage: /cloudflare <subdomain> <port>")
             return

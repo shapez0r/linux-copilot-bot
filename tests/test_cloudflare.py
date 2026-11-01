@@ -25,6 +25,22 @@ class FakeRoutes(CloudflareRoutes):
 
 
 class CloudflareRouteTests(unittest.TestCase):
+    def test_list_routes_reads_only_hostname_rules(self):
+        routes = FakeRoutes([
+            [{"id": "tunnel-id", "name": "kurwalab-tunnel"}],
+            {"config": {"ingress": [
+                {"hostname": "app.kurwalab.fyi", "service": "http://127.0.0.1:8080"},
+                {"service": "http_status:404"},
+            ]}},
+        ])
+        self.assertIn("https://app.kurwalab.fyi -> http://127.0.0.1:8080", routes.list_routes())
+        self.assertEqual([method for method, _, _ in routes.calls], ["GET", "GET"])
+
+    def test_list_routes_empty(self):
+        routes = FakeRoutes([[{"id": "tunnel-id", "name": "kurwalab-tunnel"}],
+                             {"config": {"ingress": [{"service": "http_status:404"}]}}])
+        self.assertIn("No hostname routes", routes.list_routes())
+
     def test_prepare_preserves_other_ingress_and_creates_dns(self):
         routes = FakeRoutes([
             [{"id": "tunnel-id", "name": "kurwalab-tunnel", "tun_type": "cfd_tunnel"}],
