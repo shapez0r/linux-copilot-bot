@@ -269,6 +269,20 @@ class ServiceTests(unittest.TestCase):
         self.say("/cloudflare eurofish 8080")
         self.assertIn("Configure Cloudflare", self.tg.sent[-1])
 
+    def test_cloudflare_list_requires_credentials_and_is_read_only(self):
+        from unittest.mock import patch
+        self.say("/cloudflare list")
+        self.assertIn("Configure Cloudflare", self.tg.sent[-1])
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.list_routes.return_value = "Routes for kurwalab-tunnel:\napp -> service"
+            self.say("/cloudflare list")
+            routes.return_value.list_routes.assert_called_once_with()
+            routes.return_value.prepare.assert_not_called()
+            routes.return_value.delete.assert_not_called()
+        self.assertIn("app -> service", self.tg.sent[-1])
+
     def test_cloudflare_command_routes_only_on_request(self):
         from unittest.mock import patch
         self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,

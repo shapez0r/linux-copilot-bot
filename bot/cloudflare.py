@@ -156,6 +156,25 @@ class CloudflareRoutes:
         self._request("DELETE", f"/zones/{self._zone}/dns_records/{record_id}")
         return True
 
+    def list_routes(self) -> str:
+        """List configured ingress routes without changing tunnel or DNS state."""
+        tunnel_id = self._resolve_tunnel()
+        result = self._request("GET", f"/accounts/{self._account}/cfd_tunnel/{tunnel_id}/configurations")
+        ingress = (result or {}).get("config", {}).get("ingress", [])
+        if not isinstance(ingress, list):
+            raise CloudflareError("the tunnel configuration has an invalid ingress list")
+        routes = []
+        for rule in ingress:
+            if not isinstance(rule, dict):
+                raise CloudflareError("the tunnel configuration has an invalid ingress rule")
+            hostname = rule.get("hostname")
+            path = rule.get("path")
+            if hostname or path:
+                label = str(hostname or "*") + (f" (path: {path})" if path else "")
+                routes.append(f"{label} -> {rule.get('service', 'unspecified')}")
+        return (f"Routes for {self._tunnel_name}:\n" + "\n".join(routes)
+                if routes else f"No routes configured for {self._tunnel_name}.")
+
     def prepare(self, app: str, port: int) -> str:
         """Create or update an explicitly requested ingress rule and proxied CNAME."""
         hostname = self._hostname(app)

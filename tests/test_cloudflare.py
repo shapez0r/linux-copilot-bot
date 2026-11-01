@@ -25,6 +25,31 @@ class FakeRoutes(CloudflareRoutes):
 
 
 class CloudflareRouteTests(unittest.TestCase):
+    def test_list_routes_reads_all_ingress_without_writing(self):
+        routes = FakeRoutes([
+            [{"id": "tunnel-id", "name": "kurwalab-tunnel", "tun_type": "cfd_tunnel"}],
+            {"config": {"ingress": [
+                {"hostname": "app.kurwalab.fyi", "service": "http://127.0.0.1:8080"},
+                {"hostname": "other.example.org", "path": "/api", "service": "http://localhost:9000"},
+                {"path": "/health", "service": "http_status:200"},
+                {"service": "http_status:404"},
+            ]}},
+        ])
+        self.assertEqual(routes.list_routes(),
+                         "Routes for kurwalab-tunnel:\n"
+                         "app.kurwalab.fyi -> http://127.0.0.1:8080\n"
+                         "other.example.org (path: /api) -> http://localhost:9000\n"
+                         "* (path: /health) -> http_status:200")
+        self.assertEqual([call[0] for call in routes.calls], ["GET", "GET"])
+
+    def test_list_routes_empty_and_invalid_ingress(self):
+        tunnel = [{"id": "tunnel-id", "name": "kurwalab-tunnel"}]
+        routes = FakeRoutes([tunnel, {"config": {"ingress": [{"service": "http_status:404"}]}}])
+        self.assertEqual(routes.list_routes(), "No routes configured for kurwalab-tunnel.")
+        routes = FakeRoutes([tunnel, {"config": {"ingress": "invalid"}}])
+        with self.assertRaisesRegex(CloudflareError, "invalid ingress list"):
+            routes.list_routes()
+
     def test_prepare_preserves_other_ingress_and_creates_dns(self):
         routes = FakeRoutes([
             [{"id": "tunnel-id", "name": "kurwalab-tunnel", "tun_type": "cfd_tunnel"}],
