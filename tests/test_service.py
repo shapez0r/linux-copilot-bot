@@ -331,8 +331,12 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.state.get_active_repo(77), "me/member-app")
         saved = State(self.tmp / "state.json", "fallback")
         self.assertEqual(saved.app_owner("me/member-app"), telegram_owner(77))
-        self.user_say(77, "/list")
-        self.assertIn("owner: Telegram user 77", self.tg.sent[-1])
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.app_routes.return_value = []
+            self.user_say(77, "/list")
+        self.assertIn("name: member-app", self.tg.sent[-1])
+        self.assertNotIn("folder:", self.tg.sent[-1])
+        self.assertNotIn("port:", self.tg.sent[-1])
 
         calls = len(self.rt.calls)
         self.user_say(88, "/fix member-app change the title")
@@ -725,17 +729,51 @@ class ServiceTests(unittest.TestCase):
         self.say("/fix")
         self.assertIn("Usage", self.tg.sent[-1])
 
-    def test_list_reports_running_apps(self):
-        self.say("/list")
-        self.assertEqual(self.tg.sent[-1], "No apps are available.")
-        self.deployer.running = [("alpha", 101), ("beta", 202)]
-        self.say("/list")
+    def test_list_reports_every_local_folder_with_admin_details(self):
+        for name in ("ihatepdf", "eurofish", "stravall", "carcalendar", "eurocat"):
+            (self.cfg.repos_dir / name).mkdir(exist_ok=True)
+        self.deployer.running = [("eurofish", 101), ("stravall", 202)]
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.app_routes.return_value = [
+                {"app": "eurofish", "hostname": "eurofish.kurwalab.fyi",
+                 "service": "http://127.0.0.1:8080"},
+                {"app": "eurocat", "hostname": "eurocat.kurwalab.fyi",
+                 "service": "http://127.0.0.1:8084"},
+            ]
+            self.say("/list")
+        listing = self.tg.sent[-1]
+        for name in ("ihatepdf", "eurofish", "stravall", "carcalendar", "eurocat"):
+            self.assertIn(f"name: {name}", listing)
+            self.assertIn(f"folder: {self.cfg.repos_dir / name}", listing)
+        self.assertIn("name: eurofish — status: running", listing)
+        self.assertIn("name: stravall — status: running", listing)
+        self.assertIn("name: eurocat — status: stopped", listing)
+        self.assertIn("port: 8084 — url: https://eurocat.kurwalab.fyi", listing)
+        self.assertIn("name: ihatepdf — status: stopped", listing)
+        self.assertIn("port: not configured — url: not configured", listing)
+
+    def test_regular_list_omits_admin_only_folder_and_port(self):
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}),
+                                   cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        self.deployer.running = [("eurofish", 101)]
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.app_routes.return_value = [{
+                "app": "eurofish", "hostname": "eurofish.kurwalab.fyi",
+                "service": "http://127.0.0.1:8080",
+            }]
+            self.user_say(77, "/list")
         self.assertEqual(
             self.tg.sent[-1],
-            "Apps:\n"
-            "- me/alpha — owner: kurwalab.fyi admins — running (pid 101)\n"
-            "- me/beta — owner: kurwalab.fyi admins — running (pid 202)",
+            "Apps:\n- name: eurofish — status: running — url: https://eurofish.kurwalab.fyi",
         )
+
+    def test_list_reports_unavailable_routes_without_cloudflare_configuration(self):
+        self.say("/list")
+        self.assertIn("name: eurofish — status: stopped", self.tg.sent[-1])
+        self.assertIn("port: unavailable — url: unavailable", self.tg.sent[-1])
         self.say("/list extra")
         self.assertEqual(self.tg.sent[-1], "Usage: /list")
 

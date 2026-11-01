@@ -15,7 +15,7 @@ from .gitops import Git, GitError
 from .repos import RepoError, local_path, parse_repo_ref
 from .roundtrip import (Cancelled, RoundTrip, RoundTripError, StatusTimeline,
                         format_stage_status)
-from .state import ADMIN_OWNER, State, owner_label, telegram_owner
+from .state import ADMIN_OWNER, State, telegram_owner
 from .telegram_api import Telegram, TelegramError
 
 log = logging.getLogger("bot")
@@ -102,7 +102,7 @@ HELP = """Use the buttons below to create and manage apps. You can also send a r
 /repo - show the active repository
 /fix <repo> <request> - select a repository and run a request in one message
 /fix [browser|nobrowser] [tempchat|notempchat] <request> - run against the active repository with per-request browser/chat options
-/list - list apps, owners and running status
+/list - list every local app with status and tunnel details
 /cloudflare <subdomain> <port> - route <subdomain>.kurwalab.fyi to http://127.0.0.1:<port>
 /cloudflare list - list tunnel routes
 /cloudflare delete <subdomain> - delete a tunnel route by name
@@ -116,7 +116,7 @@ USER_HELP = """Use the buttons below to create apps, list apps, and fix apps you
 /new [public|private] [model=<provider/model>] [template=<app>] name="<name|owner/name>" prompt="<request>" - create, build, deploy and publish a new app
 /fix <repo> <request> - fix an app you created
 /fix [browser|nobrowser] [tempchat|notempchat] <request> - fix your active app
-/list - list apps and their owners
+/list - list every local app with status and public URL
 /cancel - stop your own running job
 /help - show this message"""
 
@@ -275,7 +275,7 @@ class Bot:
         elif command == "fix":
             self.cmd_fix(chat_id, arg, user_id)
         elif command == "list":
-            self.cmd_list(chat_id, arg)
+            self.cmd_list(chat_id, arg, user_id)
         elif command == "cloudflare":
             self.cmd_cloudflare(chat_id, arg)
         elif command == "model":
@@ -293,7 +293,7 @@ class Bot:
             self.say(chat_id, ADMIN_ONLY_MESSAGE)
             return
         if label == LIST_APPS:
-            self.cmd_list(chat_id, "")
+            self.cmd_list(chat_id, "", user_id)
         elif label == SHOW_STATUS:
             self.cmd_status(chat_id, user_id)
         elif label == TUNNEL_ROUTES:
@@ -728,19 +728,48 @@ class Bot:
             lines.append(f"App: {self.deployer.status(name, local_path(self.cfg.repos_dir, name))}")
         self.say(chat_id, "\n".join(lines))
 
-    def cmd_list(self, chat_id: int, arg: str):
+    def cmd_list(self, chat_id: int, arg: str, user_id=None):
         if arg:
             self.say(chat_id, "Usage: /list")
             return
-        running = dict(self._register_running_apps())
-        if not self.state.app_owners:
+        try:
+            apps = sorted(
+                (path for path in self.cfg.repos_dir.iterdir() if path.is_dir()),
+                key=lambda path: path.name.lower(),
+            )
+        except OSError as error:
+            self.say(chat_id, f"Could not read the apps folder: {error}")
+            return
+        if not apps:
             self.say(chat_id, "No apps are available.")
             return
+
+        running = {name.lower() for name, _ in self.deployer.running_apps()}
+        routes = {}
+        routes_available = self.cfg.cloudflare_enabled
+        if routes_available:
+            try:
+                for route in CloudflareRoutes(self.cfg).app_routes():
+                    routes.setdefault(route["app"].lower(), route)
+            except CloudflareError:
+                routes_available = False
+
         lines = ["Apps:"]
-        for repo, owner in sorted(self.state.app_owners.items(), key=lambda item: item[0].lower()):
-            name = repo.rsplit("/", 1)[-1]
-            status = f"running (pid {running[name]})" if name in running else "not running"
-            lines.append(f"- {repo} — owner: {owner_label(owner)} — {status}")
+        for folder in apps:
+            name = folder.name
+            status = "running" if name.lower() in running else "stopped"
+            route = routes.get(name.lower())
+            if route:
+                port = route["service"].rsplit(":", 1)[-1].rstrip("/")
+                url = f"https://{route['hostname']}"
+            else:
+                port = url = "not configured" if routes_available else "unavailable"
+            if self._is_admin(user_id):
+                lines.append(
+                    f"- name: {name} — status: {status} — folder: {folder} — port: {port} — url: {url}"
+                )
+            else:
+                lines.append(f"- name: {name} — status: {status} — url: {url}")
         self.say(chat_id, "\n".join(lines))
 
     def cmd_cancel(self, chat_id: int, user_id=None):

@@ -48,7 +48,7 @@ Edit `deploy/copilot-telegram-bot.service` (user and paths), install it under `/
 
 Only user ids listed in `TELEGRAM_ADMIN_IDS` or `TELEGRAM_USER_IDS` are served, and only in private chats; every other message is ignored. Separate multiple ids with commas and do not put an id in both settings. `TELEGRAM_OWNER_ID` remains accepted as an alias for `TELEGRAM_ADMIN_IDS`.
 
-Administrators have every bot permission. Regular users can create apps, list all apps, and fix only apps they created. Each created app is recorded with an owner: regular-user apps belong to the creating Telegram user id, while administrator-created apps are owned by `kurwalab.fyi admins`. Existing running apps first discovered without ownership metadata are assigned to `kurwalab.fyi admins`. Active repositories are stored per Telegram user, the selected default model is shared, and all users share the single job slot.
+Administrators have every bot permission. Regular users can create apps, list all apps, and fix only apps they created. The app list is built from every direct folder under `REPOS_DIR`, including stopped or untracked apps. Administrators see each app's name, running or stopped status, full folder, tunnel port, and tunnel URL; regular users see its name, status, and tunnel URL. Each created app is recorded with an owner: regular-user apps belong to the creating Telegram user id, while administrator-created apps are owned by `kurwalab.fyi admins`. Existing running apps first discovered without ownership metadata are assigned to `kurwalab.fyi admins`. Active repositories are stored per Telegram user, the selected default model is shared, and all users share the single job slot.
 
 Send `/start` or `/menu` to open a role-specific persistent keyboard. Regular users see only **Create an app**, **List apps**, and **Fix an app**; administrators also see deletion, repository, model, status, and tunnel-management options. The guided **Create an app** flow:
 
@@ -71,7 +71,7 @@ Apps created through the guided flow are private GitHub repositories. Use the `/
 | plain text | Run the text as a request against the sender's active repository. Regular users are restricted to apps they created. |
 | `/fix <repo> <request>` | Select a repository and run a request in one message. Regular users are restricted to apps they created. |
 | `/fix [browser\|nobrowser] [tempchat\|notempchat] <request>` | Run a request against the sender's active repository with one or both per-request options. Options may be supplied in either order. Regular users are restricted to apps they created. |
-| `/list` | List tracked apps with their owners and current running status. Available to all configured users. |
+| `/list` | List every direct app folder under `REPOS_DIR`. Administrators see name, running or stopped status, folder, tunnel port, and tunnel URL; regular users see name, status, and tunnel URL. Missing routes are identified, and route details are marked unavailable when Cloudflare is not configured or cannot be reached. Available to all configured users. |
 | `/cloudflare <subdomain> <port>` | **Admin only.** Create or update `<subdomain>.kurwalab.fyi` on `kurwalab-tunnel`, targeting `http://127.0.0.1:<port>`; requires Cloudflare credentials. |
 | `/cloudflare list` | **Admin only.** List named ingress routes on `kurwalab-tunnel`. |
 | `/cloudflare delete <subdomain>` | **Admin only.** Delete the named ingress route and its matching tunnel CNAME. |
