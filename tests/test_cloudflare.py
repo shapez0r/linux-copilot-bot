@@ -77,6 +77,37 @@ class CloudflareRouteTests(unittest.TestCase):
         with self.assertRaisesRegex(CloudflareError, "found 0"):
             routes.prepare("app", 8080)
 
+    def test_delete_removes_matching_ingress_and_dns_record(self):
+        routes = FakeRoutes([
+            [{"id": "tunnel-id", "name": "kurwalab-tunnel", "tun_type": "cfd_tunnel"}],
+            {"config": {"ingress": [
+                {"hostname": "app.kurwalab.fyi", "service": "http://127.0.0.1:8080"},
+                {"hostname": "other.kurwalab.fyi", "service": "http://127.0.0.1:9000"},
+                {"service": "http_status:404"},
+            ]}},
+            {},
+            [{"id": "record"}],
+            {},
+        ])
+        self.assertEqual(routes.delete("app"),
+                         "Deleted Cloudflare route https://app.kurwalab.fyi.")
+        self.assertEqual(routes.calls[2][2]["config"]["ingress"], [
+            {"hostname": "other.kurwalab.fyi", "service": "http://127.0.0.1:9000"},
+            {"service": "http_status:404"},
+        ])
+        self.assertEqual(routes.calls[4],
+                         ("DELETE", "/zones/" + "b" * 32 + "/dns_records/record", None))
+
+    def test_delete_missing_route_is_a_no_op(self):
+        routes = FakeRoutes([
+            [{"id": "tunnel-id", "name": "kurwalab-tunnel", "tun_type": "cfd_tunnel"}],
+            {"config": {"ingress": [{"service": "http_status:404"}]}},
+            [],
+        ])
+        self.assertEqual(routes.delete("app"),
+                         "Cloudflare route https://app.kurwalab.fyi was not configured.")
+        self.assertEqual([call[0] for call in routes.calls], ["GET", "GET", "GET"])
+
 
 if __name__ == "__main__":
     unittest.main()

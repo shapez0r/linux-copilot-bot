@@ -132,6 +132,9 @@ class ServiceTests(unittest.TestCase):
         progress.update("me/app: Copilot is working", model_output=True)
         self.assertRegex(self.tg.edits[-1], r"^[\U0001f504\u23f3\u231b] ")
         self.assertRegex(self.tg.edits[-1], r"Last model output: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$")
+        progress.update("me/app: Still waiting for Copilot prompt to finish; no new output for 15s")
+        self.assertRegex(self.tg.edits[-1], r"^[\U0001f504\u23f3\u231b] ")
+        self.assertIn("Still waiting for Copilot prompt to finish", self.tg.edits[-1])
         progress.end_prompt()
         progress.flush()
         self.assertNotIn("Last model output:", self.tg.edits[-1])
@@ -242,7 +245,8 @@ class ServiceTests(unittest.TestCase):
 
     def test_cloudflare_requires_credentials_and_valid_arguments(self):
         for command in ("/cloudflare", "/cloudflare a 0", "/cloudflare a 65536",
-                        "/cloudflare bad.name 8080", "/cloudflare A 8080", "/cloudflare a abc"):
+                        "/cloudflare bad.name 8080", "/cloudflare A 8080", "/cloudflare a abc",
+                        "/cloudflare delete", "/cloudflare delete bad.name"):
             self.say(command)
             self.assertTrue("Usage:" in self.tg.sent[-1] or "must be" in self.tg.sent[-1])
         self.say("/cloudflare eurofish 8080")
@@ -257,6 +261,17 @@ class ServiceTests(unittest.TestCase):
             self.say("/cloudflare eurofish 8080")
             routes.return_value.prepare.assert_called_once_with("eurofish", 8080)
         self.assertIn("Tunnel configured", self.tg.sent[-1])
+
+    def test_cloudflare_delete_command_deletes_only_on_request(self):
+        from unittest.mock import patch
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.delete.return_value = "Route deleted."
+            self.say("/cloudflare delete eurofish")
+            routes.return_value.delete.assert_called_once_with("eurofish")
+            routes.return_value.prepare.assert_not_called()
+        self.assertIn("Route deleted", self.tg.sent[-1])
 
     def test_model_and_status_commands(self):
         self.say("/model Claude/Opus 5.5")

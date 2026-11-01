@@ -7,7 +7,7 @@ A Telegram bot for an Ubuntu VM that turns chat messages from its owner into rep
 3. sends the repository to Microsoft 365 Copilot Chat through the Playwright round-trip engine and applies the returned repository;
 4. commits and pushes the result to GitHub;
 5. redeploys the app by running `make run` from `/home/localadmin/repos/<name>`;
-6. leaves Cloudflare routes unchanged; routes are created only with `/cloudflare`.
+6. leaves Cloudflare routes unchanged; routes are created or deleted only with `/cloudflare`.
 
 **Experimental:** the engine drives Copilot's browser UI, so UI changes can interrupt it. Changes are pushed without review; review the commits on GitHub afterwards.
 
@@ -56,6 +56,7 @@ Only the owner (`TELEGRAM_OWNER_ID`) in a private chat is served; every other me
 | `/fix <repo> <request>` | Select a repository and run a request in one message. |
 | `/fix [browser\|nobrowser] [tempchat\|notempchat] <request>` | Run a request against the active repository with one or both per-request options. Options may be supplied in either order. |
 | `/cloudflare <subdomain> <port>` | Create or update `<subdomain>.kurwalab.fyi` on `kurwalab-tunnel`, targeting `http://127.0.0.1:<port>`; requires Cloudflare credentials. |
+| `/cloudflare delete <subdomain>` | Delete the tunnel ingress rule and DNS record for `<subdomain>.kurwalab.fyi`; requires Cloudflare credentials. |
 | `/model <provider/model>` | Choose the Copilot model label (default `GPT/GPT-6`). |
 | `/status` | Show repository, model, job state, and whether the app is running. |
 | `/cancel` | Ask Copilot to stop and discard the running job. |
@@ -68,7 +69,7 @@ A bare name uses `GITHUB_OWNER`, or the token's account when it is not set. The 
 
 For every missing repository, the bot creates an empty GitHub repository, copies the contents of `<REPOS_DIR>/eurofish` into the new checkout, excludes every `.git` entry, and pushes the copy as the single `Initial commit`. The reference app must exist and contain files that Git can commit. The next request can ask Copilot to keep the same architecture and stack while turning the copy into a different app.
 
-One job runs at a time. Progress is shown in a single edited message with a rotating activity icon. While Copilot is working, the message shows visible task and plan names, the latest visible reasoning paragraph (limited to 500 characters), and a UTC `Last model output` timestamp with seconds. Generated code is not relayed. The final message contains only the commit, change summary, and redeploy result.
+One job runs at a time. Progress is shown in a single edited message with a rotating activity icon. While Copilot is working, the message shows visible task and plan names, the latest visible reasoning paragraph (limited to 500 characters), and a UTC `Last model output` timestamp with seconds. Inactivity updates also show the exact UTC time when visible output last changed. Generated code is not relayed. The final message contains only the commit, change summary, and redeploy result.
 
 ### What a request does
 
@@ -76,7 +77,7 @@ One job runs at a time. Progress is shown in a single edited message with a rota
 - **Round-trip:** the engine uploads a ZIP of the committed `HEAD`, asks Copilot for the complete fixed repository, validates the returned ZIP, and replaces the worktree. The bot appends a note asking Copilot to keep a Makefile whose `run` target starts one HTTP server in the foreground and to keep secrets and runtime data outside the repository.
 - **Commit and push:** all changes are committed on the current branch with the first line of the request as the subject, and pushed to `origin`. If Copilot changed nothing, nothing is committed or deployed. A failed push leaves the commit locally and is reported; the next request pushes it.
 - **Redeploy:** the previous `make run` process group for the app is stopped, then `make run` is started detached in `/home/localadmin/repos/<name>` with output appended to `<STATE_DIR>/logs/<name>.log`. The redeploy counts as successful when the process is still running after `DEPLOY_SETTLE_SECONDS` or has exited with code 0; otherwise the log tail is sent. A repository without a `run` target is pushed but not started. Deployed apps do not receive the bot's tokens.
-- **Route on demand:** `/cloudflare eurofish 8080` creates or updates `eurofish.kurwalab.fyi` to `http://127.0.0.1:8080` on `kurwalab-tunnel` and maintains its proxied DNS CNAME. The subdomain must be one lowercase DNS label and the port must be 1–65535. Other ingress rules are preserved. No routes are created by deployment.
+- **Routes on demand:** `/cloudflare eurofish 8080` creates or updates `eurofish.kurwalab.fyi` to `http://127.0.0.1:8080` on `kurwalab-tunnel` and maintains its proxied DNS CNAME. `/cloudflare delete eurofish` removes that hostname's ingress rule and DNS record. The subdomain must be one lowercase DNS label and the port must be 1–65535. Other ingress rules are preserved. Deployment does not change routes.
 
 **Important:** the engine applies a returned ZIP as a full replacement. Everything in the checkout except `.git` is replaced, including untracked and ignored files such as `.env`, virtual environments, `node_modules`, and local databases. Keep runtime data and secrets outside the checkout and let `make run` rebuild dependencies.
 

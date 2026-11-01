@@ -113,11 +113,11 @@ def format_reasoning_progress(payload) -> str:
     return f"Current reasoning: {paragraph}" if paragraph else ""
 
 
-def _combined_progress(task: str, reasoning: str) -> str:
+def _combined_progress(task: str, reasoning: str, heading: str = "Copilot is working.") -> str:
     details = [part for part in (task, reasoning) if part]
     if not details:
         details.append("Waiting for visible task or reasoning details.")
-    return "Copilot is working.\n" + "\n".join(details)
+    return heading + "\n" + "\n".join(details)
 
 
 class RoundTrip:
@@ -159,7 +159,7 @@ class RoundTrip:
                         on_status("task" if changed else "waiting",
                                   _combined_progress(task_progress, reasoning_progress))
                     elif stage == "waiting" and (task_progress or reasoning_progress):
-                        on_status("waiting", _combined_progress(task_progress, reasoning_progress))
+                        on_status("waiting", _combined_progress(task_progress, reasoning_progress, message))
                     else:
                         on_status(stage, message)
                 elif reasoning is not None:

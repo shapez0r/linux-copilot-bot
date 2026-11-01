@@ -2,6 +2,7 @@
 """Archive committed Git files, request Copilot changes, and safely replace the worktree."""
 from __future__ import annotations
 import argparse, atexit, base64, hashlib, json, os, re, shutil, subprocess, sys, tempfile, threading, time, zipfile
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 DEFAULT_URL = "https://m365.cloud.microsoft/chat/"
@@ -917,6 +918,13 @@ def task_status_message(tasks):
     return f'Copilot task "{title}" is {state.lower()}{detail}.'
 
 
+def waiting_status_message(elapsed, idle, idle_limit, last_output_at):
+    """Describe prompt inactivity and when visible output last changed."""
+    return (f"Still waiting for Copilot prompt to finish. {int(elapsed)}s elapsed; "
+            f"no new output for {int(idle)}s (last output: {last_output_at}); "
+            f"inactivity limit: {idle_limit}s.")
+
+
 def run(cmd, cwd=None, capture=True):
     # Isolate child stdin from the Cancel listener and disable interactive Git prompts.
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
@@ -1741,6 +1749,7 @@ def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout)
             idle_limit = args.timeout
             started = time.monotonic()
             last_activity = started
+            last_output_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
             last_signature = None
             last_live = None
             last_tasks = []
@@ -1766,6 +1775,7 @@ def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout)
                 if tasks != last_tasks:
                     last_tasks = tasks
                     last_activity = now
+                    last_output_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
                     emit_status("task", task_status_message(tasks) if tasks else "Copilot task card closed.", tasks)
                 now = time.monotonic()
                 running = response_is_running(page, sel)
@@ -1804,6 +1814,7 @@ def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout)
                 if signature is not None and signature != last_signature:
                     if last_signature is not None:
                         last_activity = now
+                        last_output_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
                     last_signature = signature
                 # Reasoning blocks and intermediate (live) answers are streamed together.
                 if blocks is not None:
@@ -1811,18 +1822,17 @@ def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout)
                 live = None if blocks is None else (live_blocks, live_answers)
                 if live is not None and live != last_live:
                     last_live = live
-                    last_activity = now if (live_blocks or live_answers) else last_activity
+                    if live_blocks or live_answers:
+                        last_activity = now
+                        last_output_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
                     emit_reasoning(live_blocks, live_answers)
                 idle = now - last_activity
                 if idle >= idle_limit:
                     break
                 if now - last_update >= 15:
-                    task_message = task_status_message(last_tasks)
-                    prefix = task_message + " " if task_message else "Still waiting for Copilot response. "
-                    emit_status("task" if task_message else "waiting",
-                                f"{prefix}{int(now - started)}s elapsed; no new output for "
-                                f"{int(idle)}s of {idle_limit}s allowed.",
-                                last_tasks if task_message else None)
+                    emit_status("waiting",
+                                waiting_status_message(now - started, idle, idle_limit, last_output_at),
+                                last_tasks if last_tasks else None)
                     last_update = now
                 if downloaded is None:
                     pause(page, 1500)

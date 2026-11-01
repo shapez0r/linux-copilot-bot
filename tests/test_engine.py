@@ -25,6 +25,14 @@ class CompletionTests(unittest.TestCase):
                 self.assertIn('no historical references', prompt)
                 self.assertTrue(prompt.endswith('To fix: Update the tests'))
 
+    def test_waiting_status_names_prompt_and_reports_last_output_time(self):
+        message = rt.waiting_status_message(47.8, 16.2, 900, '2026-11-01 00:50:02 UTC')
+        self.assertEqual(
+            message,
+            'Still waiting for Copilot prompt to finish. 47s elapsed; no new output for 16s '
+            '(last output: 2026-11-01 00:50:02 UTC); inactivity limit: 900s.',
+        )
+
     def test_final_merge_clears_active_flags_and_preserves_steps(self):
         block = {'title': 'Coding and executing', 'active': True,
                  'steps': [{'title': 'Coding and executing', 'kind': 'coding'}]}
