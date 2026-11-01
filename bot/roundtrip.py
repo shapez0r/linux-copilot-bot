@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -14,6 +15,8 @@ from .config import SECRET_NAMES, Config
 STATUS_PREFIX = "ROUNDTRIP_STATUS:"
 QUIT_GRACE_SECONDS = 30  # Time the engine gets to click Stop in Copilot and exit after a cancel request.
 QUIT_EXIT_CODE = 130
+TASK_STATUS_LIMIT = 3500
+TASK_STATES = frozenset({"completed", "active", "pending", "failed"})
 
 
 class RoundTripError(Exception):
@@ -24,15 +27,65 @@ class Cancelled(Exception):
     """Raised when an authorized user cancelled the run."""
 
 
-def parse_status(line: str):
-    """Return (stage, message) for an engine progress line, else None."""
+def parse_status_event(line: str):
+    """Return a validated engine progress event, including a structured task plan when present."""
     if not line.startswith(STATUS_PREFIX):
         return None
     try:
         value = json.loads(line[len(STATUS_PREFIX):])
-        return str(value["stage"]), str(value["message"])
+        stage, message = str(value["stage"]), str(value["message"])
+        tasks = None
+        if isinstance(value.get("tasks"), list):
+            tasks = []
+            for task in value["tasks"]:
+                if not isinstance(task, dict):
+                    continue
+                state = str(task.get("state") or "In progress").strip()
+                steps = []
+                for step in task.get("steps") if isinstance(task.get("steps"), list) else []:
+                    if not isinstance(step, dict):
+                        continue
+                    title = " ".join(str(step.get("title") or "").split())
+                    if not title:
+                        continue
+                    step_state = str(step.get("state") or "pending").lower()
+                    steps.append({"title": title,
+                                  "state": step_state if step_state in TASK_STATES else "pending"})
+                tasks.append({
+                    "title": " ".join(str(task.get("title") or "Copilot task").split()),
+                    "state": state,
+                    "active": task.get("active") is True or bool(re.match(r"^in progress$", state, re.I)),
+                    "steps": steps,
+                })
+        return {"stage": stage, "message": message, "tasks": tasks}
     except (ValueError, KeyError, TypeError):
         return None
+
+
+def parse_status(line: str):
+    """Return (stage, message) for an engine progress line, else None."""
+    event = parse_status_event(line)
+    return (event["stage"], event["message"]) if event else None
+
+
+def format_task_status(message: str, tasks) -> str:
+    """Render the latest Copilot task card as a bounded plain-text Telegram status."""
+    if tasks is None:
+        return "Copilot is executing the prompt."
+    if not tasks:
+        return "Copilot task card closed; waiting for the final response."
+    task = tasks[-1]
+    title = task["title"] or "Copilot task"
+    lines = [f"Prompt execution: {title}", f"Status: {task['state']}"]
+    markers = {"completed": "✓", "active": "▶", "pending": "○", "failed": "✗"}
+    lines.extend(f"{markers[step['state']]} {step['title']}" for step in task["steps"])
+    timing = re.search(r"\b\d+s elapsed;.*$", message, re.I)
+    if timing:
+        lines.extend(("", timing.group(0)))
+    text = "\n".join(lines)
+    if len(text) > TASK_STATUS_LIMIT:
+        text = text[:TASK_STATUS_LIMIT - 1].rstrip() + "…"
+    return text
 
 
 class RoundTrip:
@@ -62,11 +115,12 @@ class RoundTrip:
         def read_stderr():
             for line in proc.stderr:
                 line = line.rstrip()
-                status = parse_status(line)
-                # Task cards can contain Copilot-generated code or execution details.
-                if status and status[0] != "task":
-                    on_status(*status)
-                elif not status and line.strip() and not line.startswith(("ROUNDTRIP_REASONING:", "ROUNDTRIP_CHAT:")):
+                status = parse_status_event(line)
+                if status:
+                    message = (format_task_status(status["message"], status["tasks"])
+                               if status["stage"] == "task" else status["message"])
+                    on_status(status["stage"], message)
+                elif line.strip() and not line.startswith(("ROUNDTRIP_REASONING:", "ROUNDTRIP_CHAT:")):
                     tail.append(line.strip())
 
         readers = [threading.Thread(target=read_stderr, daemon=True),

@@ -70,7 +70,7 @@ A bare name uses `GITHUB_OWNER`, or the token's account when it is not set. The 
 
 For every missing repository, the bot creates an empty GitHub repository, copies the contents of `<REPOS_DIR>/eurofish` into the new checkout, excludes every `.git` entry, and pushes the copy as the single `Initial commit`. The reference app must exist and contain files that Git can commit. The next request can ask Copilot to keep the same architecture and stack while turning the copy into a different app.
 
-One job runs at a time. Progress is shown in a single message that is edited as the job advances. Copilot task details, reasoning, code, and reply text are not sent to Telegram; the final message contains only the commit, change summary, and redeploy result.
+One job runs at a time. Progress is shown in a single message that is edited as the job advances. For long-running changes, that message mirrors the current Copilot task title and plan-item states so prompt execution remains visible. Reasoning, code, execution output, and reply text are not sent to Telegram; the final message contains only the commit, change summary, and redeploy result.
 
 ### What a request does
 

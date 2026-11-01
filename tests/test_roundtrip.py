@@ -9,15 +9,23 @@ from unittest import mock
 from pathlib import Path
 
 from support import make_config
-from bot.roundtrip import Cancelled, RoundTrip, RoundTripError, parse_status
+from bot.roundtrip import (Cancelled, RoundTrip, RoundTripError, format_task_status, parse_status,
+                           parse_status_event)
 
 FAKE_ENGINE = textwrap.dedent('''
     import json, sys
     mode = sys.argv[sys.argv.index("--") + 1]
-    def status(stage, message):
-        print("ROUNDTRIP_STATUS:" + json.dumps({"stage": stage, "message": message}), file=sys.stderr, flush=True)
+    def status(stage, message, tasks=None):
+        value = {"stage": stage, "message": message}
+        if tasks is not None:
+            value["tasks"] = tasks
+        print("ROUNDTRIP_STATUS:" + json.dumps(value), file=sys.stderr, flush=True)
     status("browser", "Opening")
-    status("task", "Coding and executing\\nprint('internal')")
+    status("task", 'Copilot task "Build app" is in progress; 3 plan items visible. 15s elapsed; no new output for 2s of 900s allowed.',
+           [{"title": "Build app", "state": "In progress", "active": True, "steps": [
+               {"title": "Inspect repository", "state": "completed"},
+               {"title": "Implement changes", "state": "active"},
+               {"title": "Run tests", "state": "pending"}]}])
     print("ROUNDTRIP_REASONING:{}", file=sys.stderr, flush=True)
     if mode == "ok":
         print(json.dumps({"chat_response": "done", "diff_stat": " 1 file changed"}))
@@ -64,7 +72,12 @@ class RoundTripTests(unittest.TestCase):
     def test_success_returns_result_and_relays_status(self):
         result = self.run_engine("ok")
         self.assertEqual(result["chat_response"], "done")
-        self.assertEqual(self.statuses, [("browser", "Opening")])
+        self.assertEqual(self.statuses, [
+            ("browser", "Opening"),
+            ("task", "Prompt execution: Build app\nStatus: In progress\n✓ Inspect repository\n"
+                     "▶ Implement changes\n○ Run tests\n\n"
+                     "15s elapsed; no new output for 2s of 900s allowed."),
+        ])
 
     def test_failure_reports_engine_message(self):
         with self.assertRaisesRegex(RoundTripError, "No downloadable result"):
@@ -84,6 +97,28 @@ class RoundTripTests(unittest.TestCase):
         self.assertEqual(parse_status('ROUNDTRIP_STATUS:' + json.dumps({"stage": "a", "message": "b"})), ("a", "b"))
         for bad in ("ROUNDTRIP_STATUS:{", "ROUNDTRIP_STATUS:{}", "other"):
             self.assertIsNone(parse_status(bad))
+
+    def test_task_status_parses_the_structured_plan_and_omits_execution_details(self):
+        event = parse_status_event("ROUNDTRIP_STATUS:" + json.dumps({
+            "stage": "task", "message": "internal code output", "tasks": [{
+                "title": "  Build   app ", "state": "In progress", "steps": [
+                    {"title": " Inspect files ", "state": "completed"},
+                    {"title": " Coding and executing ", "state": "active", "output": "secret()"},
+                    {"title": "Test", "state": "unknown"}, None,
+                ],
+            }],
+        }))
+        rendered = format_task_status(event["message"], event["tasks"])
+        self.assertEqual(rendered, "Prompt execution: Build app\nStatus: In progress\n"
+                         "✓ Inspect files\n▶ Coding and executing\n○ Test")
+        self.assertNotIn("secret", rendered)
+        self.assertNotIn("internal code output", rendered)
+
+    def test_unstructured_task_status_does_not_relay_generated_details(self):
+        self.assertEqual(format_task_status("Coding and executing\nprint('internal')", None),
+                         "Copilot is executing the prompt.")
+        self.assertEqual(format_task_status("Copilot task card closed.", []),
+                         "Copilot task card closed; waiting for the final response.")
 
 
 if __name__ == "__main__":
