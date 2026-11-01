@@ -231,11 +231,56 @@ class ServiceTests(unittest.TestCase):
         for options in ('name="fresh-app" public', "private name='fresh-app'",
                         'template=eurofish name=fresh-app model=GPT/GPT-6'):
             with self.subTest(options=options):
-                remaining, private, model, template, name, error = Bot._new_options(
+                remaining, private, model, template, name, prompt, error = Bot._new_options(
                     options + ' build "a page" with name="Title"')
                 self.assertEqual(name, "fresh-app")
                 self.assertEqual(remaining, 'build "a page" with name="Title"')
                 self.assertEqual(error, "")
+
+    def test_new_prompt_option_parses_in_any_named_option_order(self):
+        request = 'Build a page with name="Title", model=example and template=demo.'
+        for options in (
+                "name=fresh-app prompt='" + request + "' public template=eurofish",
+                "prompt='" + request + "' model=GPT/GPT-6 name=fresh-app"):
+            with self.subTest(options=options):
+                remaining, private, model, template, name, prompt, error = Bot._new_options(options)
+                self.assertEqual((remaining, name, prompt, error), ("", "fresh-app", request, ""))
+
+    def test_new_prompt_option_creates_app_with_separate_request(self):
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf",
+                                   cloudflare_account_id="a" * 32, cloudflare_zone_id="b" * 32)
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.next_port.return_value = 8084
+            routes.return_value.prepare.return_value = "Tunnel configured."
+            self.say('/new prompt="build a starter app" name=fresh-app public')
+        self.assertEqual(self.gh.created, [("me/fresh-app", False)])
+        self.assertEqual(self.rt.calls[0][1],
+                         NEW_APP_PROMPT.format(port=8084) + "build a starter app" + DEPLOY_NOTE)
+
+    def test_new_prompt_option_supports_positional_repository(self):
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf",
+                                   cloudflare_account_id="a" * 32, cloudflare_zone_id="b" * 32)
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.next_port.return_value = 8084
+            routes.return_value.prepare.return_value = "Tunnel configured."
+            self.say('/new prompt="build it" fresh-app')
+        self.assertEqual(self.gh.created, [("me/fresh-app", True)])
+        self.assertEqual(self.rt.calls[0][1],
+                         NEW_APP_PROMPT.format(port=8084) + "build it" + DEPLOY_NOTE)
+
+    def test_new_rejects_invalid_duplicate_or_ambiguous_prompt(self):
+        for command in ('/new name=fresh-app prompt=', '/new name=fresh-app prompt=""',
+                        '/new name=fresh-app prompt="   "',
+                        '/new name=fresh-app prompt="unclosed',
+                        '/new name=fresh-app prompt=one prompt=two',
+                        '/new name=fresh-app prompt="build it" extra text',
+                        '/new prompt="build it"'):
+            with self.subTest(command=command):
+                self.say(command)
+                self.assertTrue(any(text in self.tg.sent[-1]
+                                    for text in ('Use prompt=', 'only once', 'Usage: /new')))
+        self.assertEqual(self.gh.created, [])
+        self.assertEqual(self.rt.calls, [])
 
     def test_new_rejects_missing_malformed_or_repeated_name_options(self):
         for command in ('/new name=', '/new name="" build it',
