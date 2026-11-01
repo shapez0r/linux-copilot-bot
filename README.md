@@ -55,6 +55,7 @@ Only users listed in `TELEGRAM_OWNER_ID` in private chats are served; every othe
 | plain text | Run the text as a request against the active repository. |
 | `/fix <repo> <request>` | Select a repository and run a request in one message. |
 | `/fix [browser\|nobrowser] [tempchat\|notempchat] <request>` | Run a request against the active repository with one or both per-request options. Options may be supplied in either order. |
+| `/cloudflare list` | List current hostname ingress routes on `kurwalab-tunnel` without changing them; requires Cloudflare credentials. |
 | `/cloudflare <subdomain> <port>` | Create or update `<subdomain>.kurwalab.fyi` on `kurwalab-tunnel`, targeting `http://127.0.0.1:<port>`; requires Cloudflare credentials. |
 | `/cloudflare delete <subdomain>` | Delete the tunnel ingress rule and DNS record for `<subdomain>.kurwalab.fyi`; requires Cloudflare credentials. |
 | `/cloudflare list` | List all configured hostname and path ingress routes on `kurwalab-tunnel` with their target services, without changing Cloudflare configuration; requires Cloudflare credentials. |
