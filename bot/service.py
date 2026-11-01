@@ -30,9 +30,11 @@ NEW_APP_PROMPT = (
     "but running on the {port}\n\n"
 )
 
+NEW_USAGE = "Usage: /new [public|private] [model=<provider/model>] <name|owner/name> <request>"
+
 HELP = """Send a request as plain text and I will change the active repository with Copilot, commit, push and redeploy it with `make run`.
 
-/new [public|private] <name|owner/name> <request> - create, build, deploy and publish a new app
+/new [public|private] [model=<provider/model>] <name|owner/name> <request> - create, build, deploy and publish a new app
 /repo [public|private] <name|owner/name> - select a repository; a missing one is created from the eurofish reference app
 /repo - show the active repository
 /fix <repo> <request> - select a repository and run a request in one message
@@ -211,7 +213,7 @@ class Bot:
     def cmd_model(self, chat_id: int, arg: str):
         if not arg:
             self.say(chat_id, f"Model: {self.state.model}")
-        elif arg.count("/") != 1 or not all(p.strip() for p in arg.split("/")):
+        elif not self._valid_model(arg):
             self.say(chat_id, "Use a provider/model pair such as GPT/GPT-6.")
         else:
             self.state.model = arg
@@ -268,16 +270,54 @@ class Bot:
             return (parts[1].strip() if len(parts) > 1 else ""), parts[0].lower() == "private"
         return arg, True
 
+    @staticmethod
+    def _valid_model(model: str) -> bool:
+        return model.count("/") == 1 and all(part.strip() for part in model.split("/"))
+
+    @staticmethod
+    def _new_options(arg: str):
+        """Read leading visibility and per-run model options in either order."""
+        remaining = arg.lstrip()
+        private, model = True, None
+        while remaining:
+            parts = remaining.split(None, 1)
+            option = parts[0].lower()
+            if option in ("public", "private"):
+                private = option == "private"
+                remaining = parts[1].lstrip() if len(parts) > 1 else ""
+                continue
+            match = re.match(r'''model=(?:"([^"]*)"|'([^']*)'|(\S+))(?=\s|$)''', remaining,
+                             flags=re.IGNORECASE)
+            if match:
+                if model is not None:
+                    return remaining, private, None, "Specify model only once."
+                model = next(value for value in match.groups() if value is not None).strip()
+                remaining = remaining[match.end():].lstrip()
+                continue
+            if option.startswith("model="):
+                return remaining, private, None, (
+                    'Use model=<provider/model>; quote names containing spaces, such as '
+                    'model="Claude/Opus 5.5".'
+                )
+            break
+        return remaining, private, model, ""
+
     def cmd_new(self, chat_id: int, arg: str):
-        arg, private = self._creation_options(arg)
+        arg, private, model, error = self._new_options(arg)
+        if error:
+            self.say(chat_id, error)
+            return
+        if model is not None and not self._valid_model(model):
+            self.say(chat_id, "Use a provider/model pair such as GPT/GPT-6.")
+            return
         parts = arg.split(None, 1)
         if len(parts) != 2 or not parts[1].strip():
-            self.say(chat_id, "Usage: /new [public|private] <name|owner/name> <request>")
+            self.say(chat_id, NEW_USAGE)
             return
         if self._cloudflare_unavailable(chat_id):
             return
         ref, request = parts[0], parts[1].strip()
-        self._spawn(chat_id, lambda: self._new_app(chat_id, ref, request, private))
+        self._spawn(chat_id, lambda: self._new_app(chat_id, ref, request, private, model))
 
     def cmd_repo(self, chat_id: int, arg: str):
         arg, private = self._creation_options(arg)
@@ -354,7 +394,7 @@ class Bot:
         self.say(chat_id, f"\u2705 {owner}/{name} is {how} at {dest} (branch {branch}) and now active."
                  + (" Send your next message describing what to build." if new_only else ""))
 
-    def _new_app(self, chat_id: int, ref: str, request: str, private: bool):
+    def _new_app(self, chat_id: int, ref: str, request: str, private: bool, model=None):
         owner, name = parse_repo_ref(ref, self._owner_default())
         if not self._valid_route(name):
             raise RepoError("App names must be lowercase DNS labels containing only letters, digits and hyphens.")
@@ -372,7 +412,7 @@ class Bot:
         progress.update(f"{full}: sending the repository to Copilot for port {port}...")
         try:
             result = self.roundtrip.run(
-                dest, prompt, self.state.model,
+                dest, prompt, model or self.state.model,
                 lambda stage, msg: progress.update(self._repo_progress(full, msg), stage), self._cancel)
         except Cancelled:
             progress.flush()

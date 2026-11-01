@@ -181,6 +181,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.rt.calls[0][0], self.cfg.repos_dir / "fresh-app")
         self.assertEqual(self.rt.calls[0][1],
                          NEW_APP_PROMPT.format(port=8081) + "build a starter app" + DEPLOY_NOTE)
+        self.assertEqual(self.rt.calls[0][2], "GPT/GPT-6")
         routes.return_value.next_port.assert_called_once_with()
         routes.return_value.prepare.assert_called_once_with("fresh-app", 8081)
         self.assertEqual(self.deployer.calls, [("fresh-app", self.cfg.repos_dir / "fresh-app")])
@@ -188,6 +189,24 @@ class ServiceTests(unittest.TestCase):
         report = self.tg.sent[-1]
         self.assertIn("https://fresh-app.kurwalab.fyi", report)
         self.assertIn("Copilot output:\nAdded it.", report)
+
+    def test_new_model_option_overrides_only_the_new_app_run(self):
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.next_port.return_value = 8082
+            routes.return_value.prepare.return_value = "Tunnel configured."
+            self.say('/new model="Claude/Opus 5.5" public model-app build it')
+        self.assertEqual(self.gh.created, [("me/model-app", False)])
+        self.assertEqual(self.rt.calls[0][2], "Claude/Opus 5.5")
+        self.assertEqual(self.state.model, "GPT/GPT-6")
+
+    def test_new_rejects_invalid_or_repeated_model_options(self):
+        self.say("/new model=invalid model-app build it")
+        self.assertIn("provider/model", self.tg.sent[-1])
+        self.say("/new model=GPT/GPT-6 model=Claude/Opus model-app build it")
+        self.assertIn("only once", self.tg.sent[-1])
+        self.assertEqual(self.gh.created, [])
 
     def test_visibility_choice_for_new_and_repo(self):
         self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,

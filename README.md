@@ -50,7 +50,7 @@ Only user ids listed in `TELEGRAM_OWNER_ID` are served, and only in private chat
 
 | Message | Effect |
 | --- | --- |
-| `/new <name> <request>` or `/new <owner/name> <request>` | Create a new GitHub repository (private by default), seed it from `<REPOS_DIR>/eurofish`, run the request with the allocated port instruction, push the result, deploy it, publish `https://<name>.kurwalab.fyi`, and install reboot startup. Refuses existing repositories. |
+| `/new [public\|private] [model=<provider/model>] <name\|owner/name> <request>` | Create a new GitHub repository (private by default), seed it from `<REPOS_DIR>/eurofish`, run the request with the allocated port instruction, push the result, deploy it, publish `https://<name>.kurwalab.fyi`, and install reboot startup. The optional model applies only to this command; quote a model name containing spaces, such as `model="Claude/Opus 5.5"`. Refuses existing repositories. |
 | `/repo <name>` or `/repo <owner/name>` | Select the active repository. A missing repository is created and seeded from `<REPOS_DIR>/eurofish`; an existing one is cloned or fast-forwarded. A GitHub URL is also accepted. |
 | `/repo` | Show the active repository. |
 | plain text | Run the text as a request against the active repository. |
@@ -63,13 +63,13 @@ Only user ids listed in `TELEGRAM_OWNER_ID` are served, and only in private chat
 | `/status` | Show repository, model, job state, and whether the app is running. |
 | `/cancel` | Ask Copilot to stop and discard the running job. |
 
-Use `public` or `private` before the name when creating a repository; the default is `private`. Existing repositories keep their visibility. Private repositories are cloned using `GITHUB_TOKEN` through `GIT_ASKPASS`, without storing credentials in remote URLs.
+Use `public` or `private` before the name when creating a repository; the default is `private`. For `/new`, `model=<provider/model>` may appear before or after the visibility option and overrides the active model only while creating that app. Existing repositories keep their visibility. Private repositories are cloned using `GITHUB_TOKEN` through `GIT_ASKPASS`, without storing credentials in remote URLs.
 
 A bare name uses `GITHUB_OWNER`, or the token's account when it is not set. The checkout directory is `<REPOS_DIR>/<repository name>`, so two repositories with the same name under different owners cannot be used side by side; the bot refuses a directory that belongs to another repository.
 
 ### New repository template
 
-For every missing repository, the bot creates an empty GitHub repository, copies the contents of `<REPOS_DIR>/eurofish` into the new checkout, excludes every `.git` entry, and pushes the copy as the single `Initial commit`. The reference app must exist and contain files that Git can commit. `/new <name> <request>` then reads the ordered tunnel ingress list, chooses one more than the last local HTTP route port (or `8080` when none exists), and prefixes the request with `Instead of this app, let's create another app, with the same architecture, stack and styling, but running on the <port>`. App names must be lowercase DNS labels containing only letters, digits, and hyphens.
+For every missing repository, the bot creates an empty GitHub repository, copies the contents of `<REPOS_DIR>/eurofish` into the new checkout, excludes every `.git` entry, and pushes the copy as the single `Initial commit`. The reference app must exist and contain files that Git can commit. `/new` then reads the ordered tunnel ingress list, chooses one more than the last local HTTP route port (or `8080` when none exists), selects its per-command model or the active model, and prefixes the request with `Instead of this app, let's create another app, with the same architecture, stack and styling, but running on the <port>`. App names must be lowercase DNS labels containing only letters, digits, and hyphens.
 
 One job runs at a time. Progress is shown in a single message that is edited as the job advances. Its first line is `Currently doing: ...`, using the latest visible reasoning paragraph, active step, task, or bot stage. Each displayed bot stage, task, plan item, activity, and step carries a stable first-seen timestamp with second precision, the bot host's local timezone name, and its UTC offset. A compact stage is shown until Copilot exposes structured output, then the current task and plan, activity or step names, reasoning-duration labels such as `Reasoned for 12s`, and interleaved live answers take its place. Other reasoning and code-execution details are omitted. Once structured output is visible, repetitive inactivity text stays hidden. Ordinary requests end with the commit, change summary, and redeploy result; `/new` also returns Copilot's final output, provisioning status, and public app URL.
 
