@@ -18,7 +18,8 @@ class ConfigTests(unittest.TestCase):
         path.write_text('# comment\nTELEGRAM_BOT_TOKEN="abc"\nexport TELEGRAM_OWNER_ID=7\nGITHUB_TOKEN=ghp\n'
                         'COPILOT_MODEL=Claude/Opus 5.5\n')
         cfg = config.load({"GITHUB_TOKEN": "from-env"}, env_file=path)
-        self.assertEqual((cfg.telegram_token, cfg.owner_id, cfg.github_token), ("abc", 7, "from-env"))
+        self.assertEqual((cfg.telegram_token, cfg.owner_ids, cfg.github_token),
+                         ("abc", frozenset({7}), "from-env"))
         self.assertEqual(cfg.model, "Claude/Opus 5.5")
         self.assertEqual(cfg.repos_dir, Path("/home/localadmin/repos"))
         self.assertFalse(cfg.show_browser)
@@ -28,6 +29,11 @@ class ConfigTests(unittest.TestCase):
         values = {"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_OWNER_ID": "1", "GITHUB_TOKEN": "g",
                   "BOT_SHOW_BROWSER": "true"}
         self.assertTrue(config.load(values, env_file=self.tmp / "none").show_browser)
+
+    def test_multiple_telegram_users_are_parsed(self):
+        values = {"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_OWNER_ID": "1, 2,1", "GITHUB_TOKEN": "g"}
+        self.assertEqual(config.load(values, env_file=self.tmp / "none").owner_ids,
+                         frozenset({1, 2}))
 
     def test_cloudflare_routing_configuration(self):
         values = {"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_OWNER_ID": "1", "GITHUB_TOKEN": "g",
@@ -43,7 +49,8 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(config.ConfigError, "TELEGRAM_BOT_TOKEN"):
             config.load({}, env_file=self.tmp / "none")
         base = {"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_OWNER_ID": "1", "GITHUB_TOKEN": "g"}
-        for bad in ({"TELEGRAM_OWNER_ID": "abc"}, {"COPILOT_MODEL": "GPT"}, {"COPILOT_TIMEOUT": "0"},
+        for bad in ({"TELEGRAM_OWNER_ID": "abc"}, {"TELEGRAM_OWNER_ID": "1,"},
+                    {"TELEGRAM_OWNER_ID": "0,1"}, {"COPILOT_MODEL": "GPT"}, {"COPILOT_TIMEOUT": "0"},
                     {"BOT_SHOW_BROWSER": "maybe"}, {"BOT_TEMPORARY_CHAT": "maybe"},
                     {"CLOUDFLARE_API_TOKEN": "cf"},
                     ):

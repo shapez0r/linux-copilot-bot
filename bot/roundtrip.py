@@ -17,11 +17,11 @@ QUIT_EXIT_CODE = 130
 
 
 class RoundTripError(Exception):
-    """Raised when the engine fails; the message is safe to show to the owner."""
+    """Raised when the engine fails; the message is safe to show to an authorized user."""
 
 
 class Cancelled(Exception):
-    """Raised when the owner cancelled the run."""
+    """Raised when an authorized user cancelled the run."""
 
 
 def parse_status(line: str):

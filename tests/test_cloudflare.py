@@ -77,6 +77,74 @@ class CloudflareRouteTests(unittest.TestCase):
         with self.assertRaisesRegex(CloudflareError, "found 0"):
             routes.prepare("app", 8080)
 
+    def test_list_shows_named_ingress_routes(self):
+        routes = FakeRoutes([
+            [{"id": "tunnel-id", "name": "kurwalab-tunnel", "tun_type": "cfd_tunnel"}],
+            {"config": {"ingress": [
+                {"hostname": "app.kurwalab.fyi", "service": "http://127.0.0.1:8080"},
+                {"hostname": "api.example.com", "service": "http://127.0.0.1:9000"},
+                {"service": "http_status:404"},
+            ]}},
+        ])
+        self.assertEqual(
+            routes.list_routes(),
+            "Routes on kurwalab-tunnel:\n"
+            "- app.kurwalab.fyi -> http://127.0.0.1:8080\n"
+            "- api.example.com -> http://127.0.0.1:9000",
+        )
+
+    def test_list_reports_when_no_named_routes_exist(self):
+        routes = FakeRoutes([
+            [{"id": "tunnel-id", "name": "kurwalab-tunnel", "tun_type": "cfd_tunnel"}],
+            {"config": {"ingress": [{"service": "http_status:404"}]}},
+        ])
+        self.assertEqual(routes.list_routes(), "No routes configured on kurwalab-tunnel.")
+
+    def test_delete_removes_named_ingress_and_matching_dns(self):
+        routes = FakeRoutes([
+            [{"id": "tunnel-id", "name": "kurwalab-tunnel", "tun_type": "cfd_tunnel"}],
+            {"config": {"warp-routing": {"enabled": False}, "ingress": [
+                {"hostname": "app.kurwalab.fyi", "service": "http://127.0.0.1:8080"},
+                {"hostname": "other.kurwalab.fyi", "service": "http://127.0.0.1:9000"},
+                {"service": "http_status:404"},
+            ]}},
+            [{"id": "dns-id", "type": "CNAME", "content": "tunnel-id.cfargotunnel.com."}],
+            {},
+            {},
+        ])
+        self.assertEqual(routes.delete_route("APP"), "Deleted route: https://app.kurwalab.fyi.")
+        put = routes.calls[3]
+        self.assertEqual(put[0], "PUT")
+        self.assertEqual(put[2]["config"]["warp-routing"], {"enabled": False})
+        self.assertEqual(put[2]["config"]["ingress"], [
+            {"hostname": "other.kurwalab.fyi", "service": "http://127.0.0.1:9000"},
+            {"service": "http_status:404"},
+        ])
+        self.assertEqual(routes.calls[4][:2],
+                         ("DELETE", "/zones/" + "b" * 32 + "/dns_records/dns-id"))
+
+    def test_delete_requires_an_existing_route(self):
+        routes = FakeRoutes([
+            [{"id": "tunnel-id", "name": "kurwalab-tunnel", "tun_type": "cfd_tunnel"}],
+            {"config": {"ingress": [{"service": "http_status:404"}]}},
+        ])
+        with self.assertRaisesRegex(CloudflareError, "was not found"):
+            routes.delete_route("app")
+        self.assertEqual(len(routes.calls), 2)
+
+    def test_delete_does_not_remove_unrelated_dns(self):
+        routes = FakeRoutes([
+            [{"id": "tunnel-id", "name": "kurwalab-tunnel", "tun_type": "cfd_tunnel"}],
+            {"config": {"ingress": [
+                {"hostname": "app.kurwalab.fyi", "service": "http://127.0.0.1:8080"},
+                {"service": "http_status:404"},
+            ]}},
+            [{"id": "dns-id", "type": "A", "content": "192.0.2.1"}],
+        ])
+        with self.assertRaisesRegex(CloudflareError, "not managed by this tunnel"):
+            routes.delete_route("app")
+        self.assertEqual(len(routes.calls), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

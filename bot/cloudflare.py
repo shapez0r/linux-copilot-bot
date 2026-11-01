@@ -14,7 +14,7 @@ _DNS_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
 class CloudflareError(RuntimeError):
-    """Raised when a tunnel route cannot be prepared safely."""
+    """Raised when a tunnel route cannot be managed safely."""
 
 
 class CloudflareRoutes:
@@ -75,7 +75,7 @@ class CloudflareRoutes:
                 f"route {app!r} is not a valid DNS label; use only letters, digits and hyphens")
         return f"{label}.{self._domain}"
 
-    def _update_ingress(self, tunnel_id: str, hostname: str, service: str):
+    def _configuration(self, tunnel_id: str):
         result = self._request("GET", f"/accounts/{self._account}/cfd_tunnel/{tunnel_id}/configurations")
         config = dict((result or {}).get("config") or {})
         ingress = config.get("ingress")
@@ -83,6 +83,10 @@ class CloudflareRoutes:
             ingress = []
         if not isinstance(ingress, list):
             raise CloudflareError("the tunnel configuration has an invalid ingress list")
+        return config, ingress
+
+    def _update_ingress(self, tunnel_id: str, hostname: str, service: str):
+        config, ingress = self._configuration(tunnel_id)
 
         route = {"hostname": hostname, "service": service, "originRequest": {}}
 
@@ -127,6 +131,23 @@ class CloudflareRoutes:
             raise CloudflareError(f"the existing DNS record for {hostname} has no id")
         self._request("PATCH", f"/zones/{self._zone}/dns_records/{record_id}", body)
 
+    def _deletable_dns_record(self, tunnel_id: str, hostname: str):
+        query = urllib.parse.urlencode({"name": hostname, "per_page": 100})
+        records = self._request("GET", f"/zones/{self._zone}/dns_records?{query}") or []
+        if len(records) > 1:
+            raise CloudflareError(f"multiple DNS records already exist for {hostname}")
+        if not records:
+            return None
+        record = records[0]
+        target = f"{tunnel_id}.cfargotunnel.com"
+        if (record.get("type") != "CNAME" or
+                record.get("content", "").rstrip(".").lower() != target):
+            raise CloudflareError(f"the DNS record for {hostname} is not managed by this tunnel")
+        record_id = record.get("id")
+        if not record_id:
+            raise CloudflareError(f"the existing DNS record for {hostname} has no id")
+        return record_id
+
     def prepare(self, app: str, port: int) -> str:
         """Create or update an explicitly requested ingress rule and proxied CNAME."""
         hostname = self._hostname(app)
@@ -135,3 +156,31 @@ class CloudflareRoutes:
         self._update_ingress(tunnel_id, hostname, service)
         self._upsert_dns(tunnel_id, hostname)
         return f"Tunnel: https://{hostname} -> {service}."
+
+    def list_routes(self) -> str:
+        """List named ingress rules on the configured tunnel."""
+        tunnel_id = self._resolve_tunnel()
+        _, ingress = self._configuration(tunnel_id)
+        routes = [
+            f"{rule['hostname']} -> {rule.get('service', 'no service')}"
+            for rule in ingress if rule.get("hostname")
+        ]
+        if not routes:
+            return f"No routes configured on {self._tunnel_name}."
+        return f"Routes on {self._tunnel_name}:\n" + "\n".join(f"- {route}" for route in routes)
+
+    def delete_route(self, app: str) -> str:
+        """Delete one explicitly named ingress rule and its tunnel CNAME."""
+        hostname = self._hostname(app)
+        tunnel_id = self._resolve_tunnel()
+        config, ingress = self._configuration(tunnel_id)
+        updated = [rule for rule in ingress if (rule.get("hostname") or "").lower() != hostname]
+        if len(updated) == len(ingress):
+            raise CloudflareError(f"route {hostname} was not found")
+        record_id = self._deletable_dns_record(tunnel_id, hostname)
+        config["ingress"] = updated
+        self._request("PUT", f"/accounts/{self._account}/cfd_tunnel/{tunnel_id}/configurations",
+                      {"config": config})
+        if record_id:
+            self._request("DELETE", f"/zones/{self._zone}/dns_records/{record_id}")
+        return f"Deleted route: https://{hostname}."

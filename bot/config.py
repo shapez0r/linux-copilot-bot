@@ -18,7 +18,7 @@ class ConfigError(Exception):
 @dataclass(frozen=True)
 class Config:
     telegram_token: str
-    owner_id: int
+    owner_ids: frozenset[int]
     github_token: str
     github_owner: str  # Empty means the token's own account.
     repos_dir: Path
@@ -88,6 +88,19 @@ def _integer(value: str, name: str, minimum: int) -> int:
     return number
 
 
+def _user_ids(value: str) -> frozenset[int]:
+    parts = [part.strip() for part in value.split(",")]
+    if not parts or any(not part for part in parts):
+        raise ConfigError("TELEGRAM_OWNER_ID must contain comma-separated positive integers")
+    try:
+        ids = frozenset(int(part) for part in parts)
+    except ValueError:
+        raise ConfigError("TELEGRAM_OWNER_ID must contain comma-separated positive integers") from None
+    if any(user_id < 1 for user_id in ids):
+        raise ConfigError("TELEGRAM_OWNER_ID must contain comma-separated positive integers")
+    return ids
+
+
 def load(environ=None, env_file=None) -> Config:
     """Build the configuration from an optional .env file overlaid with environment variables."""
     environ = os.environ if environ is None else environ
@@ -118,7 +131,7 @@ def load(environ=None, env_file=None) -> Config:
     home = Path.home()
     return Config(
         telegram_token=get("TELEGRAM_BOT_TOKEN"),
-        owner_id=_integer(get("TELEGRAM_OWNER_ID"), "TELEGRAM_OWNER_ID", 1),
+        owner_ids=_user_ids(get("TELEGRAM_OWNER_ID")),
         github_token=get("GITHUB_TOKEN"),
         github_owner=get("GITHUB_OWNER"),
         repos_dir=Path(get("REPOS_DIR", "/home/localadmin/repos")).expanduser(),

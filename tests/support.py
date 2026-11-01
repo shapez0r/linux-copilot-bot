@@ -12,7 +12,7 @@ from bot.config import Config  # noqa: E402
 
 def make_config(tmp: Path, **overrides) -> Config:
     values = dict(
-        telegram_token="tg-secret", owner_id=42, github_token="gh-secret", github_owner="",
+        telegram_token="tg-secret", owner_ids=frozenset({42}), github_token="gh-secret", github_owner="",
         repos_dir=tmp / "repos", state_dir=tmp / "state", profile=tmp / "profile", model="GPT/GPT-6",
         timeout=30, show_browser=False, temporary_chat=True, settle_seconds=2, git_name="Bot",
         git_email="bot@example.com",

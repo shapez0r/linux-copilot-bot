@@ -1,4 +1,4 @@
-"""Owner commands and the request pipeline: prepare repo, Copilot round-trip, commit/push, redeploy."""
+"""Authorized-user commands and the repository request pipeline."""
 from __future__ import annotations
 
 import logging
@@ -33,6 +33,8 @@ HELP = """Send a request as plain text and I will change the active repository w
 /fix <repo> <request> - select a repository and run a request in one message
 /fix [browser|nobrowser] [tempchat|notempchat] <request> - run against the active repository with per-request browser/chat options
 /cloudflare <subdomain> <port> - route <subdomain>.kurwalab.fyi to http://127.0.0.1:<port>
+/cloudflare list - list tunnel routes
+/cloudflare delete <subdomain> - delete a tunnel route by name
 /model <provider/model> - choose the Copilot model (for example GPT/GPT-6)
 /status - show repository, model, job and app state
 /cancel - stop the running job
@@ -107,7 +109,7 @@ class Bot:
         message = update.get("message") or {}
         sender = (message.get("from") or {}).get("id")
         chat = message.get("chat") or {}
-        if sender != self.cfg.owner_id or chat.get("type") != "private":
+        if sender not in self.cfg.owner_ids or chat.get("type") != "private":
             log.warning("ignored message from user %s", sender)
             return
         text = (message.get("text") or "").strip()
@@ -151,22 +153,52 @@ class Bot:
             self.say(chat_id, "Unknown command. Send /help for the list.")
 
     def cmd_cloudflare(self, chat_id: int, arg: str):
-        """Route only the hostname and port explicitly supplied by the owner."""
+        """Manage only routes explicitly requested by an authorized user."""
         parts = arg.split()
+        usage = "Usage: /cloudflare <subdomain> <port> | list | delete <subdomain>"
+        if parts and parts[0] == "list":
+            if parts != ["list"]:
+                self.say(chat_id, usage)
+                return
+            if self._cloudflare_unavailable(chat_id):
+                return
+            self._spawn(chat_id, lambda: self.say(chat_id, CloudflareRoutes(self.cfg).list_routes()))
+            return
+        if parts and parts[0] == "delete":
+            if len(parts) != 2:
+                self.say(chat_id, usage)
+                return
+            route = parts[1]
+            if not self._valid_route(route):
+                self.say(chat_id, "Subdomain must be a lowercase DNS label (letters, digits, hyphens).")
+                return
+            if self._cloudflare_unavailable(chat_id):
+                return
+            self._spawn(chat_id, lambda: self.say(chat_id, CloudflareRoutes(self.cfg).delete_route(route)))
+            return
         if len(parts) != 2:
-            self.say(chat_id, "Usage: /cloudflare <subdomain> <port>")
+            self.say(chat_id, usage)
             return
         route, raw_port = parts
-        if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", route):
+        if not self._valid_route(route):
             self.say(chat_id, "Subdomain must be a lowercase DNS label (letters, digits, hyphens).")
             return
         if not raw_port.isascii() or not raw_port.isdecimal() or not 1 <= int(raw_port) <= 65535:
             self.say(chat_id, "Port must be an integer from 1 to 65535.")
             return
-        if not self.cfg.cloudflare_enabled:
-            self.say(chat_id, "Configure Cloudflare API token, account ID and zone ID first.")
+        if self._cloudflare_unavailable(chat_id):
             return
         self._spawn(chat_id, lambda: self.say(chat_id, CloudflareRoutes(self.cfg).prepare(route, int(raw_port))))
+
+    @staticmethod
+    def _valid_route(route: str) -> bool:
+        return bool(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", route))
+
+    def _cloudflare_unavailable(self, chat_id: int) -> bool:
+        if self.cfg.cloudflare_enabled:
+            return False
+        self.say(chat_id, "Configure Cloudflare API token, account ID and zone ID first.")
+        return True
 
     def cmd_model(self, chat_id: int, arg: str):
         if not arg:

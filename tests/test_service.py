@@ -109,7 +109,7 @@ class ServiceTests(unittest.TestCase):
         if self.bot._worker is not None:
             self.bot._worker.join(timeout=30)
 
-    def test_only_the_owner_in_a_private_chat_is_served(self):
+    def test_only_authorized_users_in_private_chats_are_served(self):
         def update(sender, chat_type="private"):
             return {"message": {"from": {"id": sender}, "chat": {"id": 1, "type": chat_type}, "text": "/help"}}
         self.bot.handle_update(update(7))
@@ -117,6 +117,10 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.tg.sent, [])
         self.bot.handle_update(update(42))
         self.assertEqual(self.tg.sent, [HELP])
+
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42, 77}))
+        self.bot.handle_update(update(77))
+        self.assertEqual(self.tg.sent, [HELP, HELP])
 
     def test_request_without_repository_asks_to_select_one(self):
         self.say("add a login page")
@@ -244,6 +248,24 @@ class ServiceTests(unittest.TestCase):
             self.say("/cloudflare eurofish 8080")
             routes.return_value.prepare.assert_called_once_with("eurofish", 8080)
         self.assertIn("Tunnel configured", self.tg.sent[-1])
+
+    def test_cloudflare_list_and_delete_commands(self):
+        from unittest.mock import patch
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.list_routes.return_value = "Routes on tunnel:\n- app.example -> service"
+            routes.return_value.delete_route.return_value = "Deleted route."
+            self.say("/cloudflare list")
+            routes.return_value.list_routes.assert_called_once_with()
+            self.say("/cloudflare delete eurofish")
+            routes.return_value.delete_route.assert_called_once_with("eurofish")
+        self.assertIn("Deleted route", self.tg.sent[-1])
+
+    def test_cloudflare_delete_requires_a_valid_route_name(self):
+        for command in ("/cloudflare delete", "/cloudflare delete bad.name", "/cloudflare list extra"):
+            self.say(command)
+            self.assertTrue("Usage:" in self.tg.sent[-1] or "must be" in self.tg.sent[-1])
 
     def test_model_and_status_commands(self):
         self.say("/model Claude/Opus 5.5")

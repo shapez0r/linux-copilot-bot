@@ -11,7 +11,7 @@ from .repos import same_remote
 
 
 class GitError(Exception):
-    """Raised when a Git command fails; the message is safe to show to the owner."""
+    """Raised when a Git command fails; the message is safe to show to an authorized user."""
 
 
 class Git:
