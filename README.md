@@ -69,7 +69,7 @@ A bare name uses `GITHUB_OWNER`, or the token's account when it is not set. The 
 
 For every missing repository, the bot creates an empty GitHub repository, copies the contents of `<REPOS_DIR>/eurofish` into the new checkout, excludes every `.git` entry, and pushes the copy as the single `Initial commit`. The reference app must exist and contain files that Git can commit. The next request can ask Copilot to keep the same architecture and stack while turning the copy into a different app.
 
-One job runs at a time. Progress is shown in a single edited message with a rotating activity icon. While Copilot is working, the message shows visible task and plan names, the latest visible reasoning paragraph (limited to 500 characters), and a UTC `Last model output` timestamp with seconds. Inactivity updates also show the exact UTC time when visible output last changed. Generated code is not relayed. The final message contains only the commit, change summary, and redeploy result.
+One job runs at a time. Progress is shown in a single edited message with a rotating activity icon. While Copilot is working, the message mirrors visible task plans, the latest completed or current working-step title, standalone activity titles, visible reasoning, and intermediate response text. Reasoning and response excerpts are limited to 500 characters each, and generated code is not relayed. A UTC `Last model output` timestamp records the latest detected change; inactivity updates also report when visible output last changed. The final message contains only the commit, change summary, and redeploy result.
 
 ### What a request does
 

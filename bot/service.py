@@ -15,7 +15,7 @@ from .gitops import Git, GitError
 from .repos import RepoError, local_path, parse_repo_ref
 from .roundtrip import Cancelled, RoundTrip, RoundTripError
 from .state import State
-from .telegram_api import Telegram, TelegramError
+from .telegram_api import MESSAGE_LIMIT, Telegram, TelegramError
 
 log = logging.getLogger("bot")
 
@@ -60,7 +60,13 @@ class Progress:
 
     def end_prompt(self):
         self._ongoing = False
-        self._pending = self._status
+        self._pending = self._clip(self._status)
+
+    @staticmethod
+    def _clip(text: str, limit: int = MESSAGE_LIMIT) -> str:
+        if limit <= 0:
+            return ""
+        return text if len(text) <= limit else text[:limit - 1].rstrip() + "\u2026"
 
     def update(self, text: str, model_output: bool = False):
         self._status = redact(text, self._cfg.secrets)
@@ -70,9 +76,11 @@ class Progress:
             mark = self.ACTIVE_MARKS[self._frame % len(self.ACTIVE_MARKS)]
             self._frame += 1
             last_output = self._last_model_output or "not received yet"
-            self._pending = f"{mark} {self._status}\nLast model output: {last_output}"
+            suffix = f"\nLast model output: {last_output}"
+            available = MESSAGE_LIMIT - len(mark) - 1 - len(suffix)
+            self._pending = f"{mark} {self._clip(self._status, available)}{suffix}"
         else:
-            self._pending = self._status
+            self._pending = self._clip(self._status)
         if self._id is None or time.monotonic() - self._last >= self.MIN_INTERVAL:
             self.flush()
 

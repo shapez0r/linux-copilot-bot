@@ -40,6 +40,9 @@ FAKE_ENGINE = textwrap.dedent('''
     elif mode == "env":
         import os
         print(json.dumps({"chat_response": ",".join(k for k in ("TELEGRAM_BOT_TOKEN", "GITHUB_TOKEN") if k in os.environ)}))
+    elif mode == "clear":
+        print("ROUNDTRIP_REASONING:" + json.dumps({"blocks": [], "answers": []}), file=sys.stderr, flush=True)
+        print(json.dumps({"chat_response": "done"}))
     elif mode == "wait":
         status("waiting", "Waiting")
         sys.stdin.readline()
@@ -116,8 +119,29 @@ class RoundTripTests(unittest.TestCase):
 
     def test_reasoning_progress_is_limited_to_500_characters(self):
         message = format_reasoning_progress({"answers": [{"text": "x" * 600}]})
-        self.assertEqual(len(message.removeprefix("Current reasoning: ")), 500)
+        self.assertEqual(len(message.removeprefix("Latest response: ")), 500)
         self.assertTrue(message.endswith("\u2026"))
+
+    def test_working_progress_uses_completed_step_and_visible_prose(self):
+        payload = {"blocks": [{
+            "title": "Reasoning", "active": True, "layout": "working",
+            "steps": [
+                {"title": "Inspecting files", "kind": "completed", "lines": []},
+                {"title": "Testing", "kind": "thought", "lines": ["Running focused tests."]},
+                {"title": "Coding and executing", "kind": "coding", "lines": ["secret_code()"]},
+            ],
+        }]}
+        message = format_reasoning_progress(payload)
+        self.assertIn("Working through the steps: Inspecting files", message)
+        self.assertIn("Current reasoning: Running focused tests.", message)
+        self.assertNotIn("secret_code", message)
+
+    def test_empty_live_update_clears_stale_progress(self):
+        self.run_engine("clear")
+        self.assertEqual([stage for stage, _ in self.statuses[-2:]], ["reasoning", "reasoning"])
+        self.assertIn("Current reasoning: Keep the status useful.", self.statuses[-2][1])
+        self.assertIn("Task: Update progress display", self.statuses[-1][1])
+        self.assertNotIn("Current reasoning:", self.statuses[-1][1])
 
 
 if __name__ == "__main__":

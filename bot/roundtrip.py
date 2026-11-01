@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -15,6 +16,9 @@ STATUS_PREFIX = "ROUNDTRIP_STATUS:"
 REASONING_PREFIX = "ROUNDTRIP_REASONING:"
 QUIT_GRACE_SECONDS = 30  # Time the engine gets to click Stop in Copilot and exit after a cancel request.
 QUIT_EXIT_CODE = 130
+LIVE_TEXT_LIMIT = 500
+_CODING_STEP = re.compile(r"^(coding\b|code execution\b|executing code\b|running code\b)", re.I)
+_THOUGHT_STEP = re.compile(r"^\s*(reasoning|reasoned|thinking|thought|thought for)\b", re.I)
 
 
 class RoundTripError(Exception):
@@ -70,7 +74,8 @@ def format_task_progress(tasks) -> str:
     lines = [f"Task: {title} ({state})"]
     steps = task.get("steps") if isinstance(task.get("steps"), list) else []
     if steps:
-        marks = {"completed": "\u2705", "active": "\U0001f504", "pending": "\u23f3"}
+        marks = {"completed": "\u2705", "active": "\U0001f504", "pending": "\u23f3",
+                 "failed": "\u274c"}
         lines.append("Steps:")
         for step in steps[:20]:
             if not isinstance(step, dict):
@@ -81,36 +86,97 @@ def format_task_progress(tasks) -> str:
     return "\n".join(lines)
 
 
-def format_reasoning_progress(payload) -> str:
-    """Return the latest visible model paragraph, capped for a compact Telegram status."""
-    if not isinstance(payload, dict):
-        return ""
-    paragraph = ""
-    blocks = payload.get("blocks") if isinstance(payload.get("blocks"), list) else []
+def _section_steps(block):
+    """Normalize visible activity steps using the extension's display rules."""
+    steps = []
+    for value in block.get("steps") if isinstance(block.get("steps"), list) else []:
+        if not isinstance(value, dict):
+            continue
+        title = _one_line(value.get("title"), 180)
+        lines = value.get("lines") if isinstance(value.get("lines"), list) else []
+        try:
+            total = max(int(value.get("total") or 0), len(lines))
+        except (TypeError, ValueError):
+            total = len(lines)
+        supplied = str(value.get("kind") or "").lower()
+        if supplied == "coding" or _CODING_STEP.match(title):
+            kind = "coding"
+            lines = []
+        elif supplied == "completed" or (not _THOUGHT_STEP.match(title) and total == 0):
+            kind = "completed"
+            lines = []
+        else:
+            kind = "thought"
+        steps.append({"title": title or "Reasoning", "kind": kind, "lines": lines})
+    if steps:
+        return steps
+    lines = block.get("lines") if isinstance(block.get("lines"), list) else []
+    return [{"title": "Reasoning", "kind": "thought", "lines": lines}] if lines else []
+
+
+def _working_summary(blocks) -> str:
+    """Keep the latest completed activity title while the next step is running."""
+    completed = current = ""
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        steps = _section_steps(block)
+        finished = [step for step in steps if step["kind"] == "completed"]
+        if finished:
+            completed = finished[-1]["title"] or completed
+        elif not block.get("active"):
+            completed = ((steps[-1]["title"] if steps else _one_line(block.get("title"), 180))
+                         or completed)
+        if block.get("active"):
+            current = ((steps[-1]["title"] if steps else _one_line(block.get("title"), 180))
+                       or current)
+    return completed or current or "Reasoning"
+
+
+def _latest_visible_prose(blocks) -> str:
     block = next((item for item in reversed(blocks)
                   if isinstance(item, dict) and item.get("active")), None)
     if block is None:
         block = next((item for item in reversed(blocks) if isinstance(item, dict)), None)
-    if block:
-        steps = block.get("steps") if isinstance(block.get("steps"), list) else []
-        for step in reversed(steps):
-            if not isinstance(step, dict) or step.get("kind") == "coding":
-                continue
-            lines = step.get("lines") if isinstance(step.get("lines"), list) else []
-            paragraph = " ".join(str(line) for line in lines if str(line).strip())
-            if paragraph:
-                break
-        if not paragraph:
-            lines = block.get("lines") if isinstance(block.get("lines"), list) else []
-            paragraph = " ".join(str(line) for line in lines if str(line).strip())
-    if not paragraph:
-        answers = payload.get("answers") if isinstance(payload.get("answers"), list) else []
-        for answer in reversed(answers):
-            if isinstance(answer, dict) and answer.get("text"):
-                paragraph = str(answer["text"])
-                break
-    paragraph = _one_line(paragraph, 500)
-    return f"Current reasoning: {paragraph}" if paragraph else ""
+    if not block:
+        return ""
+    for step in reversed(_section_steps(block)):
+        if step["kind"] != "thought":
+            continue
+        paragraph = " ".join(str(line) for line in step["lines"] if str(line).strip())
+        if paragraph:
+            return _one_line(paragraph, LIVE_TEXT_LIMIT)
+    lines = block.get("lines") if isinstance(block.get("lines"), list) else []
+    return _one_line(" ".join(str(line) for line in lines if str(line).strip()), LIVE_TEXT_LIMIT)
+
+
+def format_reasoning_progress(payload) -> str:
+    """Format structured activity and live prose for the edited Telegram status."""
+    if not isinstance(payload, dict):
+        return ""
+    blocks = payload.get("blocks") if isinstance(payload.get("blocks"), list) else []
+    lines = []
+    if blocks:
+        if any(isinstance(block, dict) and block.get("layout") == "working" for block in blocks):
+            lines.append(f"Working through the steps: {_working_summary(blocks)}")
+        else:
+            block = next((item for item in reversed(blocks)
+                          if isinstance(item, dict) and item.get("active")), None)
+            if block is None:
+                block = next((item for item in reversed(blocks) if isinstance(item, dict)), None)
+            if block:
+                label = "Current activity" if block.get("active") else "Latest activity"
+                lines.append(f"{label}: {_one_line(block.get('title') or 'Reasoning', 180)}")
+        paragraph = _latest_visible_prose(blocks)
+        if paragraph:
+            lines.append(f"Current reasoning: {paragraph}")
+    answers = payload.get("answers") if isinstance(payload.get("answers"), list) else []
+    answer = next((str(item["text"]) for item in reversed(answers)
+                   if isinstance(item, dict) and str(item.get("text") or "").strip()), "")
+    answer = _one_line(answer, LIVE_TEXT_LIMIT)
+    if answer:
+        lines.append(f"Latest response: {answer}")
+    return "\n".join(lines)
 
 
 def _combined_progress(task: str, reasoning: str, heading: str = "Copilot is working.") -> str:
@@ -145,7 +211,7 @@ class RoundTrip:
         tail, out = deque(maxlen=8), []
 
         def read_stderr():
-            task_progress = reasoning_progress = ""
+            task_progress = live_progress = ""
             for line in proc.stderr:
                 line = line.rstrip()
                 event = parse_status_event(line)
@@ -157,16 +223,16 @@ class RoundTrip:
                         changed = updated != task_progress
                         task_progress = updated
                         on_status("task" if changed else "waiting",
-                                  _combined_progress(task_progress, reasoning_progress))
-                    elif stage == "waiting" and (task_progress or reasoning_progress):
-                        on_status("waiting", _combined_progress(task_progress, reasoning_progress, message))
+                                  _combined_progress(task_progress, live_progress))
+                    elif stage == "waiting" and (task_progress or live_progress):
+                        on_status("waiting", _combined_progress(task_progress, live_progress, message))
                     else:
                         on_status(stage, message)
                 elif reasoning is not None:
                     updated = format_reasoning_progress(reasoning)
-                    if updated and updated != reasoning_progress:
-                        reasoning_progress = updated
-                        on_status("reasoning", _combined_progress(task_progress, reasoning_progress))
+                    if updated != live_progress:
+                        live_progress = updated
+                        on_status("reasoning", _combined_progress(task_progress, live_progress))
                 elif line.strip() and not line.startswith((REASONING_PREFIX, "ROUNDTRIP_CHAT:")):
                     tail.append(line.strip())
 

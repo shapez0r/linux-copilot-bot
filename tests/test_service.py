@@ -10,6 +10,7 @@ from bot.gitops import Git
 from bot.roundtrip import Cancelled
 from bot.service import DEPLOY_NOTE, HELP, Bot, Progress
 from bot.state import State
+from bot.telegram_api import MESSAGE_LIMIT
 
 
 class LocalGit(Git):
@@ -146,6 +147,14 @@ class ServiceTests(unittest.TestCase):
         progress.end_prompt()
         progress.flush()
         self.assertNotIn("Last model output:", self.tg.edits[-1])
+
+    def test_prompt_progress_stays_within_telegram_message_limit(self):
+        progress = Progress(self.tg, 1, self.cfg)
+        progress.MIN_INTERVAL = 0
+        progress.begin_prompt()
+        progress.update("x" * (MESSAGE_LIMIT + 500), model_output=True)
+        self.assertEqual(len(self.tg.sent[-1]), MESSAGE_LIMIT)
+        self.assertIn("\nLast model output: ", self.tg.sent[-1])
 
     def test_repo_command_clones_and_persists_selection(self):
         self.say("/repo app")
