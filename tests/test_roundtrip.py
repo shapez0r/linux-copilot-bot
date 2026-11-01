@@ -10,7 +10,8 @@ from pathlib import Path
 
 from support import make_config
 from bot.roundtrip import (Cancelled, RoundTrip, RoundTripError, format_prompt_status,
-                           format_task_status, parse_activity_event, parse_status, parse_status_event)
+                           format_task_status, parse_activity_event, parse_live_event, parse_status,
+                           parse_status_event)
 
 FAKE_ENGINE = textwrap.dedent('''
     import json, sys
@@ -30,7 +31,7 @@ FAKE_ENGINE = textwrap.dedent('''
         "title": "Reasoning", "active": True, "layout": "working", "steps": [
             {"title": "Inspecting files", "kind": "completed", "lines": []},
             {"title": "Coding and executing", "kind": "coding", "lines": ["secret_code()"]},
-        ]}], "answers": [{"after": 1, "text": "secret reply"}]}), file=sys.stderr, flush=True)
+        ]}], "answers": [{"after": 1, "text": "Interim result."}]}), file=sys.stderr, flush=True)
     if mode == "ok":
         print(json.dumps({"chat_response": "done", "diff_stat": " 1 file changed"}))
     elif mode == "fail":
@@ -78,15 +79,14 @@ class RoundTripTests(unittest.TestCase):
         self.assertEqual(result["chat_response"], "done")
         self.assertEqual(self.statuses, [
             ("browser", "Opening"),
-            ("task", "Prompt execution: Build app\nStatus: In progress\n✓ Inspect repository\n"
-                     "▶ Implement changes\n○ Run tests\n\n"
-                     "15s elapsed; no new output for 2s of 900s allowed."),
-            ("activity", "Prompt execution: Build app\nStatus: In progress\n✓ Inspect repository\n"
-                         "▶ Implement changes\n○ Run tests\n\nActivity:\n▶ Reasoning\n"
-                         "  ✓ Inspecting files\n  • Coding and executing\n\n"
-                         "15s elapsed; no new output for 2s of 900s allowed."),
+            ("task", "▶ Build app\nIn progress\n  ✓ Inspect repository\n"
+                     "  ▶ Implement changes\n  ○ Run tests"),
+            ("activity", "▶ Build app\nIn progress\n  ✓ Inspect repository\n"
+                          "  ▶ Implement changes\n  ○ Run tests\n\n"
+                          "▶ Working through the steps: Inspecting files\n\nInterim result."),
         ])
-        self.assertNotIn("secret", str(self.statuses))
+        self.assertNotIn("secret_code", str(self.statuses))
+        self.assertNotIn("no new output", str(self.statuses))
 
     def test_failure_reports_engine_message(self):
         with self.assertRaisesRegex(RoundTripError, "No downloadable result"):
@@ -118,8 +118,8 @@ class RoundTripTests(unittest.TestCase):
             }],
         }))
         rendered = format_task_status(event["message"], event["tasks"])
-        self.assertEqual(rendered, "Prompt execution: Build app\nStatus: In progress\n"
-                         "✓ Inspect files\n▶ Coding and executing\n○ Test")
+        self.assertEqual(rendered, "▶ Build app\nIn progress\n"
+                          "  ✓ Inspect files\n  ▶ Coding and executing\n  ○ Test")
         self.assertNotIn("secret", rendered)
         self.assertNotIn("internal code output", rendered)
 
@@ -152,14 +152,42 @@ class RoundTripTests(unittest.TestCase):
             ],
         }])
         rendered = format_prompt_status("", [], blocks)
-        self.assertEqual(rendered, "Activity:\n▶ Creating files\n  ✓ Reviewing Python comments\n"
-                          "  • Coding and executing\n  • Testing")
+        self.assertEqual(rendered, "▶ Working through the steps: Reviewing Python comments")
         for hidden in ("private reasoning", "secret", "test output", "generated reply"):
             self.assertNotIn(hidden, rendered)
 
     def test_activity_parser_rejects_other_or_malformed_lines(self):
         for bad in ("ROUNDTRIP_REASONING:{", "ROUNDTRIP_REASONING:{}", "other"):
             self.assertIsNone(parse_activity_event(bad))
+
+    def test_live_parser_matches_extension_order_and_omits_code_output(self):
+        line = "ROUNDTRIP_REASONING:" + json.dumps({
+            "blocks": [
+                {"title": "Inspecting", "active": False, "layout": "working",
+                 "steps": [{"title": "Read files", "kind": "completed", "lines": []}]},
+                {"title": "Reasoning", "active": True, "layout": "section",
+                 "steps": [
+                     {"title": "Thought process", "kind": "thought", "lines": ["Comparing behavior"]},
+                     {"title": "Coding and executing", "kind": "coding", "lines": ["token=secret"]},
+                 ]},
+            ],
+            "answers": [{"after": 0, "text": "Starting."}, {"after": 1, "text": "Found it."}],
+        })
+        live = parse_live_event(line)
+        self.assertEqual(live["answers"], [
+            {"after": 0, "text": "Starting."}, {"after": 1, "text": "Found it."}])
+        rendered = format_prompt_status("900s elapsed; no new output", [], live["blocks"], live["answers"])
+        self.assertEqual(rendered,
+                         "Starting.\n\n✓ Working through the steps: Read files\n\nFound it.\n\n"
+                         "▶ Reasoning\n  • Thought process\n    Comparing behavior\n"
+                         "  • Coding and executing")
+        self.assertNotIn("token=secret", rendered)
+        self.assertNotIn("no new output", rendered)
+
+    def test_live_answer_without_activity_keeps_the_compact_stage(self):
+        self.assertEqual(format_prompt_status("Waiting for Copilot...", [], [], [
+            {"after": 0, "text": "I am checking the repository."},
+        ]), "Waiting for Copilot...\n\nI am checking the repository.")
 
 
 if __name__ == "__main__":

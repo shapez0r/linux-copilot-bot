@@ -70,7 +70,7 @@ A bare name uses `GITHUB_OWNER`, or the token's account when it is not set. The 
 
 For every missing repository, the bot creates an empty GitHub repository, copies the contents of `<REPOS_DIR>/eurofish` into the new checkout, excludes every `.git` entry, and pushes the copy as the single `Initial commit`. The reference app must exist and contain files that Git can commit. The next request can ask Copilot to keep the same architecture and stack while turning the copy into a different app.
 
-One job runs at a time. Progress is shown in a single message that is edited as the job advances. For long-running changes, that message mirrors the current Copilot task and plan-item states together with structured activity stage and step titles. Reasoning details, code, execution output, interim answers, and reply text are not sent to Telegram; the final message contains only the commit, change summary, and redeploy result.
+One job runs at a time. Progress is shown in a single message that is edited as the job advances. It uses the same event model and ordering as the VS Code extension: a compact stage message is shown until Copilot exposes structured output, then the current task and plan, interleaved live answers, and activity sections take its place. Active reasoning details are included, while code-execution content is omitted. Once structured output is visible, repetitive inactivity text stays hidden; the final message contains the commit, change summary, and redeploy result.
 
 ### What a request does
 
@@ -96,7 +96,7 @@ Settings come from `.env` (or the file named by `BOT_ENV_FILE`); real environmen
 | `STATE_DIR` | `~/.copilot-telegram-bot` | Active repository and model, process ids, app logs. |
 | `COPILOT_PROFILE` | `~/.copilot-repo-browser` | Browser profile created by `make login`. |
 | `COPILOT_MODEL` | `GPT/GPT-6` | Initial model label; change it later with `/model`. |
-| `COPILOT_TIMEOUT` | `900` | Seconds without new Copilot output before a run gives up. |
+| `COPILOT_TIMEOUT` | `900` | Seconds without a visible output change or task-card change before a run gives up; the pre-submit screen is the inactivity baseline. |
 | `BOT_SHOW_BROWSER` | `false` | Default browser visibility. `browser` or `nobrowser` on `/fix` overrides it for that request. A visible browser requires a display, such as VNC or X forwarding. |
 | `BOT_TEMPORARY_CHAT` | `true` | Default Temporary chat state. `tempchat` or `notempchat` on `/fix` overrides it for that request; disabling it saves the chat in your account. |
 | `DEPLOY_SETTLE_SECONDS` | `10` | How long `make run` must stay up to count as deployed. |
