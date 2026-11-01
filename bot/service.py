@@ -15,7 +15,7 @@ from .gitops import Git, GitError
 from .repos import RepoError, local_path, parse_repo_ref
 from .roundtrip import (Cancelled, RoundTrip, RoundTripError, StatusTimeline,
                         format_stage_status)
-from .state import State
+from .state import ADMIN_OWNER, State, owner_label, telegram_owner
 from .telegram_api import Telegram, TelegramError
 
 log = logging.getLogger("bot")
@@ -71,6 +71,10 @@ MAIN_KEYBOARD = _keyboard([
     [SET_MODEL, SHOW_STATUS],
     [CANCEL_ACTION],
 ])
+USER_KEYBOARD = _keyboard([
+    [CREATE_APP, LIST_APPS],
+    [FIX_APP],
+])
 MODEL_KEYBOARD = _keyboard([
     [KNOWN_MODELS[0], KNOWN_MODELS[1]],
     [KNOWN_MODELS[2], KNOWN_MODELS[3]],
@@ -98,7 +102,7 @@ HELP = """Use the buttons below to create and manage apps. You can also send a r
 /repo - show the active repository
 /fix <repo> <request> - select a repository and run a request in one message
 /fix [browser|nobrowser] [tempchat|notempchat] <request> - run against the active repository with per-request browser/chat options
-/list - list running apps
+/list - list apps, owners and running status
 /cloudflare <subdomain> <port> - route <subdomain>.kurwalab.fyi to http://127.0.0.1:<port>
 /cloudflare list - list tunnel routes
 /cloudflare delete <subdomain> - delete a tunnel route by name
@@ -106,6 +110,22 @@ HELP = """Use the buttons below to create and manage apps. You can also send a r
 /status - show repository, model, job and app state
 /cancel - stop the running job
 /help - show this message"""
+USER_HELP = """Use the buttons below to create apps, list apps, and fix apps you created.
+
+/menu - show the app menu
+/new [public|private] [model=<provider/model>] [template=<app>] name="<name|owner/name>" prompt="<request>" - create, build, deploy and publish a new app
+/fix <repo> <request> - fix an app you created
+/fix [browser|nobrowser] [tempchat|notempchat] <request> - fix your active app
+/list - list apps and their owners
+/cancel - stop your own running job
+/help - show this message"""
+
+ADMIN_ONLY_BUTTONS = {
+    DELETE_APP, TUNNEL_ROUTES, SELECT_REPOSITORY, SET_MODEL, SHOW_STATUS,
+    LIST_ROUTES, ADD_ROUTE, DELETE_ROUTE,
+}
+ADMIN_ONLY_COMMANDS = {"delete", "repo", "cloudflare", "model", "status"}
+ADMIN_ONLY_MESSAGE = "This action is available only to kurwalab.fyi admins."
 
 _BOT_ERRORS = (RepoError, GitError, GitHubError, RoundTripError, CloudflareError, DeployError)
 
@@ -148,6 +168,7 @@ class Bot:
         self._lock = threading.Lock()
         self._cancel = threading.Event()
         self._worker = None
+        self._job_user_id = None
         self._dialogs = {}
 
     # ---- Telegram loop -------------------------------------------------
@@ -180,12 +201,12 @@ class Bot:
         message = update.get("message") or {}
         sender = (message.get("from") or {}).get("id")
         chat = message.get("chat") or {}
-        if sender not in self.cfg.owner_ids or chat.get("type") != "private":
+        if sender not in self.cfg.authorized_ids or chat.get("type") != "private":
             log.warning("ignored message from user %s", sender)
             return
         text = (message.get("text") or "").strip()
         if text:
-            self.handle_text(chat["id"], text)
+            self.handle_text(chat["id"], text, sender)
         else:
             self.say(chat["id"], "Send the request as text.")
 
@@ -201,46 +222,58 @@ class Bot:
         except TelegramError as e:
             log.warning("send failed: %s", redact(str(e), self.cfg.secrets))
 
-    def show_menu(self, chat_id: int, text: str = "What would you like to do?"):
+    def _is_admin(self, user_id) -> bool:
+        return user_id is None or self.cfg.is_admin(user_id)
+
+    def _main_keyboard(self, user_id):
+        return MAIN_KEYBOARD if self._is_admin(user_id) else USER_KEYBOARD
+
+    def show_menu(self, chat_id: int, text: str = "What would you like to do?", user_id=None):
         self._dialogs.pop(chat_id, None)
-        self.say_keyboard(chat_id, text, MAIN_KEYBOARD)
+        self.say_keyboard(chat_id, text, self._main_keyboard(user_id))
 
     # ---- Commands ------------------------------------------------------
 
-    def handle_text(self, chat_id: int, text: str):
+    def handle_text(self, chat_id: int, text: str, user_id=None):
+        if user_id is not None and user_id not in self.cfg.authorized_ids:
+            return
         if text == BACK_TO_MENU:
-            self.show_menu(chat_id)
+            self.show_menu(chat_id, user_id=user_id)
             return
         if text == CANCEL_ACTION:
-            self.cmd_cancel(chat_id)
+            self.cmd_cancel(chat_id, user_id)
             return
         if text in (CREATE_APP, LIST_APPS, FIX_APP, DELETE_APP, TUNNEL_ROUTES,
                     SELECT_REPOSITORY, SET_MODEL, SHOW_STATUS, LIST_ROUTES, ADD_ROUTE, DELETE_ROUTE):
-            self._handle_menu_button(chat_id, text)
+            self._handle_menu_button(chat_id, text, user_id)
             return
         if chat_id in self._dialogs and not text.startswith("/"):
-            self._handle_dialog(chat_id, text)
+            self._handle_dialog(chat_id, text, user_id)
             return
         if not text.startswith("/"):
-            self.start_request(chat_id, "", text)
+            self.start_request(chat_id, "", text, user_id=user_id)
             return
         parts = re.split(r"\s+", text, maxsplit=1)
         command = parts[0][1:].split("@")[0].lower()
         arg = parts[1].strip() if len(parts) > 1 else ""
+        if command in ADMIN_ONLY_COMMANDS and not self._is_admin(user_id):
+            self.say(chat_id, ADMIN_ONLY_MESSAGE)
+            return
         if command == "start":
-            self.show_menu(chat_id, "Welcome. Create and manage apps with the buttons below.")
+            self.show_menu(chat_id, "Welcome. Create and manage apps with the buttons below.", user_id)
         elif command == "help":
-            self.say_keyboard(chat_id, HELP, MAIN_KEYBOARD)
+            help_text = HELP if self._is_admin(user_id) else USER_HELP
+            self.say_keyboard(chat_id, help_text, self._main_keyboard(user_id))
         elif command == "menu":
-            self.show_menu(chat_id)
+            self.show_menu(chat_id, user_id=user_id)
         elif command == "new":
-            self.cmd_new(chat_id, arg)
+            self.cmd_new(chat_id, arg, user_id)
         elif command == "delete":
             self.cmd_delete(chat_id, arg)
         elif command == "repo":
-            self.cmd_repo(chat_id, arg)
+            self.cmd_repo(chat_id, arg, user_id)
         elif command == "fix":
-            self.cmd_fix(chat_id, arg)
+            self.cmd_fix(chat_id, arg, user_id)
         elif command == "list":
             self.cmd_list(chat_id, arg)
         elif command == "cloudflare":
@@ -248,18 +281,21 @@ class Bot:
         elif command == "model":
             self.cmd_model(chat_id, arg)
         elif command == "status":
-            self.cmd_status(chat_id)
+            self.cmd_status(chat_id, user_id)
         elif command == "cancel":
-            self.cmd_cancel(chat_id)
+            self.cmd_cancel(chat_id, user_id)
         else:
             self.say(chat_id, "Unknown command. Send /help for the list.")
 
-    def _handle_menu_button(self, chat_id: int, label: str):
+    def _handle_menu_button(self, chat_id: int, label: str, user_id=None):
         """Start a guided action selected from a reply-keyboard button."""
+        if label in ADMIN_ONLY_BUTTONS and not self._is_admin(user_id):
+            self.say(chat_id, ADMIN_ONLY_MESSAGE)
+            return
         if label == LIST_APPS:
             self.cmd_list(chat_id, "")
         elif label == SHOW_STATUS:
-            self.cmd_status(chat_id)
+            self.cmd_status(chat_id, user_id)
         elif label == TUNNEL_ROUTES:
             self._dialogs.pop(chat_id, None)
             self.say_keyboard(chat_id, "Manage Cloudflare Tunnel routes.", ROUTES_KEYBOARD)
@@ -268,7 +304,8 @@ class Bot:
         elif label == CREATE_APP:
             if self._cloudflare_unavailable(chat_id) or self._job_blocks_dialog(chat_id):
                 return
-            self._dialogs[chat_id] = {"flow": "create", "step": "name", "data": {}}
+            self._dialogs[chat_id] = {"flow": "create", "step": "name", "data": {},
+                                      "user_id": user_id}
             self.say_keyboard(
                 chat_id,
                 "Enter the new app name. Use a lowercase DNS label such as `invoice-dashboard`.",
@@ -277,8 +314,12 @@ class Bot:
         elif label == FIX_APP:
             if self._job_blocks_dialog(chat_id):
                 return
-            choices = self._app_choices(include_active=True)
-            self._dialogs[chat_id] = {"flow": "fix", "step": "repo", "data": {}}
+            choices = self._app_choices(user_id, include_active=True)
+            if not choices and not self._is_admin(user_id):
+                self.say(chat_id, "You do not have any apps to fix. Create an app first.")
+                return
+            self._dialogs[chat_id] = {"flow": "fix", "step": "repo", "data": {},
+                                      "user_id": user_id}
             self.say_keyboard(
                 chat_id,
                 "Choose an app or enter its repository as `name` or `owner/name`.",
@@ -287,8 +328,9 @@ class Bot:
         elif label == DELETE_APP:
             if self._job_blocks_dialog(chat_id):
                 return
-            choices = self._app_choices(include_active=True)
-            self._dialogs[chat_id] = {"flow": "delete", "step": "name", "data": {}}
+            choices = self._app_choices(user_id, include_active=True)
+            self._dialogs[chat_id] = {"flow": "delete", "step": "name", "data": {},
+                                      "user_id": user_id}
             self.say_keyboard(
                 chat_id,
                 "Choose the app to delete, or enter its name. You will be asked to confirm.",
@@ -297,20 +339,24 @@ class Bot:
         elif label == SELECT_REPOSITORY:
             if self._job_blocks_dialog(chat_id):
                 return
-            self._dialogs[chat_id] = {"flow": "repo", "step": "repo", "data": {}}
+            self._dialogs[chat_id] = {"flow": "repo", "step": "repo", "data": {},
+                                      "user_id": user_id}
             self.say_keyboard(chat_id, "Enter `name` or `owner/name` to select a repository.", CANCEL_KEYBOARD)
         elif label == SET_MODEL:
-            self._dialogs[chat_id] = {"flow": "model", "step": "model", "data": {}}
+            self._dialogs[chat_id] = {"flow": "model", "step": "model", "data": {},
+                                      "user_id": user_id}
             self.say_keyboard(chat_id, f"Choose a model. Current model: {self.state.model}", MODEL_KEYBOARD)
         elif label == ADD_ROUTE:
             if self._cloudflare_unavailable(chat_id) or self._job_blocks_dialog(chat_id):
                 return
-            self._dialogs[chat_id] = {"flow": "route-add", "step": "name", "data": {}}
+            self._dialogs[chat_id] = {"flow": "route-add", "step": "name", "data": {},
+                                      "user_id": user_id}
             self.say_keyboard(chat_id, "Enter the lowercase subdomain for the route.", CANCEL_KEYBOARD)
         elif label == DELETE_ROUTE:
             if self._cloudflare_unavailable(chat_id) or self._job_blocks_dialog(chat_id):
                 return
-            self._dialogs[chat_id] = {"flow": "route-delete", "step": "name", "data": {}}
+            self._dialogs[chat_id] = {"flow": "route-delete", "step": "name", "data": {},
+                                      "user_id": user_id}
             self.say_keyboard(chat_id, "Enter the lowercase subdomain of the route to delete.", CANCEL_KEYBOARD)
 
     def _job_blocks_dialog(self, chat_id: int) -> bool:
@@ -319,12 +365,26 @@ class Bot:
         self.say(chat_id, "A job is already running. Wait for it or use Cancel / stop.")
         return True
 
-    def _app_choices(self, include_active: bool = False):
-        choices = []
-        if include_active and self.state.repo:
-            choices.append(self.state.repo)
-        choices.extend(app for app, _ in self.deployer.running_apps())
+    def _app_choices(self, user_id=None, include_active: bool = False):
+        self._register_running_apps()
+        owner = ADMIN_OWNER if self._is_admin(user_id) else telegram_owner(user_id)
+        choices = list(self.state.app_owners) if self._is_admin(user_id) else self.state.repos_for_owner(owner)
+        active = self.state.get_active_repo(user_id, self._is_admin(user_id))
+        if include_active and active:
+            choices.insert(0, active)
         return list(dict.fromkeys(choices))
+
+    def _register_running_apps(self):
+        running = self.deployer.running_apps()
+        changed = False
+        for app, _ in running:
+            matches = [repo for repo in self.state.app_owners if repo.rsplit("/", 1)[-1].lower() == app.lower()]
+            if not matches:
+                self.state.set_app_owner(f"{self._owner_default()}/{app}", ADMIN_OWNER)
+                changed = True
+        if changed:
+            self.state.save()
+        return running
 
     @staticmethod
     def _choice_keyboard(choices, extra_rows=None):
@@ -333,17 +393,21 @@ class Bot:
         rows.extend([[CANCEL_ACTION], [BACK_TO_MENU]])
         return _keyboard(rows)
 
-    def _handle_dialog(self, chat_id: int, text: str):
+    def _handle_dialog(self, chat_id: int, text: str, user_id=None):
         dialog = self._dialogs[chat_id]
+        if dialog.get("user_id") != user_id:
+            self._dialogs.pop(chat_id, None)
+            self.say(chat_id, "That action expired. Open the menu and try again.")
+            return
         flow, step = dialog["flow"], dialog["step"]
         if flow == "create":
             self._handle_create_dialog(chat_id, dialog, text)
         elif flow == "fix":
-            self._handle_fix_dialog(chat_id, dialog, text)
+            self._handle_fix_dialog(chat_id, dialog, text, user_id)
         elif flow == "delete":
             self._handle_delete_dialog(chat_id, dialog, text)
         elif flow == "repo":
-            self._handle_repo_dialog(chat_id, text)
+            self._handle_repo_dialog(chat_id, text, user_id)
         elif flow == "model":
             self._handle_model_dialog(chat_id, dialog, text)
         elif flow == "route-add":
@@ -351,7 +415,7 @@ class Bot:
         elif flow == "route-delete":
             self._handle_route_delete_dialog(chat_id, dialog, text)
         else:
-            self.show_menu(chat_id, "That action expired. Choose another action.")
+            self.show_menu(chat_id, "That action expired. Choose another action.", user_id)
 
     def _handle_create_dialog(self, chat_id: int, dialog: dict, text: str):
         step, data = dialog["step"], dialog["data"]
@@ -409,16 +473,20 @@ class Bot:
             started = self._spawn(
                 chat_id,
                 lambda: self._new_app(chat_id, data["ref"], request, True,
-                                      data["model"], data["template"]),
-                after=lambda: self.show_menu(chat_id, "App creation finished. Choose the next action."),
+                                      data["model"], data["template"], dialog.get("user_id")),
+                after=lambda: self.show_menu(chat_id, "App creation finished. Choose the next action.",
+                                             dialog.get("user_id")),
+                user_id=dialog.get("user_id"),
             )
             if not started:
-                self.show_menu(chat_id, "App creation could not start because another job is running.")
+                self.show_menu(chat_id, "App creation could not start because another job is running.",
+                               dialog.get("user_id"))
 
     def _begin_template_selection(self, chat_id: int, dialog: dict):
         dialog["step"] = "loading-templates"
         self.say_keyboard(chat_id, "Loading template apps from the Cloudflare tunnel routes...", CANCEL_KEYBOARD)
-        started = self._spawn(chat_id, lambda: self._load_template_choices(chat_id, dialog))
+        started = self._spawn(chat_id, lambda: self._load_template_choices(chat_id, dialog),
+                              user_id=dialog.get("user_id"))
         if not started:
             self._dialogs.pop(chat_id, None)
 
@@ -426,7 +494,7 @@ class Bot:
         try:
             route_apps = CloudflareRoutes(self.cfg).app_routes()
         except CloudflareError as error:
-            self.show_menu(chat_id, f"Could not load template routes: {error}")
+            self.show_menu(chat_id, f"Could not load template routes: {error}", dialog.get("user_id"))
             return
         templates = list(dict.fromkeys(
             route["app"] for route in route_apps
@@ -437,6 +505,7 @@ class Bot:
                 chat_id,
                 "No template is available. A template needs both a local app checkout and a local HTTP route "
                 "on the configured Cloudflare tunnel.",
+                dialog.get("user_id"),
             )
             return
         if self._dialogs.get(chat_id) is not dialog:
@@ -450,14 +519,18 @@ class Bot:
             self._choice_keyboard(templates),
         )
 
-    def _handle_fix_dialog(self, chat_id: int, dialog: dict, text: str):
+    def _handle_fix_dialog(self, chat_id: int, dialog: dict, text: str, user_id=None):
         if dialog["step"] == "repo":
             try:
-                parse_repo_ref(text, "owner")
+                owner, name = parse_repo_ref(text, self._owner_default())
             except RepoError as error:
                 self.say(chat_id, str(error))
                 return
-            dialog["data"]["repo"] = text.strip()
+            full = f"{owner}/{name}"
+            if not self._can_fix(user_id, full):
+                self.say(chat_id, "You can only fix apps you created.")
+                return
+            dialog["data"]["repo"] = full
             dialog["step"] = "prompt"
             self.say_keyboard(chat_id, "Describe what should be fixed or changed in this app.", CANCEL_KEYBOARD)
             return
@@ -467,10 +540,12 @@ class Bot:
             return
         repo = dialog["data"]["repo"]
         self._dialogs.pop(chat_id, None)
-        started = self._spawn(chat_id, lambda: self._request(chat_id, repo, request),
-                              after=lambda: self.show_menu(chat_id, "Fix finished. Choose the next action."))
+        started = self._spawn(chat_id, lambda: self._request(chat_id, repo, request, user_id=user_id),
+                              after=lambda: self.show_menu(chat_id, "Fix finished. Choose the next action.",
+                                                           user_id),
+                              user_id=user_id)
         if not started:
-            self.show_menu(chat_id, "The fix could not start because another job is running.")
+            self.show_menu(chat_id, "The fix could not start because another job is running.", user_id)
 
     def _handle_delete_dialog(self, chat_id: int, dialog: dict, text: str):
         if dialog["step"] == "name":
@@ -506,17 +581,19 @@ class Bot:
         if not started:
             self.show_menu(chat_id, "Deletion could not start because another job is running.")
 
-    def _handle_repo_dialog(self, chat_id: int, text: str):
+    def _handle_repo_dialog(self, chat_id: int, text: str, user_id=None):
         try:
             parse_repo_ref(text, "owner")
         except RepoError as error:
             self.say(chat_id, str(error))
             return
         self._dialogs.pop(chat_id, None)
-        started = self._spawn(chat_id, lambda: self._select_repo(chat_id, text),
-                              after=lambda: self.show_menu(chat_id, "Repository selection finished."))
+        started = self._spawn(chat_id, lambda: self._select_repo(chat_id, text, user_id=user_id),
+                              after=lambda: self.show_menu(chat_id, "Repository selection finished.", user_id),
+                              user_id=user_id)
         if not started:
-            self.show_menu(chat_id, "Repository selection could not start because another job is running.")
+            self.show_menu(chat_id, "Repository selection could not start because another job is running.",
+                           user_id)
 
     def _handle_model_dialog(self, chat_id: int, dialog: dict, text: str):
         if dialog["step"] == "model" and text == CUSTOM_MODEL:
@@ -629,6 +706,9 @@ class Bot:
         self.say(chat_id, "Configure Cloudflare API token, account ID and zone ID first.")
         return True
 
+    def _can_fix(self, user_id, repo: str) -> bool:
+        return self._is_admin(user_id) or self.state.app_owner(repo) == telegram_owner(user_id)
+
     def cmd_model(self, chat_id: int, arg: str):
         if not arg:
             self.say(chat_id, f"Model: {self.state.model}")
@@ -639,11 +719,12 @@ class Bot:
             self.state.save()
             self.say(chat_id, f"Model set to {arg}.")
 
-    def cmd_status(self, chat_id: int):
-        lines = [f"Repository: {self.state.repo or 'none selected'}", f"Model: {self.state.model}",
+    def cmd_status(self, chat_id: int, user_id=None):
+        active = self.state.get_active_repo(user_id, self._is_admin(user_id))
+        lines = [f"Repository: {active or 'none selected'}", f"Model: {self.state.model}",
                  f"Job: {'running' if self._lock.locked() else 'idle'}"]
-        if self.state.repo:
-            name = self.state.repo.split("/", 1)[1]
+        if active:
+            name = active.split("/", 1)[1]
             lines.append(f"App: {self.deployer.status(name, local_path(self.cfg.repos_dir, name))}")
         self.say(chat_id, "\n".join(lines))
 
@@ -651,23 +732,31 @@ class Bot:
         if arg:
             self.say(chat_id, "Usage: /list")
             return
-        apps = self.deployer.running_apps()
-        if not apps:
-            self.say(chat_id, "No apps are running.")
+        running = dict(self._register_running_apps())
+        if not self.state.app_owners:
+            self.say(chat_id, "No apps are available.")
             return
-        self.say(chat_id, "\n".join(["Running apps:", *(f"- {app} (pid {pid})" for app, pid in apps)]))
+        lines = ["Apps:"]
+        for repo, owner in sorted(self.state.app_owners.items(), key=lambda item: item[0].lower()):
+            name = repo.rsplit("/", 1)[-1]
+            status = f"running (pid {running[name]})" if name in running else "not running"
+            lines.append(f"- {repo} — owner: {owner_label(owner)} — {status}")
+        self.say(chat_id, "\n".join(lines))
 
-    def cmd_cancel(self, chat_id: int):
+    def cmd_cancel(self, chat_id: int, user_id=None):
         if chat_id in self._dialogs:
-            self.show_menu(chat_id, "Action cancelled.")
+            self.show_menu(chat_id, "Action cancelled.", user_id)
             return
         if self._lock.locked():
+            if not self._is_admin(user_id) and self._job_user_id != user_id:
+                self.say(chat_id, "You can only cancel your own running job.")
+                return
             self._cancel.set()
             self.say(chat_id, "Cancelling; Copilot is asked to stop.")
         else:
             self.say(chat_id, "No job is running.")
 
-    def cmd_fix(self, chat_id: int, arg: str):
+    def cmd_fix(self, chat_id: int, arg: str, user_id=None):
         """Run a request with optional browser and Temporary chat overrides."""
         words = arg.split()
         show_browser = temporary_chat = None
@@ -686,13 +775,13 @@ class Bot:
             if not words:
                 self.say(chat_id, "Usage: /fix [browser|nobrowser] [tempchat|notempchat] <request>")
                 return
-            self.start_request(chat_id, "", " ".join(words), show_browser, temporary_chat)
+            self.start_request(chat_id, "", " ".join(words), show_browser, temporary_chat, user_id)
             return
         ref, _, request = arg.partition(" ")
         if not ref or not request.strip():
             self.say(chat_id, "Usage: /fix <repo> <request>")
         else:
-            self.start_request(chat_id, ref, request.strip())
+            self.start_request(chat_id, ref, request.strip(), user_id=user_id)
 
     @staticmethod
     def _creation_options(arg: str):
@@ -777,7 +866,7 @@ class Bot:
             break
         return remaining, private, model, template, name, prompt, ""
 
-    def cmd_new(self, chat_id: int, arg: str):
+    def cmd_new(self, chat_id: int, arg: str, user_id=None):
         arg, private, model, template, name, prompt, error = self._new_options(arg)
         if error:
             self.say(chat_id, error)
@@ -804,7 +893,8 @@ class Bot:
             return
         ref, request = parts[0], parts[1].strip()
         self._spawn(chat_id, lambda: self._new_app(
-            chat_id, ref, request, private, model, template or NEW_REPO_TEMPLATE))
+            chat_id, ref, request, private, model, template or NEW_REPO_TEMPLATE, user_id),
+            user_id=user_id)
 
     def cmd_delete(self, chat_id: int, arg: str):
         if len(arg.split()) != 1:
@@ -812,29 +902,47 @@ class Bot:
             return
         self._spawn(chat_id, lambda: self._delete_app(chat_id, arg))
 
-    def cmd_repo(self, chat_id: int, arg: str):
+    def cmd_repo(self, chat_id: int, arg: str, user_id=None):
         arg, private = self._creation_options(arg)
         if not arg:
-            self.say(chat_id, f"Active repository: {self.state.repo}" if self.state.repo
+            active = self.state.get_active_repo(user_id, self._is_admin(user_id))
+            self.say(chat_id, f"Active repository: {active}" if active
                      else "No repository selected. Use /repo <name>.")
             return
-        self._spawn(chat_id, lambda: self._select_repo(chat_id, arg, private=private))
+        self._spawn(chat_id, lambda: self._select_repo(chat_id, arg, private=private, user_id=user_id),
+                    user_id=user_id)
 
     def start_request(self, chat_id: int, ref: str, request: str,
-                      show_browser=None, temporary_chat=None):
-        if not ref and not self.state.repo:
-            self.say(chat_id, "Select a repository first with /repo <name>.")
+                      show_browser=None, temporary_chat=None, user_id=None):
+        active = self.state.get_active_repo(user_id, self._is_admin(user_id))
+        if not ref and not active:
+            if self._is_admin(user_id):
+                self.say(chat_id, "Select a repository first with /repo <name>.")
+            else:
+                self.say(chat_id, "Create an app or choose Fix an app first.")
             return
-        self._spawn(chat_id, lambda: self._request(chat_id, ref or self.state.repo, request,
-                                                   show_browser, temporary_chat))
+        selected = ref or active
+        try:
+            owner, name = parse_repo_ref(selected, self._owner_default())
+        except RepoError as error:
+            self.say(chat_id, str(error))
+            return
+        full = f"{owner}/{name}"
+        if not self._can_fix(user_id, full):
+            self.say(chat_id, "You can only fix apps you created.")
+            return
+        self._spawn(chat_id, lambda: self._request(chat_id, full, request,
+                                                   show_browser, temporary_chat, user_id),
+                    user_id=user_id)
 
     # ---- Job execution -------------------------------------------------
 
-    def _spawn(self, chat_id: int, job, after=None):
+    def _spawn(self, chat_id: int, job, after=None, user_id=None):
         if not self._lock.acquire(blocking=False):
             self.say(chat_id, "A job is already running. Wait for it or send /cancel.")
             return False
         self._cancel.clear()
+        self._job_user_id = user_id
 
         def run():
             try:
@@ -852,6 +960,7 @@ class Bot:
                         after()
                     except Exception:
                         log.exception("post-job UI update failed")
+                self._job_user_id = None
                 self._lock.release()
 
         self._worker = threading.Thread(target=run, name="job", daemon=True)
@@ -862,7 +971,7 @@ class Bot:
         return self.cfg.github_owner or self.gh.login
 
     def _prepare(self, owner: str, name: str, progress: Progress, new_only: bool = False, private: bool = True,
-                 template_name: str = NEW_REPO_TEMPLATE):
+                 template_name: str = NEW_REPO_TEMPLATE, managed_owner: str = ""):
         """Create a repository from a local app template, or update an existing checkout."""
         progress.update(f"Looking up {owner}/{name} on GitHub...")
         repo = self.gh.get_repo(owner, name)
@@ -872,6 +981,9 @@ class Bot:
         if created:
             progress.update(f"Creating {'private' if private else 'public'} repository {owner}/{name}...")
             repo = self.gh.create_repo(owner, name, private=private)
+        if managed_owner:
+            self.state.set_app_owner(f"{owner}/{name}", managed_owner, overwrite=created)
+            self.state.save()
         dest = local_path(self.cfg.repos_dir, name)
         if created:
             template = self.cfg.repos_dir / template_name
@@ -884,18 +996,22 @@ class Bot:
         branch = self.git.sync(dest)
         return dest, branch, "cloned" if cloned else "already cloned"
 
-    def _select_repo(self, chat_id: int, arg: str, new_only: bool = False, private: bool = True):
+    def _select_repo(self, chat_id: int, arg: str, new_only: bool = False, private: bool = True,
+                     user_id=None):
         owner, name = parse_repo_ref(arg, self._owner_default())
         progress = Progress(self.tg, chat_id, self.cfg)
-        dest, branch, how = self._prepare(owner, name, progress, new_only=new_only, private=private)
-        self.state.repo = f"{owner}/{name}"
+        dest, branch, how = self._prepare(owner, name, progress, new_only=new_only, private=private,
+                                          managed_owner=ADMIN_OWNER)
+        full = f"{owner}/{name}"
+        self.state.set_app_owner(full, ADMIN_OWNER)
+        self.state.set_active_repo(user_id, full, self._is_admin(user_id))
         self.state.save()
         progress.flush()
         self.say(chat_id, f"\u2705 {owner}/{name} is {how} at {dest} (branch {branch}) and now active."
                  + (" Send your next message describing what to build." if new_only else ""))
 
     def _new_app(self, chat_id: int, ref: str, request: str, private: bool, model=None,
-                 template: str = NEW_REPO_TEMPLATE):
+                  template: str = NEW_REPO_TEMPLATE, user_id=None):
         owner, name = parse_repo_ref(ref, self._owner_default())
         if not self._valid_route(name):
             raise RepoError("App names must be lowercase DNS labels containing only letters, digits and hyphens.")
@@ -905,9 +1021,10 @@ class Bot:
         progress = Progress(self.tg, chat_id, self.cfg)
         if not (self.cfg.repos_dir / template).is_dir():
             raise RepoError(f"Template app is not available locally: {template}")
+        creator = ADMIN_OWNER if self._is_admin(user_id) else telegram_owner(user_id)
         dest, _, _ = self._prepare(owner, name, progress, new_only=True, private=private,
-                                   template_name=template)
-        self.state.repo = full
+                                   template_name=template, managed_owner=creator)
+        self.state.set_active_repo(user_id, full, self._is_admin(user_id))
         self.state.save()
         routes = CloudflareRoutes(self.cfg)
         progress.update(f"{full}: checking tunnel routes for the next port...")
@@ -992,26 +1109,31 @@ class Bot:
             failed = True
             startup = f"Startup: failed to remove the reboot entry: {error}"
 
+        github_clean = False
         if owner_error is not None:
             failed = True
             github = f"GitHub: could not resolve the owner for {name}: {owner_error}"
         else:
             try:
                 deleted = self.gh.delete_repo(owner, name)
+                github_clean = True
                 github = (f"GitHub: deleted {full}." if deleted
                           else f"GitHub: {full} was not found; nothing to delete.")
             except GitHubError as error:
                 failed = True
                 github = f"GitHub: failed to delete {full}: {error}"
 
+        local_clean = False
         try:
             if dest.is_symlink():
                 raise GitError(f"{dest} is a symbolic link; refusing to remove it.")
             if not dest.exists():
+                local_clean = True
                 local = f"Local folder: {dest} was not found; nothing to delete."
             else:
                 self.git.require_checkout(dest, owner or "", name)
                 shutil.rmtree(dest)
+                local_clean = True
                 local = f"Local folder: deleted {dest}."
         except (GitError, OSError) as error:
             failed = True
@@ -1028,30 +1150,33 @@ class Bot:
                 failed = True
                 tunnel = f"Tunnel route: failed to delete: {error}"
 
-        active_matches = (self.state.repo.lower() == full.lower() if owner else
-                          self.state.repo.lower().endswith(f"/{name.lower()}"))
-        if active_matches:
+        tracked = full if owner else next(
+            (repo for repo in self.state.app_owners if repo.lower().endswith(f"/{name.lower()}")), full)
+        if github_clean and local_clean:
             try:
-                self.state.repo = ""
+                self.state.remove_app(tracked)
                 self.state.save()
-                active = "Active repository: cleared."
+                active = "Ownership and active repository selections: cleared."
             except OSError as error:
                 failed = True
-                active = f"Active repository: failed to clear: {error}"
+                active = f"Ownership and active repository selections: failed to clear: {error}"
         else:
-            active = "Active repository: unchanged."
+            active = "Ownership and active repository selections: unchanged."
 
         heading = (f"⚠️ Deletion attempted for {full}; some cleanup failed or was skipped."
                    if failed else f"✅ Deletion completed for {full}.")
         self.say(chat_id, "\n".join([heading, github, local, tunnel, process, startup, active]))
 
     def _request(self, chat_id: int, ref: str, request: str,
-                 show_browser=None, temporary_chat=None):
+                 show_browser=None, temporary_chat=None, user_id=None):
         owner, name = parse_repo_ref(ref, self._owner_default())
         full = f"{owner}/{name}"
+        if not self._can_fix(user_id, full):
+            raise RepoError("You can only fix apps you created.")
         progress = Progress(self.tg, chat_id, self.cfg)
-        dest, branch, _ = self._prepare(owner, name, progress)
-        self.state.repo = full
+        managed_owner = self.state.app_owner(full) or ADMIN_OWNER
+        dest, branch, _ = self._prepare(owner, name, progress, managed_owner=managed_owner)
+        self.state.set_active_repo(user_id, full, self._is_admin(user_id))
         self.state.save()
         if self._cancel.is_set():
             raise Cancelled()

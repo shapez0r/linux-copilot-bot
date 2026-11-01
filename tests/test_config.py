@@ -15,11 +15,16 @@ class ConfigTests(unittest.TestCase):
 
     def test_env_file_parsing_and_override(self):
         path = self.tmp / ".env"
-        path.write_text('# comment\nTELEGRAM_BOT_TOKEN="abc"\nexport TELEGRAM_OWNER_ID=7\nGITHUB_TOKEN=ghp\n'
+        path.write_text('# comment\nTELEGRAM_BOT_TOKEN="abc"\nexport TELEGRAM_ADMIN_IDS=7\n'
+                        'TELEGRAM_USER_IDS=8,9\nGITHUB_TOKEN=ghp\n'
                         'COPILOT_MODEL=Claude/Opus 5.5\n')
         cfg = config.load({"GITHUB_TOKEN": "from-env"}, env_file=path)
         self.assertEqual((cfg.telegram_token, cfg.owner_ids, cfg.github_token),
                          ("abc", frozenset({7}), "from-env"))
+        self.assertEqual(cfg.user_ids, frozenset({8, 9}))
+        self.assertEqual(cfg.authorized_ids, frozenset({7, 8, 9}))
+        self.assertTrue(cfg.is_admin(7))
+        self.assertFalse(cfg.is_admin(8))
         self.assertEqual(cfg.model, "Claude/Opus 5.5")
         self.assertEqual(cfg.repos_dir, Path("/home/localadmin/repos"))
         self.assertFalse(cfg.show_browser)
@@ -31,9 +36,23 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config.load(values, env_file=self.tmp / "none").show_browser)
 
     def test_multiple_telegram_users_are_parsed(self):
-        values = {"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_OWNER_ID": "1, 2,1", "GITHUB_TOKEN": "g"}
+        values = {"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_ADMIN_IDS": "1, 2,1", "GITHUB_TOKEN": "g"}
         self.assertEqual(config.load(values, env_file=self.tmp / "none").owner_ids,
                          frozenset({1, 2}))
+
+    def test_legacy_admin_setting_and_singular_aliases_are_supported(self):
+        base = {"TELEGRAM_BOT_TOKEN": "t", "GITHUB_TOKEN": "g"}
+        legacy = config.load({**base, "TELEGRAM_OWNER_ID": "1"}, env_file=self.tmp / "none")
+        aliases = config.load({**base, "TELEGRAM_ADMIN_ID": "2", "TELEGRAM_USER_ID": "3"},
+                              env_file=self.tmp / "none")
+        self.assertEqual(legacy.admin_ids, frozenset({1}))
+        self.assertEqual((aliases.admin_ids, aliases.user_ids), (frozenset({2}), frozenset({3})))
+
+    def test_admin_and_regular_user_ids_must_be_disjoint(self):
+        values = {"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_ADMIN_IDS": "1,2",
+                  "TELEGRAM_USER_IDS": "2,3", "GITHUB_TOKEN": "g"}
+        with self.assertRaisesRegex(config.ConfigError, "both admins and regular users"):
+            config.load(values, env_file=self.tmp / "none")
 
     def test_cloudflare_routing_configuration(self):
         values = {"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_OWNER_ID": "1", "GITHUB_TOKEN": "g",

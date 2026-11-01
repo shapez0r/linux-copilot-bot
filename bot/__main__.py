@@ -61,7 +61,8 @@ def main(argv=None) -> int:
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
-    log.info("Listening for messages from %d authorized Telegram user(s)", len(cfg.owner_ids))
+    log.info("Listening for %d Telegram admin(s) and %d regular user(s)",
+             len(cfg.admin_ids), len(cfg.user_ids))
     bot.run_forever(stop)
     return 0
 

@@ -12,8 +12,9 @@ from bot.github_api import GitHubError
 from bot.gitops import Git, GitError
 from bot.roundtrip import Cancelled
 from bot.service import (CONFIRM_DELETE, CREATE_APP, CUSTOM_MODEL, DELETE_APP, DEPLOY_NOTE,
-                         FIX_APP, HELP, KNOWN_MODELS, MAIN_KEYBOARD, NEW_APP_PROMPT, Bot, Progress)
-from bot.state import State
+                         FIX_APP, HELP, KNOWN_MODELS, MAIN_KEYBOARD, NEW_APP_PROMPT, USER_HELP,
+                         USER_KEYBOARD, Bot, Progress)
+from bot.state import ADMIN_OWNER, State, telegram_owner
 
 
 class LocalGit(Git):
@@ -143,6 +144,11 @@ class ServiceTests(unittest.TestCase):
         if self.bot._worker is not None:
             self.bot._worker.join(timeout=30)
 
+    def user_say(self, user_id, text):
+        self.bot.handle_text(user_id, text, user_id)
+        if self.bot._worker is not None:
+            self.bot._worker.join(timeout=30)
+
     def test_only_authorized_users_in_private_chats_are_served(self):
         def update(sender, chat_type="private"):
             return {"message": {"from": {"id": sender}, "chat": {"id": 1, "type": chat_type}, "text": "/help"}}
@@ -152,14 +158,43 @@ class ServiceTests(unittest.TestCase):
         self.bot.handle_update(update(42))
         self.assertEqual(self.tg.sent, [HELP])
 
-        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42, 77}))
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}))
         self.bot.handle_update(update(77))
-        self.assertEqual(self.tg.sent, [HELP, HELP])
+        self.assertEqual(self.tg.sent, [HELP, USER_HELP])
 
     def test_start_shows_the_app_management_menu(self):
         self.say("/start")
         self.assertIn("Create and manage apps", self.tg.sent[-1])
         self.assertEqual(self.tg.markups[-1], MAIN_KEYBOARD)
+
+    def test_regular_users_see_only_create_list_and_fix_options(self):
+        self.bot.cfg = make_config(self.tmp, user_ids=frozenset({77}))
+        self.user_say(77, "/start")
+        self.assertEqual(self.tg.markups[-1], USER_KEYBOARD)
+        labels = {button["text"] for row in USER_KEYBOARD["keyboard"] for button in row}
+        self.assertEqual(labels, {CREATE_APP, "📱 List apps", FIX_APP})
+        self.user_say(77, "/help")
+        self.assertEqual(self.tg.sent[-1], USER_HELP)
+
+    def test_regular_users_cannot_invoke_admin_commands_or_buttons(self):
+        self.bot.cfg = make_config(self.tmp, user_ids=frozenset({77}))
+        for command in ("/delete app", "/repo app", "/cloudflare list", "/model GPT/GPT-6", "/status"):
+            with self.subTest(command=command):
+                self.user_say(77, command)
+                self.assertIn("only to kurwalab.fyi admins", self.tg.sent[-1])
+        self.user_say(77, DELETE_APP)
+        self.assertIn("only to kurwalab.fyi admins", self.tg.sent[-1])
+
+    def test_regular_users_see_only_their_apps_in_the_fix_picker(self):
+        self.bot.cfg = make_config(self.tmp, user_ids=frozenset({77, 88}))
+        self.state.set_app_owner("me/mine", telegram_owner(77))
+        self.state.set_app_owner("me/theirs", telegram_owner(88))
+        self.state.set_app_owner("me/admin-app", ADMIN_OWNER)
+        self.user_say(77, FIX_APP)
+        labels = {button["text"] for row in self.tg.markups[-1]["keyboard"] for button in row}
+        self.assertIn("me/mine", labels)
+        self.assertNotIn("me/theirs", labels)
+        self.assertNotIn("me/admin-app", labels)
 
     def test_create_app_menu_guides_name_model_template_prompt_and_returns_link(self):
         self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
@@ -279,9 +314,40 @@ class ServiceTests(unittest.TestCase):
         routes.return_value.prepare.assert_called_once_with("fresh-app", 8081)
         self.assertEqual(self.deployer.calls, [("fresh-app", self.cfg.repos_dir / "fresh-app")])
         self.assertEqual(self.deployer.reboots, [self.cfg.repos_dir / "fresh-app"])
+        self.assertEqual(self.state.app_owner("me/fresh-app"), ADMIN_OWNER)
         report = self.tg.sent[-1]
         self.assertIn("https://fresh-app.kurwalab.fyi", report)
         self.assertIn("Copilot output:\nAdded it.", report)
+
+    def test_regular_user_creation_records_ownership_and_allows_only_owner_fixes(self):
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77, 88}),
+                                   cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.next_port.return_value = 8085
+            routes.return_value.prepare.return_value = "Tunnel configured."
+            self.user_say(77, "/new member-app build it")
+        self.assertEqual(self.state.app_owner("me/member-app"), telegram_owner(77))
+        self.assertEqual(self.state.get_active_repo(77), "me/member-app")
+        saved = State(self.tmp / "state.json", "fallback")
+        self.assertEqual(saved.app_owner("me/member-app"), telegram_owner(77))
+        self.user_say(77, "/list")
+        self.assertIn("owner: Telegram user 77", self.tg.sent[-1])
+
+        calls = len(self.rt.calls)
+        self.user_say(88, "/fix member-app change the title")
+        self.assertEqual(len(self.rt.calls), calls)
+        self.assertIn("only fix apps you created", self.tg.sent[-1])
+
+        self.user_say(77, "/fix member-app change the title")
+        self.assertEqual(len(self.rt.calls), calls + 1)
+
+    def test_admin_can_fix_a_regular_users_app_without_changing_its_owner(self):
+        self.state.set_app_owner("me/app", telegram_owner(77))
+        self.state.save()
+        self.say("/fix app update it")
+        self.assertEqual(len(self.rt.calls), 1)
+        self.assertEqual(self.state.app_owner("me/app"), telegram_owner(77))
 
     def test_new_name_option_creates_and_publishes_the_named_app(self):
         self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
@@ -483,6 +549,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.deployer.removed_reboots, [self.dest])
         self.assertEqual(self.state.repo, "")
         self.assertEqual(State(self.tmp / "state.json", "x").repo, "")
+        self.assertEqual(self.state.app_owner("me/app"), "")
         self.assertIn("Deletion completed for me/app", self.tg.sent[-1])
         self.assertIn("Process: stopped the running app", self.tg.sent[-1])
 
@@ -660,10 +727,15 @@ class ServiceTests(unittest.TestCase):
 
     def test_list_reports_running_apps(self):
         self.say("/list")
-        self.assertEqual(self.tg.sent[-1], "No apps are running.")
+        self.assertEqual(self.tg.sent[-1], "No apps are available.")
         self.deployer.running = [("alpha", 101), ("beta", 202)]
         self.say("/list")
-        self.assertEqual(self.tg.sent[-1], "Running apps:\n- alpha (pid 101)\n- beta (pid 202)")
+        self.assertEqual(
+            self.tg.sent[-1],
+            "Apps:\n"
+            "- me/alpha — owner: kurwalab.fyi admins — running (pid 101)\n"
+            "- me/beta — owner: kurwalab.fyi admins — running (pid 202)",
+        )
         self.say("/list extra")
         self.assertEqual(self.tg.sent[-1], "Usage: /list")
 

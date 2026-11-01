@@ -38,6 +38,18 @@ class Config:
     cloudflare_zone_id: str = ""
     cloudflare_tunnel: str = "kurwalab-tunnel"
     cloudflare_domain: str = "kurwalab.fyi"
+    user_ids: frozenset[int] = frozenset()
+
+    @property
+    def admin_ids(self) -> frozenset[int]:
+        return self.owner_ids
+
+    @property
+    def authorized_ids(self) -> frozenset[int]:
+        return self.owner_ids | self.user_ids
+
+    def is_admin(self, user_id: int) -> bool:
+        return user_id in self.owner_ids
 
     @property
     def secrets(self):
@@ -88,16 +100,18 @@ def _integer(value: str, name: str, minimum: int) -> int:
     return number
 
 
-def _user_ids(value: str) -> frozenset[int]:
+def _user_ids(value: str, name: str, required: bool = True) -> frozenset[int]:
+    if not value and not required:
+        return frozenset()
     parts = [part.strip() for part in value.split(",")]
     if not parts or any(not part for part in parts):
-        raise ConfigError("TELEGRAM_OWNER_ID must contain comma-separated positive integers")
+        raise ConfigError(f"{name} must contain comma-separated positive integers")
     try:
         ids = frozenset(int(part) for part in parts)
     except ValueError:
-        raise ConfigError("TELEGRAM_OWNER_ID must contain comma-separated positive integers") from None
+        raise ConfigError(f"{name} must contain comma-separated positive integers") from None
     if any(user_id < 1 for user_id in ids):
-        raise ConfigError("TELEGRAM_OWNER_ID must contain comma-separated positive integers")
+        raise ConfigError(f"{name} must contain comma-separated positive integers")
     return ids
 
 
@@ -110,9 +124,21 @@ def load(environ=None, env_file=None) -> Config:
     def get(name, default=""):
         return values.get(name, default).strip()
 
-    missing = [n for n in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_OWNER_ID", "GITHUB_TOKEN") if not get(n)]
+    admin_name = next((name for name in ("TELEGRAM_ADMIN_IDS", "TELEGRAM_ADMIN_ID", "TELEGRAM_OWNER_ID")
+                       if get(name)), "TELEGRAM_ADMIN_IDS")
+    user_name = next((name for name in ("TELEGRAM_USER_IDS", "TELEGRAM_USER_ID") if get(name)),
+                     "TELEGRAM_USER_IDS")
+    admin_ids = _user_ids(get(admin_name), admin_name) if get(admin_name) else frozenset()
+    user_ids = _user_ids(get(user_name), user_name, required=False)
+    missing = [n for n in ("TELEGRAM_BOT_TOKEN", "GITHUB_TOKEN") if not get(n)]
+    if not admin_ids:
+        missing.append("TELEGRAM_ADMIN_IDS")
     if missing:
         raise ConfigError("Missing required settings: " + ", ".join(missing))
+    overlap = admin_ids & user_ids
+    if overlap:
+        raise ConfigError("Telegram user ids cannot be both admins and regular users: " +
+                          ", ".join(str(user_id) for user_id in sorted(overlap)))
     model = get("COPILOT_MODEL", DEFAULT_MODEL)
     if model.count("/") != 1 or not all(part.strip() for part in model.split("/")):
         raise ConfigError("COPILOT_MODEL must be a provider/model pair such as GPT/GPT-6")
@@ -131,7 +157,7 @@ def load(environ=None, env_file=None) -> Config:
     home = Path.home()
     return Config(
         telegram_token=get("TELEGRAM_BOT_TOKEN"),
-        owner_ids=_user_ids(get("TELEGRAM_OWNER_ID")),
+        owner_ids=admin_ids,
         github_token=get("GITHUB_TOKEN"),
         github_owner=get("GITHUB_OWNER"),
         repos_dir=Path(get("REPOS_DIR", "/home/localadmin/repos")).expanduser(),
@@ -149,11 +175,13 @@ def load(environ=None, env_file=None) -> Config:
         cloudflare_zone_id=cloudflare["CLOUDFLARE_ZONE_ID"],
         cloudflare_tunnel="kurwalab-tunnel",
         cloudflare_domain="kurwalab.fyi",
+        user_ids=user_ids,
     )
 
 
 _KNOWN = {
-    "TELEGRAM_BOT_TOKEN", "TELEGRAM_OWNER_ID", "GITHUB_TOKEN", "GITHUB_OWNER", "REPOS_DIR", "STATE_DIR",
+    "TELEGRAM_BOT_TOKEN", "TELEGRAM_ADMIN_IDS", "TELEGRAM_ADMIN_ID", "TELEGRAM_USER_IDS",
+    "TELEGRAM_USER_ID", "TELEGRAM_OWNER_ID", "GITHUB_TOKEN", "GITHUB_OWNER", "REPOS_DIR", "STATE_DIR",
     "COPILOT_PROFILE", "COPILOT_MODEL", "COPILOT_TIMEOUT", "BOT_SHOW_BROWSER", "BOT_TEMPORARY_CHAT",
     "DEPLOY_SETTLE_SECONDS", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "CLOUDFLARE_API_TOKEN",
     "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_ZONE_ID",
