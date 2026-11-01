@@ -83,7 +83,7 @@ class RoundTripTests(unittest.TestCase):
                      "  ▶ Implement changes\n  ○ Run tests"),
             ("activity", "▶ Build app\nIn progress\n  ✓ Inspect repository\n"
                           "  ▶ Implement changes\n  ○ Run tests\n\n"
-                          "▶ Working through the steps: Inspecting files\n\nInterim result."),
+                          "▶ Working through the steps: Coding and executing\n\nInterim result."),
         ])
         self.assertNotIn("secret_code", str(self.statuses))
         self.assertNotIn("no new output", str(self.statuses))
@@ -152,7 +152,7 @@ class RoundTripTests(unittest.TestCase):
             ],
         }])
         rendered = format_prompt_status("", [], blocks)
-        self.assertEqual(rendered, "▶ Working through the steps: Reviewing Python comments")
+        self.assertEqual(rendered, "▶ Working through the steps: Testing")
         for hidden in ("private reasoning", "secret", "test output", "generated reply"):
             self.assertNotIn(hidden, rendered)
 
@@ -160,7 +160,7 @@ class RoundTripTests(unittest.TestCase):
         for bad in ("ROUNDTRIP_REASONING:{", "ROUNDTRIP_REASONING:{}", "other"):
             self.assertIsNone(parse_activity_event(bad))
 
-    def test_live_parser_matches_extension_order_and_omits_code_output(self):
+    def test_live_parser_keeps_order_and_omits_reasoning_and_code_details(self):
         line = "ROUNDTRIP_REASONING:" + json.dumps({
             "blocks": [
                 {"title": "Inspecting", "active": False, "layout": "working",
@@ -179,10 +179,22 @@ class RoundTripTests(unittest.TestCase):
         rendered = format_prompt_status("900s elapsed; no new output", [], live["blocks"], live["answers"])
         self.assertEqual(rendered,
                          "Starting.\n\n✓ Working through the steps: Read files\n\nFound it.\n\n"
-                         "▶ Reasoning\n  • Thought process\n    Comparing behavior\n"
+                         "▶ Reasoning\n  • Thought process\n"
                          "  • Coding and executing")
+        self.assertNotIn("Comparing behavior", rendered)
         self.assertNotIn("token=secret", rendered)
         self.assertNotIn("no new output", rendered)
+
+    def test_reasoning_duration_is_shown_without_its_detail_text(self):
+        line = "ROUNDTRIP_REASONING:" + json.dumps({
+            "blocks": [{"title": "Reasoned for 12s", "active": False, "layout": "section",
+                        "lines": ["private chain of thought"], "total": 1}],
+            "answers": [{"after": 1, "text": "Interim answer."}],
+        })
+        live = parse_live_event(line)
+        self.assertEqual(format_prompt_status("", [], live["blocks"], live["answers"]),
+                         "✓ Reasoned for 12s\n\nInterim answer.")
+        self.assertNotIn("private chain of thought", str(live))
 
     def test_live_answer_without_activity_keeps_the_compact_stage(self):
         self.assertEqual(format_prompt_status("Waiting for Copilot...", [], [], [

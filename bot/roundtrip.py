@@ -21,7 +21,6 @@ TASK_STATES = frozenset({"completed", "active", "pending", "failed"})
 ACTIVITY_KINDS = frozenset({"thought", "completed", "coding"})
 CODING_STEP = re.compile(r"^(coding\b|code execution\b|executing code\b|running code\b)", re.I)
 THOUGHT_STEP = re.compile(r"^\s*(reasoning|reasoned|thinking|thought|thought for)\b", re.I)
-REASONING_TAIL = 10
 ANSWER_MAX_CHARS = 4000
 
 
@@ -77,7 +76,7 @@ def parse_status(line: str):
 
 
 def parse_live_event(line: str):
-    """Return the extension-compatible activity and live-answer event."""
+    """Return activity titles and interim answers without reasoning or execution details."""
     if not line.startswith(REASONING_PREFIX):
         return None
     try:
@@ -88,41 +87,34 @@ def parse_live_event(line: str):
         for index, raw_block in enumerate(value["blocks"]):
             if not isinstance(raw_block, dict):
                 continue
-            block_lines = [str(item) for item in raw_block.get("lines", [])] \
-                if isinstance(raw_block.get("lines"), list) else []
-            block_lines = block_lines[-REASONING_TAIL:]
+            block_line_count = len(raw_block.get("lines", [])) \
+                if isinstance(raw_block.get("lines"), list) else 0
             steps = []
             for raw_step in raw_block.get("steps") if isinstance(raw_block.get("steps"), list) else []:
                 if not isinstance(raw_step, dict):
                     continue
                 title = " ".join(str(raw_step.get("title") or "Reasoning").split())
                 kind = str(raw_step.get("kind") or "").lower()
-                detail_lines = [str(item) for item in raw_step.get("lines", [])] \
-                    if isinstance(raw_step.get("lines"), list) else []
-                detail_lines = detail_lines[-REASONING_TAIL:]
+                detail_line_count = len(raw_step.get("lines", [])) \
+                    if isinstance(raw_step.get("lines"), list) else 0
                 try:
-                    detail_count = max(len(detail_lines), int(raw_step.get("total") or 0))
+                    detail_count = max(detail_line_count, int(raw_step.get("total") or 0))
                 except (TypeError, ValueError):
-                    detail_count = len(detail_lines)
+                    detail_count = detail_line_count
                 if kind not in ACTIVITY_KINDS:
                     kind = ("coding" if CODING_STEP.match(title) else
                             "completed" if not THOUGHT_STEP.match(title) and detail_count == 0 else "thought")
-                if kind == "coding":
-                    steps.append({"title": title, "kind": kind, "total": 0, "lines": [], "hidden": True})
-                else:
-                    steps.append({"title": title, "kind": kind, "total": detail_count,
-                                  "lines": detail_lines})
+                steps.append({"title": title, "kind": kind})
             try:
-                block_total = max(len(block_lines), int(raw_block.get("total") or 0))
+                block_total = max(block_line_count, int(raw_block.get("total") or 0))
             except (TypeError, ValueError):
-                block_total = len(block_lines)
+                block_total = block_line_count
             blocks.append({
                 "index": index,
                 "title": " ".join(str(raw_block.get("title") or "Reasoning").split()),
                 "active": raw_block.get("active") is True,
                 "layout": "working" if raw_block.get("layout") == "working" else "section",
                 "total": block_total,
-                "lines": block_lines,
                 "steps": steps,
             })
         answers = []
@@ -155,12 +147,7 @@ def parse_activity_event(line: str):
 
 
 def _section_steps(block):
-    if block.get("steps"):
-        return block["steps"]
-    if block.get("lines"):
-        return [{"title": "Reasoning", "kind": "thought", "lines": block["lines"],
-                 "total": block.get("total", len(block["lines"]))}]
-    return []
+    return block.get("steps") or []
 
 
 def _working_summary(blocks):
@@ -174,7 +161,7 @@ def _working_summary(blocks):
             completed = (details[-1].get("title") if details else block.get("title")) or completed
         if block.get("active"):
             current = (details[-1].get("title") if details else block.get("title")) or current
-    return completed or current or "Reasoning"
+    return current or completed or "Reasoning"
 
 
 def _append_answer(lines, text):
@@ -184,7 +171,7 @@ def _append_answer(lines, text):
 
 
 def format_prompt_status(message: str, tasks, blocks, answers=None) -> str:
-    """Render the same task, activity, and live-answer ordering as the extension."""
+    """Render task and activity names with interim answers, omitting reasoning details."""
     lines, answers = [], answers or []
     by_after = {}
     for answer in answers:
@@ -235,8 +222,6 @@ def format_prompt_status(message: str, tasks, blocks, answers=None) -> str:
             for step in _section_steps(block):
                 kind = step.get("kind")
                 lines.append(f"  {'✓' if kind == 'completed' else '•'} {step.get('title') or 'Reasoning'}")
-                if kind == "thought" and block.get("active"):
-                    lines.extend(f"    {detail}" for detail in step.get("lines", []))
         if index in by_after:
             _append_answer(lines, by_after[index])
     return _limit_status(lines)

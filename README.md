@@ -70,7 +70,7 @@ A bare name uses `GITHUB_OWNER`, or the token's account when it is not set. The 
 
 For every missing repository, the bot creates an empty GitHub repository, copies the contents of `<REPOS_DIR>/eurofish` into the new checkout, excludes every `.git` entry, and pushes the copy as the single `Initial commit`. The reference app must exist and contain files that Git can commit. The next request can ask Copilot to keep the same architecture and stack while turning the copy into a different app.
 
-One job runs at a time. Progress is shown in a single message that is edited as the job advances. It uses the same event model and ordering as the VS Code extension: a compact stage message is shown until Copilot exposes structured output, then the current task and plan, interleaved live answers, and activity sections take its place. Active reasoning details are included, while code-execution content is omitted. Once structured output is visible, repetitive inactivity text stays hidden; the final message contains the commit, change summary, and redeploy result.
+One job runs at a time. Progress is shown in a single message that is edited as the job advances. A compact stage message is shown until Copilot exposes structured output, then the current task and plan, activity or step names, reasoning-duration labels such as `Reasoned for 12s`, and interleaved live answers take its place. Reasoning and code-execution details are omitted. Once structured output is visible, repetitive inactivity text stays hidden; the final message contains the commit, change summary, and redeploy result.
 
 ### What a request does
 
