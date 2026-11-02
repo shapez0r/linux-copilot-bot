@@ -12,8 +12,8 @@ from bot.github_api import GitHubError
 from bot.gitops import Git, GitError
 from bot.roundtrip import Cancelled
 from bot.service import (CONFIRM_DELETE, CREATE_APP, CUSTOM_MODEL, DELETE_APP, DEPLOY_NOTE,
-                         FIX_APP, HELP, KNOWN_MODELS, MAIN_KEYBOARD, NEW_APP_PROMPT, USER_HELP,
-                         USER_KEYBOARD, REGISTER_SERVICES, START_APP, STOP_APP, Bot, Progress)
+                         FIX_APP, HELP, KNOWN_MODELS, LIST_APPS, MAIN_KEYBOARD, NEW_APP_PROMPT,
+                         USER_HELP, USER_KEYBOARD, REGISTER_SERVICES, START_APP, STOP_APP, Bot, Progress)
 from bot.state import ADMIN_OWNER, State, telegram_owner
 
 
@@ -157,13 +157,15 @@ class ServiceTests(unittest.TestCase):
 
     def say(self, text):
         self.bot.handle_text(1, text)
-        if self.bot._worker is not None:
-            self.bot._worker.join(timeout=30)
+        for worker in (self.bot._worker, self.bot._list_worker):
+            if worker is not None:
+                worker.join(timeout=30)
 
     def user_say(self, user_id, text):
         self.bot.handle_text(user_id, text, user_id)
-        if self.bot._worker is not None:
-            self.bot._worker.join(timeout=30)
+        for worker in (self.bot._worker, self.bot._list_worker):
+            if worker is not None:
+                worker.join(timeout=30)
 
     def test_only_authorized_users_in_private_chats_are_served(self):
         def update(sender, chat_type="private"):
@@ -848,6 +850,36 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("port: unavailable — url: unavailable", self.tg.sent[-1])
         self.say("/list extra")
         self.assertEqual(self.tg.sent[-1], "Usage: /list")
+
+    def test_list_button_is_confirmed_before_the_list_is_built_and_sent_once(self):
+        stop = threading.Event()
+        confirmed = threading.Event()
+        offsets = []
+        update = {"update_id": 9, "message": {"from": {"id": 42}, "chat": {"id": 1, "type": "private"},
+                                              "text": LIST_APPS}}
+
+        def get_updates(offset, poll_seconds=30):
+            offsets.append(offset)
+            if len(offsets) == 1:
+                return [update]
+            if offset > update["update_id"]:
+                confirmed.set()
+            stop.set()
+            return [] if offset > update["update_id"] else [update]
+
+        status = self.deployer.status
+        def slow_status(app, repo_dir):
+            self.assertTrue(confirmed.wait(10))
+            return status(app, repo_dir)
+
+        self.deployer.status = slow_status
+        self.tg.get_updates = get_updates
+        stop.wait = lambda delay: None
+        self.bot.run_forever(stop)
+        self.bot._list_worker.join(timeout=30)
+        self.assertEqual(offsets, [0, 10])
+        self.assertEqual(len(self.tg.sent), 1)
+        self.assertTrue(self.tg.sent[0].startswith("Apps:"))
 
     def test_second_job_is_refused_while_one_runs(self):
         release = threading.Event()

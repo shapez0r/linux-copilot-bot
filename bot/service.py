@@ -178,6 +178,7 @@ class Bot:
         self._cancel = threading.Event()
         self._worker = None
         self._job_user_id = None
+        self._list_worker = None
         self._dialogs = {}
 
     # ---- Telegram loop -------------------------------------------------
@@ -853,6 +854,21 @@ class Bot:
         if arg:
             self.say(chat_id, "Usage: /list")
             return
+        # Build the list off the polling thread so Telegram confirms the update before the slow
+        # systemd and Cloudflare lookups; an unconfirmed update can be delivered again.
+        worker = threading.Thread(target=self._send_app_list, args=(chat_id, user_id),
+                                  name="list", daemon=True)
+        self._list_worker = worker
+        worker.start()
+
+    def _send_app_list(self, chat_id: int, user_id=None):
+        try:
+            self._app_list(chat_id, user_id)
+        except Exception as e:
+            log.exception("app list failed")
+            self.say(chat_id, f"\u274c Internal error: {e.__class__.__name__}. See the bot log.")
+
+    def _app_list(self, chat_id: int, user_id=None):
         try:
             apps = self._app_directories()
         except OSError as error:
