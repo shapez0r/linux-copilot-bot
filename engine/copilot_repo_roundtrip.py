@@ -342,13 +342,13 @@ def wait_for_ui(page, ms=UI_SETTLE_MS):
     page.wait_for_timeout(ms)
 
 
-# Capture visible-output signatures, reasoning steps and interleaved answers without code blocks.
+# Capture reasoning steps and interleaved answers without code blocks.
 SCREEN_SCRIPT = r"""
 async (args) => {
   const tail = args.tail, custom = args.selector;
   const titleRe = /^\s*(reasoning|reasoned|thinking|thought|thought for|worked for)\b/i;
   // Match short step-name headers while a section is running.
-  const stepRe = /^[A-Z][a-z]+ing(?:\s+(?:and\s+)?[a-z][a-z-]*){0,3}$/;
+  const stepRe = /^[A-Z][a-z]+ing(?:\s+(?:and\s+)?[A-Za-z][A-Za-z-]*){0,3}$/;
   const doneRe = /^\s*(reasoned|thought|worked)\s+for\b/i;
   // Code-execution sections are represented by their title only.
   const omitRe = /^(coding\b|code execution\b|executing code\b|running code\b)/i;
@@ -402,17 +402,22 @@ async (args) => {
     const r = el.getBoundingClientRect();
     return r.height <= 1 || r.width <= 1;
   };
-  // Stream prose and inline code, but omit code blocks.
-  const codeSel = 'pre, [class*="code-block" i], [class*="codeblock" i], [class*="code_block" i]';
+  // Stream prose and inline code, but omit code blocks, editors and monospace preformatted output.
+  const codeSel = 'pre, [role="code"], [class*="code-block" i], [class*="codeblock" i], [class*="code_block" i], ' +
+    '[class*="monaco" i], [class*="cm-editor" i]';
+  const highlightSel = '[class*="hljs" i], [class*="shiki" i], [class*="prism" i], [class*="language-" i]';
+  const monoRe = /mono|consol|courier|menlo/i;
   const isCode = el => {
     if (!el || el.nodeType !== 1) return false;
     const tag = el.tagName.toUpperCase();
     if (tag === 'PRE') return true;
-    if (tag === 'CODE') {
-      const d = getComputedStyle(el).display;
-      return !d.startsWith('inline') && d !== 'contents';
-    }
-    try { return el.matches(codeSel); } catch (_) { return false; }
+    try { if (el.matches(codeSel)) return true; } catch (_) { /* invalid selector */ }
+    const cs = getComputedStyle(el);
+    const inline = cs.display.startsWith('inline') || cs.display === 'contents';
+    if (tag === 'CODE' || tag === 'SAMP') return !inline || /\n/.test(el.textContent || '');
+    if (inline) return false;
+    try { if (el.matches(highlightSel)) return true; } catch (_) { /* invalid selector */ }
+    return /^(pre|break-spaces)/.test(cs.whiteSpace) && monoRe.test(cs.fontFamily || '');
   };
   // Visible text of an element without its code blocks (and without `exclude`, e.g. a <summary>).
   const proseOf = (el, exclude) => {
@@ -580,8 +585,7 @@ async (args) => {
   };
   const containsCode = h => {
     const panel = h.tagName === 'SUMMARY' ? h.parentElement : contentEl(h);
-    return !!panel && Array.from(panel.querySelectorAll('pre, code, [class*="code-block" i], [class*="codeblock" i], [class*="code_block" i]'))
-      .some(isCode);
+    return !!panel && Array.from(panel.querySelectorAll('*')).some(isCode);
   };
   // Plain labels qualify only when the adjacent panel actually contains working steps.
   heads = heads.filter(h => !plainHeads.has(h) || contentEl(h));
@@ -617,8 +621,9 @@ async (args) => {
   const blocks = heads.map((h, index) => {
     const title = headTitle(h);
     const expanded = expandedState(h);
+    // Leading status glyphs ("\u2713 Reviewing files") do not belong to step titles.
     const raw = expanded === 'false' ? [] : contentFor(h).split(/\r?\n/)
-      .map(l => l.trim()).filter(Boolean).map(l => l.length > lineMax ? l.slice(0, lineMax) + '\u2026' : l);
+      .map(l => l.replace(/^[\s\u2713\u2714\u2705\u2611\u2022\u00b7]+/, '').trim()).filter(Boolean).map(l => l.length > lineMax ? l.slice(0, lineMax) + '\u2026' : l);
     const active = !doneRe.test(title);
     if (!active && expanded === 'true' && h.dataset.roundtripCollapsed !== title) {
       const reads = (Number(h.dataset.roundtripReads) || 0) + 1;
@@ -672,8 +677,29 @@ async (args) => {
       if (el && !norm(textOf(el)).includes(snippet) && !el.querySelector('[data-roundtrip-prior-msg]') &&
           !el.closest('[data-roundtrip-prior-msg]')) region = el;
     }
+    // Without assistant wrappers or headers, read the elements that follow the latest prompt bubble.
+    let anchored = [];
+    if (!found.length && !region && snippet) {
+      const owners = [], start = snippet.slice(0, 30);
+      const texts = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      for (let node = texts.nextNode(); node; node = texts.nextNode()) {
+        const el = node.parentElement;
+        if (el && norm(node.nodeValue).includes(start) && visible(el) &&
+            !el.closest('form, [contenteditable="true"], [data-roundtrip-prior-msg]')) owners.push(el);
+      }
+      for (let el = owners[owners.length - 1], depth = 0; el && el !== document.body && depth < 10;
+           el = el.parentElement, depth++) {
+        const next = [];
+        for (let sib = el.nextElementSibling; sib; sib = sib.nextElementSibling) {
+          if (visible(sib) && textOf(sib) && !sib.matches('form, nav, header, footer, [role="toolbar"]') &&
+              !sib.querySelector('form, textarea, [contenteditable="true"], [data-roundtrip-prior-msg]') &&
+              !sib.closest('[data-roundtrip-prior-msg]')) next.push(sib);
+        }
+        if (next.length) { anchored = next; break; }
+      }
+    }
     // Prior-turn messages are marked before submission; keep every current response fragment.
-    const turnNodes = found;
+    const turnNodes = found.length ? found : anchored;
     // Reasoning headers split the text; the content of expanded sections (their steps) is skipped.
     const breaks = new Map(), skip = new Set();
     heads.forEach((h, i) => {
@@ -703,6 +729,7 @@ async (args) => {
         const keep = pre || /^pre/.test(cs.whiteSpace);
         if (block) cur.text += '\n';
         for (const child of el.childNodes) walk(child, root, keep);
+        if (el.shadowRoot) for (const child of el.shadowRoot.childNodes) walk(child, root, keep);
         if (block) cur.text += '\n';
       };
       for (const root of roots) {
@@ -737,13 +764,40 @@ async (args) => {
     h.dataset.roundtripCollapsed = title;
     try { h.click(); } catch (_) { /* best effort */ }
   }
-  // Signature of on-screen text; elapsed-time counters and animated dots are ignored.
-  const root = document.querySelector('main') || document.body;
-  const text = textOf(root).replace(/\d+(\.\d+)?\s*(ms|s|sec|secs|seconds?|m|min|mins|minutes?)\b/gi, '')
-    .replace(/[.\u2026]+/g, '');
+  return {blocks, answers};
+}
+"""
+
+# Signature of all visible page text, including open shadow roots and same-origin frames. Elapsed-time
+# counters, clock times and animated dots are ignored. It is read separately so that a failing activity
+# parser cannot hide output changes.
+SIGNATURE_SCRIPT = r"""
+() => {
+  const parts = [];
+  const read = doc => {
+    if (!doc || !doc.body) return;
+    parts.push(doc.body.innerText || '');
+    const visit = root => {
+      for (const el of root.querySelectorAll('*')) {
+        if (el.shadowRoot) {
+          for (const child of el.shadowRoot.children) parts.push(child.innerText || child.textContent || '');
+          visit(el.shadowRoot);
+        }
+        if (el.tagName === 'IFRAME') {
+          try { read(el.contentDocument); } catch (_) { /* cross-origin frame */ }
+        }
+      }
+    };
+    visit(doc);
+  };
+  read(document);
+  const text = parts.join('\n')
+    .replace(/\d+(\.\d+)?\s*(ms|s|sec|secs|seconds?|m|min|mins|minutes?|h|hrs?|hours?)\b/gi, '')
+    .replace(/\b\d{1,2}:\d{2}(:\d{2})?\s*(am|pm)?\b/gi, '')
+    .replace(/[.\u2026]+/g, '').replace(/\s+/g, ' ');
   let hash = 5381;
   for (let i = 0; i < text.length; i++) hash = ((hash * 33) ^ text.charCodeAt(i)) >>> 0;
-  return {signature: text.length + ':' + hash, blocks, answers};
+  return text.length + ':' + hash;
 }
 """
 
@@ -797,7 +851,10 @@ async () => {
       !Array.from(el.children).some(child => stateText(child)));
   const tasks = [];
   const seen = new Set();
+  const cards = [];
   for (const statusNode of statusNodes) {
+    // Plan rows labelled "Completed" belong to the card that was already found.
+    if (cards.some(found => found.contains(statusNode))) continue;
     const state = stateText(statusNode);
     let card = null, fallback = null;
     for (let el = statusNode.parentElement, depth = 0; el && depth < 10; el = el.parentElement, depth++) {
@@ -835,8 +892,13 @@ async () => {
     if (collapsed.length) {
       try { collapsed[0].click(); await wait(200); lines = linesOf(card); } catch (_) { /* retry later */ }
     }
-    if (lines.length < 3) {
+    // Widen a compact header to its card, never to the page, the composer or another card.
+    if (lines.length < 3 && !card.querySelector('li, [role="listitem"]')) {
       for (let el = card.parentElement, depth = 0; el && depth < 5; el = el.parentElement, depth++) {
+        if (prior(el) || /^(MAIN|BODY|HTML)$/.test(el.tagName) ||
+            el.matches('form, nav, header, footer, [role="dialog"], [role="menu"]') ||
+            el.querySelector('form, textarea, [contenteditable="true"]') ||
+            cards.some(found => el.contains(found))) break;
         const wider = linesOf(el);
         if (wider.length >= 3 && wider.length <= 30 &&
             norm(el.innerText).toLowerCase().includes(state.toLowerCase())) {
@@ -844,6 +906,8 @@ async () => {
         }
       }
     }
+    if (cards.some(found => found.contains(card) || card.contains(found))) continue;
+    cards.push(card);
     card.setAttribute('data-roundtrip-task-card', '1');
     const steps = planOf(card, title, state, lines);
     tasks.push({title, state, active: /^in progress$/i.test(state), steps});
@@ -885,15 +949,25 @@ def is_prior(node):
         return False
 
 
+def read_signature(page):
+    """Return the visible-output signature, or None when the page cannot be read."""
+    try:
+        signature = page.evaluate(SIGNATURE_SCRIPT)
+        return signature if isinstance(signature, str) else None
+    except Exception:
+        return None
+
+
 def read_screen(page, sel, prompt=""):
-    """Return (signature, reasoning blocks, live answers); failures yield (None, None, None)."""
+    """Return (signature, reasoning blocks, live answers); unreadable parts are None."""
+    signature = read_signature(page)
     try:
         data = page.evaluate(SCREEN_SCRIPT, {"tail": REASONING_TAIL_LINES, "selector": sel.get("reasoning") or "",
                                              "assistant": list(ASSISTANT_SELECTORS), "prompt": prompt,
                                              "maxChars": ANSWER_MAX_CHARS})
-        return data.get("signature"), data.get("blocks") or [], data.get("answers") or []
+        return signature, data.get("blocks") or [], data.get("answers") or []
     except Exception:
-        return None, None, None
+        return signature, None, None
 
 
 def read_task_cards(page):
@@ -1746,7 +1820,7 @@ def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout)
                 reported_url = conversation_url(page.url, args.url) or chat_url
                 emit_chat(reported_url)
             emit_status("waiting", "Waiting for Copilot to generate a downloadable repository...")
-            # Reset the inactivity timeout when visible output or a task card changes.
+            # Reset the inactivity timeout when visible output, a task card or the Stop control changes.
             idle_limit = args.timeout
             started = time.monotonic()
             last_activity = started
@@ -1760,6 +1834,7 @@ def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout)
             last_update = started
             stop_seen = False
             stop_absent_since = None
+            last_running = None
             while downloaded is None:
                 raise_if_quit()
                 now = time.monotonic()
@@ -1778,6 +1853,10 @@ def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout)
                     emit_status("task", task_status_message(tasks) if tasks else "Copilot task card closed.", tasks)
                 now = time.monotonic()
                 running = response_is_running(page, sel)
+                # Copilot starting or finishing a response is visible output.
+                if last_running is not None and running != last_running:
+                    last_activity = now
+                last_running = running
                 if running:
                     stop_seen = True
                     stop_absent_since = None
@@ -1910,7 +1989,8 @@ def main():
     fp.add_argument("--work-dir", default=None, help="Optional parent for automatically deleted temporary round-trip files")
     fp.add_argument("--backup-dir", default=None, help="Deprecated; rollback copies are temporary and automatically deleted")
     fp.add_argument("--timeout", type=int, default=900,
-                    help="Seconds without new on-screen output or a task-card change before giving up (default: 900)")
+                    help="Seconds without new on-screen output, a task-card change or a Stop-control change "
+                         "before giving up (default: 900)")
     fp.add_argument("--model", default="GPT/GPT-6",
                     help="Provider/model pair (default: GPT/GPT-6)")
     fp.add_argument("--show-browser", action="store_true",

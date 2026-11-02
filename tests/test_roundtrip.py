@@ -203,6 +203,18 @@ class RoundTripTests(unittest.TestCase):
         self.assertNotIn("token=secret", rendered)
         self.assertNotIn("no new output", rendered)
 
+    def test_fenced_code_is_removed_from_live_answers(self):
+        line = "ROUNDTRIP_REASONING:" + json.dumps({"blocks": [], "answers": [
+            {"after": 0, "text": "Creating the app.\n```python\nsecret_closed()\n```\nNext step."},
+            {"after": 0, "text": "Running checks.\n~~~\nsecret_streaming()"},
+            {"after": 0, "text": "```\nsecret_only()\n```"},
+        ]})
+        live = parse_live_event(line)
+        self.assertEqual([answer["text"] for answer in live["answers"]],
+                         ["Creating the app.\n\nNext step.", "Running checks."])
+        rendered = format_prompt_status("", [], [], live["answers"], fixed_timeline())
+        self.assertNotIn("secret_", rendered)
+
     def test_reasoning_duration_is_shown_without_its_detail_text(self):
         line = "ROUNDTRIP_REASONING:" + json.dumps({
             "blocks": [{"title": "Reasoned for 12s", "active": False, "layout": "section",

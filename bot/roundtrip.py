@@ -23,6 +23,8 @@ ACTIVITY_KINDS = frozenset({"thought", "completed", "coding"})
 CODING_STEP = re.compile(r"^(coding\b|code execution\b|executing code\b|running code\b)", re.I)
 THOUGHT_STEP = re.compile(r"^\s*(reasoning|reasoned|thinking|thought|thought for)\b", re.I)
 ANSWER_MAX_CHARS = 4000
+# Fenced code (closed, or still streaming at the end of the text) is not progress output.
+CODE_FENCE = re.compile(r"^[ \t]*(```|~~~)[^\n]*\n.*?(?:^[ \t]*\1[ \t]*$|\Z)", re.M | re.S)
 CURRENT_STATUS_MAX_CHARS = 500
 
 
@@ -176,7 +178,7 @@ def parse_live_event(line: str):
         for answer in value.get("answers") if isinstance(value.get("answers"), list) else []:
             if not isinstance(answer, dict) or not isinstance(answer.get("text"), str):
                 continue
-            text = answer["text"].strip()
+            text = _without_code(answer["text"])
             if not text:
                 continue
             if len(text) > ANSWER_MAX_CHARS:
@@ -189,6 +191,11 @@ def parse_live_event(line: str):
         return {"blocks": blocks, "answers": answers}
     except (TypeError, ValueError):
         return None
+
+
+def _without_code(text: str) -> str:
+    text = CODE_FENCE.sub("", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def parse_activity_event(line: str):

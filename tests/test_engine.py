@@ -159,6 +159,18 @@ class CompletionTests(unittest.TestCase):
         self.assertEqual(sum(1 for n in ast.walk(loop) if isinstance(n, ast.Call)
                              and isinstance(n.func, ast.Name) and n.func.id == 'download_candidates'), 1)
 
+    def test_stop_control_changes_reset_the_inactivity_timer(self):
+        tree = ast.parse(SCRIPT.read_text())
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'run_roundtrip')
+        loop = next(n for n in ast.walk(fn) if isinstance(n, ast.While) and ast.unparse(n.test) == 'downloaded is None')
+        source = ast.unparse(loop)
+        self.assertRegex(source, r'if last_running is not None and running != last_running:\n\s+last_activity = now')
+
+    def test_signature_survives_a_failing_activity_parser(self):
+        page = Mock()
+        page.evaluate.side_effect = lambda script, *args: '10:1' if script == rt.SIGNATURE_SCRIPT else 1 / 0
+        self.assertEqual(rt.read_screen(page, rt.selectors_from_env()), ('10:1', None, None))
+
     def test_output_signature_is_initialized_after_submission(self):
         source = SCRIPT.read_text()
         filled = source.index('composer.fill(prompt)')
@@ -376,6 +388,58 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(len(blocks), 1)
         self.assertTrue(blocks[0]['active'])
         self.assertEqual(blocks[0]['steps'][0]['kind'], 'coding')
+
+    def test_signature_reads_text_outside_main_and_in_open_shadow_roots(self):
+        self.page.set_content('''<main><p>Static navigation</p></main><section id="chat"></section>
+          <div id="host"></div><script>host.attachShadow({mode: 'open'}).innerHTML = '<p>Waiting</p>';</script>''')
+        first = rt.read_signature(self.page)
+        self.page.evaluate("document.querySelector('#chat').textContent = 'Copilot reply'")
+        second = rt.read_signature(self.page)
+        self.page.evaluate("host.shadowRoot.querySelector('p').textContent = 'Shadow reply'")
+        third = rt.read_signature(self.page)
+        self.assertEqual(len({first, second, third}), 3)
+
+    def test_signature_ignores_elapsed_counters_and_clock_times(self):
+        self.page.set_content('<main><p id="t">Working for 12s at 23:15</p></main>')
+        first = rt.read_signature(self.page)
+        self.page.evaluate("document.querySelector('#t').textContent = 'Working for 3m 4s at 23:16:05'")
+        self.assertEqual(rt.read_signature(self.page), first)
+
+    def test_unwrapped_response_after_the_prompt_bubble_is_streamed(self):
+        self.page.set_content('''<main><section><div class="turn"><p>Earlier request</p></div>
+            <div class="turn"><div class="bubble">Requested repository change</div></div>
+            <div class="reply"><p>I am creating the app now.</p><div class="code-output">x = 1</div></div>
+            </section><div class="composer"><textarea></textarea></div></main>''')
+        _, blocks, answers = rt.read_screen(self.page, self.sel, 'Requested repository change')
+        self.assertEqual(blocks, [])
+        self.assertEqual([a['after'] for a in answers], [0])
+        self.assertIn('I am creating the app now.', answers[0]['text'])
+        self.assertNotIn('Earlier request', str(answers))
+        self.assertNotIn('Requested repository change', str(answers))
+
+    def test_monospace_highlighted_and_multiline_code_is_not_streamed(self):
+        self.page.set_content('''<main><article data-message-author-role="assistant">
+            <p>Starting.</p>
+            <div style="white-space: pre-wrap; font-family: Consolas, monospace">secret_mono()</div>
+            <div class="hljs language-python">secret_hljs()</div>
+            <code style="display: inline-block">secret_one()
+secret_two()</code>
+            <div role="code">secret_role()</div>
+            <p>Use <code>make run</code> later.</p></article></main>''')
+        _, _, answers = rt.read_screen(self.page, self.sel)
+        text = str(answers)
+        self.assertIn('Starting.', text)
+        self.assertIn('make run', text)
+        self.assertNotIn('secret_', text)
+
+    def test_plan_rows_and_composer_do_not_create_extra_task_cards(self):
+        self.page.set_content('''<main><article data-message-author-role="assistant">
+            <details open><summary><span>Build app</span> <span>In progress</span></summary>
+            <ol><li aria-label="Completed">Inspect files</li><li aria-current="step">Build</li></ol></details>
+            </article><form><span>Done</span><button aria-label="Stop responding">Stop</button></form></main>''')
+        tasks = rt.read_task_cards(self.page)
+        self.assertEqual([task['title'] for task in tasks], ['Build app'])
+        self.assertEqual(self.page.locator('main[data-roundtrip-task-card]').count(), 0)
 
     def test_standalone_coding_details_are_expanded_and_streamed(self):
         self.page.set_content('''<main><article data-message-author-role="assistant">
