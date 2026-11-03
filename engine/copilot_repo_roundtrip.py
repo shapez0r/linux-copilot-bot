@@ -99,6 +99,8 @@ ASSISTANT_SELECTORS = (
     '[data-testid*="assistant-message" i]',
     '[data-testid*="copilot-message" i]',
     '[class*="assistant-message" i]',
+    '[class*="fai-CopilotMessage" i]',
+    '[data-content="ai-message"]',
 )
 
 
@@ -353,14 +355,50 @@ async (args) => {
   // Code-execution sections are represented by their title only.
   const omitRe = /^(coding\b|code execution\b|executing code\b|running code\b)/i;
   const lineMax = 2000;
+  // Like the output signature, read open shadow roots and same-origin frames as well as the page.
+  const parentOf = el => el.parentElement || (el.parentNode && el.parentNode.host) || null;
+  const roots = [];
+  const addRoots = root => {
+    roots.push(root);
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) addRoots(el.shadowRoot);
+      if (el.tagName === 'IFRAME') {
+        try { if (el.contentDocument && el.contentDocument.body) addRoots(el.contentDocument); }
+        catch (_) { /* cross-origin frame */ }
+      }
+    }
+  };
+  addRoots(document);
+  const queryAll = selector => roots.flatMap(root => Array.from(root.querySelectorAll(selector)));
+  const closestDeep = (el, selector) => {
+    for (let e = el; e; e = parentOf(e)) if (e.matches(selector)) return e;
+    return null;
+  };
+  const containsDeep = (a, b) => {
+    for (let e = b; e; e = parentOf(e)) if (e === a) return true;
+    return false;
+  };
+  // Screen order across shadow and frame boundaries; shadow content renders before light children.
+  const ancestry = el => { const list = []; for (let e = el; e; e = parentOf(e)) list.unshift(e); return list; };
+  const screenOrder = (a, b) => {
+    if (a === b) return 0;
+    const pa = ancestry(a), pb = ancestry(b);
+    let i = 0;
+    while (i < pa.length && i < pb.length && pa[i] === pb[i]) i++;
+    if (i === pa.length) return -1;
+    if (i === pb.length) return 1;
+    const x = pa[i], y = pb[i], rx = x.getRootNode(), ry = y.getRootNode();
+    if (rx !== ry) return rx instanceof ShadowRoot && rx.host === pa[i - 1] ? -1 : 1;
+    return x.compareDocumentPosition(y) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+  };
   const visible = el => !!el && el.getClientRects().length > 0;
   const textOf = el => (el && (el.innerText || el.textContent) || '').trim();
   const prior = el => el.hasAttribute('data-roundtrip-prior') ||
-    !!(el.parentElement && el.parentElement.closest('[data-roundtrip-prior-msg]'));
+    !!(parentOf(el) && closestDeep(parentOf(el), '[data-roundtrip-prior-msg]'));
   const inCurrentAssistant = el => (args.assistant || []).some(selector => {
     try {
-      const root = el.closest(selector);
-      return !!root && !root.closest('[data-roundtrip-prior-msg]');
+      const root = closestDeep(el, selector);
+      return !!root && !closestDeep(root, '[data-roundtrip-prior-msg]');
     } catch (_) { return false; }
   });
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -376,7 +414,7 @@ async (args) => {
   // Reveal every row before reading the timeline.
   const expandedMore = new WeakSet();
   while (true) {
-    const more = Array.from(document.querySelectorAll('button, [role="button"]'))
+    const more = queryAll('button, [role="button"]')
       .filter(el => visible(el) && !prior(el) && !expandedMore.has(el) &&
         /^show more$/i.test(textOf(el)) && inWorkingSteps(el));
     if (!more.length) break;
@@ -443,14 +481,16 @@ async (args) => {
     return out.split('\n').map(l => l.replace(/[ \t\u00a0]+/g, ' ').trim()).filter(Boolean).join('\n');
   };
   let customHeads = null;
-  if (custom) { try { customHeads = Array.from(document.querySelectorAll(custom)); } catch (_) { customHeads = null; } }
-  let heads = customHeads || Array.from(document.querySelectorAll('button, [role="button"], summary, [aria-expanded]'));
+  if (custom) { try { customHeads = queryAll(custom); } catch (_) { customHeads = null; } }
+  let heads = customHeads || queryAll('button, [role="button"], summary, [aria-expanded]');
   // Some responses expose a plain duration header above coding cards, without a task plan.
   const plainHeads = new Set();
   if (!customHeads) {
     const labelRe = /^(?:reasoning|thinking|(?:reasoned|thought|worked) for (?:\d+(?:\.\d+)?\s*(?:ms|s|m|h)\s*)+)$/i;
     for (const selector of args.assistant || []) {
-      for (const root of document.querySelectorAll(selector)) {
+      let assistantRoots = [];
+      try { assistantRoots = queryAll(selector); } catch (_) { /* invalid selector */ }
+      for (const root of assistantRoots) {
         for (const el of root.querySelectorAll('span, p, div, h2, h3')) {
           if (!visible(el) || prior(el) || !labelRe.test(textOf(el)) ||
               el.closest('button, [role="button"], summary, pre, code') ||
@@ -460,9 +500,8 @@ async (args) => {
         }
       }
     }
-    heads = Array.from(new Set([...heads, ...plainHeads])).sort((a, b) =>
-      a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
   }
+  heads = Array.from(new Set([...heads, ...plainHeads])).sort(screenOrder);
   const headTitle = h => textOf(h).split('\n')[0].replace(/[\s>\u203a\u00bb\u2304\u2335\u02c5\u25be\u25b8]+$/, '').trim();
   const chrome = 'form, nav, header, footer, [role="toolbar"], [role="menu"], [role="menubar"], [role="dialog"], [role="tablist"]';
   heads = heads.filter(h => {
@@ -479,7 +518,7 @@ async (args) => {
       (inWorkingSteps(h) || inCurrentAssistant(h));
   });
   // Keep the outermost header when several nested elements match the same title.
-  heads = heads.filter(h => !heads.some(o => o !== h && o.contains(h)));
+  heads = heads.filter(h => !heads.some(o => o !== h && containsDeep(o, h)));
   // Nested step toggles belong to their enclosing section.
   const depth = el => { let d = 0; for (let e = el; e; e = e.parentElement) d++; return d; };
   const nestedIn = (h, o) => {
@@ -589,83 +628,87 @@ async (args) => {
   };
   // Plain labels qualify only when the adjacent panel actually contains working steps.
   heads = heads.filter(h => !plainHeads.has(h) || contentEl(h));
-  markOutside();
-  await verifySections();
-  // Expand step panels before reading them; code blocks remain excluded from streamed output.
-  for (const h of heads) {
-    const title = headTitle(h);
-    if (expandedState(h) === 'false' && h.dataset.roundtripExpanded !== title) {
-      try {
-        h.click();
-        if (await waitFor(() => expandedState(h) === 'true', 600)) h.dataset.roundtripExpanded = title;
-      } catch (_) { /* retry on a later snapshot */ }
-    }
-    if (expandedState(h) === 'false') continue;
-    // A newly opened unlinked finished panel still needs ownership verification.
-    await verifySections();
-    const panel = h.tagName === 'SUMMARY' ? h.parentElement : contentEl(h);
-    if (!panel) continue;
-    const toggles = Array.from(panel.querySelectorAll('button, [role="button"], summary, [aria-expanded]'));
-    for (const step of toggles) {
-      if (step === h || step.contains(h) || !visible(step)) continue;
-      if (expandedState(step) !== 'false') continue;
-      // Only short step headings qualify, not arbitrary controls inside a panel.
-      const name = headTitle(step);
-      if (!(stepRe.test(name) || titleRe.test(name) && name.length <= 40 && !/[.,:;!?]/.test(name))) continue;
-      try { step.click(); await waitFor(() => expandedState(step) === 'true', 600); }
-      catch (_) { /* retry on a later snapshot */ }
-    }
-  }
-  // Collapse finished sections after reading so interim answers remain visible.
+  // A failure while reading activity sections must not hide the live answers below.
   const collapseAfterRead = [];
-  const blocks = heads.map((h, index) => {
-    const title = headTitle(h);
-    const expanded = expandedState(h);
-    // Leading status glyphs ("\u2713 Reviewing files") do not belong to step titles.
-    const raw = expanded === 'false' ? [] : contentFor(h).split(/\r?\n/)
-      .map(l => l.replace(/^[\s\u2713\u2714\u2705\u2611\u2022\u00b7]+/, '').trim()).filter(Boolean).map(l => l.length > lineMax ? l.slice(0, lineMax) + '\u2026' : l);
-    const active = !doneRe.test(title);
-    if (!active && expanded === 'true' && h.dataset.roundtripCollapsed !== title) {
-      const reads = (Number(h.dataset.roundtripReads) || 0) + 1;
-      h.dataset.roundtripReads = String(reads);
-      // Steps already streamed are kept by the script (merge_live) while the section is collapsed.
-      if (raw.length || reads >= 3) collapseAfterRead.push([h, title]);
-    }
-    // Split the section into steps at step-title lines ("Reasoning", "Creating file", ...).
-    const steps = [];
-    let step = null;
-    for (const line of raw) {
-      if (stepRe.test(line) || titleRe.test(line) && line.length <= 40 && !/[.,:;!?]/.test(line)) {
-        step = {title: line, lines: []}; steps.push(step); continue;
+  let blocks = [];
+  try {
+    markOutside();
+    await verifySections();
+    // Expand step panels before reading them; code blocks remain excluded from streamed output.
+    for (const h of heads) {
+      const title = headTitle(h);
+      if (expandedState(h) === 'false' && h.dataset.roundtripExpanded !== title) {
+        try {
+          h.click();
+          if (await waitFor(() => expandedState(h) === 'true', 600)) h.dataset.roundtripExpanded = title;
+        } catch (_) { /* retry on a later snapshot */ }
       }
-      if (!step) { step = {title: active && !titleRe.test(title) ? title : 'Reasoning', lines: []}; steps.push(step); }
-      step.lines.push(line);
+      if (expandedState(h) === 'false') continue;
+      // A newly opened unlinked finished panel still needs ownership verification.
+      await verifySections();
+      const panel = h.tagName === 'SUMMARY' ? h.parentElement : contentEl(h);
+      if (!panel) continue;
+      const toggles = Array.from(panel.querySelectorAll('button, [role="button"], summary, [aria-expanded]'));
+      for (const step of toggles) {
+        if (step === h || step.contains(h) || !visible(step)) continue;
+        if (expandedState(step) !== 'false') continue;
+        // Only short step headings qualify, not arbitrary controls inside a panel.
+        const name = headTitle(step);
+        if (!(stepRe.test(name) || titleRe.test(name) && name.length <= 40 && !/[.,:;!?]/.test(name))) continue;
+        try { step.click(); await waitFor(() => expandedState(step) === 'true', 600); }
+        catch (_) { /* retry on a later snapshot */ }
+      }
     }
-    // Keep completed titled rows distinct from expandable thought details.
-    const kept = steps.map(s => {
-      if (omitRe.test(s.title)) return {title: s.title, kind: 'coding', total: 0, lines: []};
-      const kind = titleRe.test(s.title) || s.lines.length ? 'thought' : 'completed';
-      return {title: s.title, kind, total: s.lines.length, lines: s.lines.slice(-tail)};
+    // Collapse finished sections after reading so interim answers remain visible.
+    blocks = heads.map((h, index) => {
+      const title = headTitle(h);
+      const expanded = expandedState(h);
+      // Leading status glyphs ("\u2713 Reviewing files") do not belong to step titles.
+      const raw = expanded === 'false' ? [] : contentFor(h).split(/\r?\n/)
+        .map(l => l.replace(/^[\s\u2713\u2714\u2705\u2611\u2022\u00b7]+/, '').trim()).filter(Boolean).map(l => l.length > lineMax ? l.slice(0, lineMax) + '\u2026' : l);
+      const active = !doneRe.test(title);
+      if (!active && expanded === 'true' && h.dataset.roundtripCollapsed !== title) {
+        const reads = (Number(h.dataset.roundtripReads) || 0) + 1;
+        h.dataset.roundtripReads = String(reads);
+        // Steps already streamed are kept by the script (merge_live) while the section is collapsed.
+        if (raw.length || reads >= 3) collapseAfterRead.push([h, title]);
+      }
+      // Split the section into steps at step-title lines ("Reasoning", "Creating file", ...).
+      const steps = [];
+      let step = null;
+      for (const line of raw) {
+        if (stepRe.test(line) || titleRe.test(line) && line.length <= 40 && !/[.,:;!?]/.test(line)) {
+          step = {title: line, lines: []}; steps.push(step); continue;
+        }
+        if (!step) { step = {title: active && !titleRe.test(title) ? title : 'Reasoning', lines: []}; steps.push(step); }
+        step.lines.push(line);
+      }
+      // Keep completed titled rows distinct from expandable thought details.
+      const kept = steps.map(s => {
+        if (omitRe.test(s.title)) return {title: s.title, kind: 'coding', total: 0, lines: []};
+        const kind = titleRe.test(s.title) || s.lines.length ? 'thought' : 'completed';
+        return {title: s.title, kind, total: s.lines.length, lines: s.lines.slice(-tail)};
+      });
+      if (containsCode(h) && !kept.some(s => s.kind === 'coding'))
+        kept.push({title: 'Coding and executing', kind: 'coding', total: 0, lines: []});
+      const lines = [];
+      for (const s of steps) if (!omitRe.test(s.title)) lines.push(...s.lines);
+      return {index, title, active, layout: inWorkingSteps(h) ? 'working' : 'section',
+        total: lines.length, lines: lines.slice(-tail), steps: kept};
     });
-    if (containsCode(h) && !kept.some(s => s.kind === 'coding'))
-      kept.push({title: 'Coding and executing', kind: 'coding', total: 0, lines: []});
-    const lines = [];
-    for (const s of steps) if (!omitRe.test(s.title)) lines.push(...s.lines);
-    return {index, title, active, layout: inWorkingSteps(h) ? 'working' : 'section',
-      total: lines.length, lines: lines.slice(-tail), steps: kept};
-  });
-  // Collect current-turn answers from assistant messages or the enclosing turn, using the richer layout.
+  } catch (_) { blocks = []; }
+  // Collect current-turn answers from assistant messages or the enclosing turn, using the richer layout,
+  // and from the content after the prompt bubble when neither has readable text.
   const answers = [];
   try {
     const norm = s => String(s || '').replace(/\s+/g, ' ').trim();
-    const outermost = list => list.filter(n => !list.some(o => o !== n && o.contains(n)));
+    const outermost = list => list.filter(n => !list.some(o => o !== n && containsDeep(o, n)));
     let found = [];
     for (const s of args.assistant || []) {
-      try { found.push(...Array.from(document.querySelectorAll(s))); } catch (_) { /* invalid selector */ }
+      try { found.push(...queryAll(s)); } catch (_) { /* invalid selector */ }
     }
     found = outermost(Array.from(new Set(found)).filter(n => visible(n) && textOf(n) &&
-      !n.closest('[data-roundtrip-prior-msg]')))
-      .sort((a, b) => a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
+      !closestDeep(n, '[data-roundtrip-prior-msg]'))).sort(screenOrder);
     // The current turn: the outermost ancestor of the latest reasoning header that excludes the user's prompt.
     const snippet = norm(args.prompt).slice(0, 60);
     let region = null;
@@ -677,29 +720,46 @@ async (args) => {
       if (el && !norm(textOf(el)).includes(snippet) && !el.querySelector('[data-roundtrip-prior-msg]') &&
           !el.closest('[data-roundtrip-prior-msg]')) region = el;
     }
-    // Without assistant wrappers or headers, read the elements that follow the latest prompt bubble.
-    let anchored = [];
-    if (!found.length && !region && snippet) {
+    // Otherwise read the elements that follow the latest prompt bubble on screen.
+    const anchoredNodes = () => {
       const owners = [], start = snippet.slice(0, 30);
-      const texts = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-      for (let node = texts.nextNode(); node; node = texts.nextNode()) {
-        const el = node.parentElement;
-        if (el && norm(node.nodeValue).includes(start) && visible(el) &&
-            !el.closest('form, [contenteditable="true"], [data-roundtrip-prior-msg]')) owners.push(el);
-      }
-      for (let el = owners[owners.length - 1], depth = 0; el && el !== document.body && depth < 10;
-           el = el.parentElement, depth++) {
-        const next = [];
-        for (let sib = el.nextElementSibling; sib; sib = sib.nextElementSibling) {
-          if (visible(sib) && textOf(sib) && !sib.matches('form, nav, header, footer, [role="toolbar"]') &&
-              !sib.querySelector('form, textarea, [contenteditable="true"], [data-roundtrip-prior-msg]') &&
-              !sib.closest('[data-roundtrip-prior-msg]')) next.push(sib);
+      const usable = el => visible(el) && !closestDeep(el, 'form, [contenteditable="true"], [data-roundtrip-prior-msg]');
+      for (const root of roots) {
+        const texts = (root.ownerDocument || root).createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        for (let node = texts.nextNode(); node; node = texts.nextNode()) {
+          const el = parentOf(node);
+          if (el && norm(node.nodeValue).includes(start) && usable(el)) owners.push(el);
         }
-        if (next.length) { anchored = next; break; }
       }
-    }
-    // Prior-turn messages are marked before submission; keep every current response fragment.
-    const turnNodes = found.length ? found : anchored;
+      // The prompt can be split across inline elements; use the innermost element holding its start.
+      if (!owners.length) {
+        for (const el of queryAll('*')) {
+          if (/^(SCRIPT|STYLE|TEXTAREA|BODY|HTML)$/.test(el.tagName) || !norm(el.textContent).includes(start)) continue;
+          if (Array.from(el.children).some(child => norm(child.textContent).includes(start))) continue;
+          if (usable(el)) owners.push(el);
+        }
+      }
+      owners.sort(screenOrder);
+      const composer = 'form, textarea, [contenteditable="true"]';
+      // A sibling that also holds the composer contributes only the content placed above the composer.
+      const add = (el, out) => {
+        if (el.matches(composer)) return false;
+        if (el.querySelector(composer)) {
+          for (const child of el.children) if (add(child, out) === false) return false;
+          return false;
+        }
+        if (visible(el) && textOf(el) && !el.matches('form, nav, header, footer, [role="toolbar"]') &&
+            !closestDeep(el, '[data-roundtrip-prior-msg]') && !el.querySelector('[data-roundtrip-prior-msg]')) out.push(el);
+        return true;
+      };
+      for (let el = owners[owners.length - 1], depth = 0; el && el.tagName !== 'BODY' && depth < 12;
+           el = parentOf(el), depth++) {
+        const next = [];
+        for (let sib = el.nextElementSibling; sib && add(sib, next) !== false; sib = sib.nextElementSibling);
+        if (next.length) return next;
+      }
+      return [];
+    };
     // Reasoning headers split the text; the content of expanded sections (their steps) is skipped.
     const breaks = new Map(), skip = new Set();
     heads.forEach((h, i) => {
@@ -711,7 +771,7 @@ async (args) => {
       }
     });
     const ignored = /^(SCRIPT|STYLE|NOSCRIPT|SVG|BUTTON|TEXTAREA|INPUT|SELECT|TEMPLATE|IFRAME|CANVAS)$/;
-    const collect = roots => {
+    const collect = nodes => {
       const segments = [];
       let cur = null;
       const walk = (node, root, pre) => {
@@ -732,10 +792,9 @@ async (args) => {
         if (el.shadowRoot) for (const child of el.shadowRoot.childNodes) walk(child, root, keep);
         if (block) cur.text += '\n';
       };
-      for (const root of roots) {
+      for (const root of nodes) {
         // Text of this root starts after every reasoning header that precedes it on screen.
-        const before = heads.filter(h => !root.contains(h) &&
-          (h.compareDocumentPosition(root) & Node.DOCUMENT_POSITION_FOLLOWING)).length;
+        const before = heads.filter(h => !containsDeep(root, h) && screenOrder(h, root) < 0).length;
         cur = {after: before, text: ''};
         walk(root, root, false);
         segments.push(cur);
@@ -754,11 +813,17 @@ async (args) => {
       }
       return out;
     };
-    const fromMessages = turnNodes.length ? collect(turnNodes) : [];
+    const fromMessages = found.length ? collect(found) : [];
     const fromRegion = region ? collect([region]) : [];
     // Equal segment counts can still omit interim prose outside assistant-message wrappers.
     const textSize = segments => segments.reduce((size, segment) => size + norm(segment.text).length, 0);
-    answers.push(...(textSize(fromRegion) > textSize(fromMessages) ? fromRegion : fromMessages));
+    let best = textSize(fromRegion) > textSize(fromMessages) ? fromRegion : fromMessages;
+    // Assistant wrappers or a region without readable text do not rule out the prompt-anchored layout.
+    if (!textSize(best) && snippet) {
+      const anchored = anchoredNodes();
+      if (anchored.length) best = collect(anchored);
+    }
+    answers.push(...best);
   } catch (_) { /* live answers are best effort */ }
   for (const [h, title] of collapseAfterRead) {
     h.dataset.roundtripCollapsed = title;
@@ -808,8 +873,12 @@ async () => {
   const visible = el => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
   const norm = value => String(value || '').replace(/\s+/g, ' ').trim();
   const stateRe = /^(in progress|completed?|done|failed|cancell?ed|task stopped|stopped)$/i;
-  const prior = el => el.hasAttribute('data-roundtrip-prior') ||
-    !!el.closest('[data-roundtrip-prior-msg]');
+  const parentOf = el => el.parentElement || (el.parentNode && el.parentNode.host) || null;
+  const prior = el => {
+    if (el.hasAttribute('data-roundtrip-prior')) return true;
+    for (let e = el; e; e = parentOf(e)) if (e.hasAttribute('data-roundtrip-prior-msg')) return true;
+    return false;
+  };
   const linesOf = el => String(el && el.innerText || '').split(/\r?\n/).map(norm).filter(Boolean);
   const stateText = el => [el && el.innerText, el && el.textContent, el && el.getAttribute('aria-label'),
     el && el.getAttribute('title'), el && el.getAttribute('data-state'), el && el.getAttribute('data-status')]
@@ -846,7 +915,21 @@ async () => {
       /^in progress$/i.test(state) ? index < inferredActive ? 'completed' : index === inferredActive ? 'active' : 'pending' :
       /^(completed?|done)$/i.test(state) ? 'completed' : 'pending'}));
   };
-  const statusNodes = Array.from(document.querySelectorAll('span, p, div, button, [role="status"], [role="button"], [aria-label], [data-state], [data-status]'))
+  // Open shadow roots and same-origin frames are searched as well, like the output signature.
+  const roots = [];
+  const addRoots = root => {
+    roots.push(root);
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) addRoots(el.shadowRoot);
+      if (el.tagName === 'IFRAME') {
+        try { if (el.contentDocument && el.contentDocument.body) addRoots(el.contentDocument); }
+        catch (_) { /* cross-origin frame */ }
+      }
+    }
+  };
+  addRoots(document);
+  const statusNodes = roots.flatMap(root => Array.from(root.querySelectorAll(
+    'span, p, div, button, [role="status"], [role="button"], [aria-label], [data-state], [data-status]')))
     .filter(el => visible(el) && !prior(el) && stateText(el) &&
       !Array.from(el.children).some(child => stateText(child)));
   const tasks = [];
@@ -917,16 +1000,31 @@ async () => {
 """
 
 
-# Mark existing output so saved-chat follow-ups read only the new response.
+# Mark existing output, including open shadow roots and same-origin frames, so saved-chat follow-ups
+# read only the new response.
 MARK_PRIOR_SCRIPT = r"""
 (args) => {
+  const roots = [];
+  const addRoots = root => {
+    roots.push(root);
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) addRoots(el.shadowRoot);
+      if (el.tagName === 'IFRAME') {
+        try { if (el.contentDocument && el.contentDocument.body) addRoots(el.contentDocument); }
+        catch (_) { /* cross-origin frame */ }
+      }
+    }
+  };
+  addRoots(document);
   let n = 0;
-  for (const s of args.messages) {
-    try { document.querySelectorAll(s).forEach(el => { el.setAttribute('data-roundtrip-prior-msg', '1'); n++; }); }
-    catch (_) { /* invalid selector */ }
+  for (const root of roots) {
+    for (const s of args.messages) {
+      try { root.querySelectorAll(s).forEach(el => { el.setAttribute('data-roundtrip-prior-msg', '1'); n++; }); }
+      catch (_) { /* invalid selector */ }
+    }
+    root.querySelectorAll('button, a, [role="button"], summary, [aria-expanded]')
+      .forEach(el => el.setAttribute('data-roundtrip-prior', '1'));
   }
-  document.querySelectorAll('button, a, [role="button"], summary, [aria-expanded]')
-    .forEach(el => el.setAttribute('data-roundtrip-prior', '1'));
   return n;
 }
 """

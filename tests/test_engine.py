@@ -417,6 +417,45 @@ class BrowserTests(unittest.TestCase):
         self.assertNotIn('Earlier request', str(answers))
         self.assertNotIn('Requested repository change', str(answers))
 
+    def test_response_in_open_shadow_roots_is_streamed(self):
+        self.page.set_content('''<main><p>Requested repository change</p><chat-turn id="turn"></chat-turn></main>
+          <script>turn.attachShadow({mode: 'open'}).innerHTML =
+            '<div data-message-author-role="assistant"><p>Checking the repository.</p>' +
+            '<details open><summary>Reasoning</summary><p>Comparing files.</p></details>' +
+            '<p>Found the cause.</p></div>';</script>''')
+        _, blocks, answers = rt.read_screen(self.page, self.sel, 'Requested repository change')
+        self.assertEqual([b['title'] for b in blocks], ['Reasoning'])
+        self.assertEqual(blocks[0]['lines'], ['Comparing files.'])
+        self.assertEqual(answers, [{'after': 0, 'text': 'Checking the repository.'},
+                                   {'after': 1, 'text': 'Found the cause.'}])
+
+    def test_task_card_in_open_shadow_root_is_reported(self):
+        self.page.set_content('''<main><task-host id="host"></task-host></main>
+          <script>host.attachShadow({mode: 'open'}).innerHTML =
+            '<details open><summary><span>Build app</span> <span>In progress</span></summary>' +
+            '<ol><li aria-label="Completed">Inspect files</li><li aria-current="step">Build</li></ol></details>';
+          </script>''')
+        tasks = rt.read_task_cards(self.page)
+        self.assertEqual([(t['title'], [s['state'] for s in t['steps']]) for t in tasks],
+                         [('Build app', ['completed', 'active'])])
+
+    def test_empty_assistant_wrapper_falls_back_to_text_after_the_prompt(self):
+        self.page.set_content('''<main><section>
+            <div class="turn"><div class="bubble">Requested repository change</div></div>
+            <div class="reply"><div data-testid="copilot-message-avatar"><button>Copilot</button></div>
+              <p>I am creating the app now.</p></div>
+            </section></main>''')
+        _, _, answers = rt.read_screen(self.page, self.sel, 'Requested repository change')
+        self.assertEqual(answers, [{'after': 0, 'text': 'I am creating the app now.'}])
+
+    def test_response_sharing_a_container_with_the_composer_is_streamed(self):
+        self.page.set_content('''<main><div class="bubble"><span>Requested </span><b>repository</b>
+            <span> change</span></div>
+            <div class="bottom"><div class="reply"><p>Working on the change.</p></div>
+              <div class="composer"><textarea></textarea><p>Copilot uses AI.</p></div></div></main>''')
+        _, _, answers = rt.read_screen(self.page, self.sel, 'Requested repository change')
+        self.assertEqual(answers, [{'after': 0, 'text': 'Working on the change.'}])
+
     def test_monospace_highlighted_and_multiline_code_is_not_streamed(self):
         self.page.set_content('''<main><article data-message-author-role="assistant">
             <p>Starting.</p>
