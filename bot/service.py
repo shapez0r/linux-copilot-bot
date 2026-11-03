@@ -1,6 +1,7 @@
 """Authorized-user commands and the repository request pipeline."""
 from __future__ import annotations
 
+import html
 import logging
 import re
 import shutil
@@ -124,7 +125,7 @@ USER_HELP = """Use the buttons below to create and list apps, and to fix, start,
 /new [public|private] [model=<provider/model>] [template=<app>] name="<name|owner/name>" prompt="<request>" - create, build, deploy and publish a new app
 /fix <repo> <request> - fix an app you created
 /fix [browser|nobrowser] [tempchat|notempchat] <request> - fix your active app
-/list - list every local app with systemd status and public URL
+/list - list every local app with its status and public URL
 /app start|stop <name> - start or stop one of your app services
 /cancel - stop your own running job
 /help - show this message"""
@@ -140,7 +141,7 @@ _BOT_ERRORS = (RepoError, GitError, GitHubError, RoundTripError, CloudflareError
 
 
 class Progress:
-    """One Telegram message that is edited as a job advances, throttled to respect rate limits."""
+    """One Telegram HTML message that is edited as a job advances, throttled to respect rate limits."""
 
     MIN_INTERVAL = 3.0
 
@@ -161,9 +162,9 @@ class Progress:
             return
         try:
             if self._id is None:
-                self._id = self._tg.send_message(self._chat, self._pending)
+                self._id = self._tg.send_message(self._chat, self._pending, parse_mode="HTML")
             else:
-                self._tg.edit_message(self._chat, self._id, self._pending)
+                self._tg.edit_message(self._chat, self._id, self._pending, parse_mode="HTML")
             self._shown, self._last = self._pending, time.monotonic()
         except TelegramError as e:
             log.warning("progress update failed: %s", e)
@@ -844,23 +845,34 @@ class Bot:
         if not self._valid_route(name):
             self.say(chat_id, "App names must be lowercase DNS labels containing only letters, digits and hyphens.")
             return
+        admin = self._is_admin(user_id)
         folder = self.cfg.repos_dir / name
         if not folder.is_dir() or self.deployer.is_bot_repo(folder):
-            self.say(chat_id, f"App folder not found: {folder}")
+            self.say(chat_id, f"App folder not found: {folder}" if admin else f"App not found: {name}")
             return
         if not self._can_manage_app(user_id, name):
             self.say(chat_id, "You can only start or stop apps you created.")
             return
 
+        # Regular users see the app name and URL instead of systemd service details.
         def control():
             if action == "start":
                 result = self.deployer.start(name, folder)
-                self.say(chat_id, ("✅ " if result.ok else "⚠️ ") + result.message)
+                if admin:
+                    message = result.message
+                elif result.ok:
+                    message = f"{name} is running: {self._app_url(name)}"
+                else:
+                    message = f"{name} could not be started. Ask an admin to check it."
+                self.say(chat_id, ("✅ " if result.ok else "⚠️ ") + message)
             else:
                 stopped = self.deployer.stop(name, folder)
-                message = (f"Systemd service {self.deployer.service_name(name)} is stopped."
-                           if stopped else f"Systemd service {self.deployer.service_name(name)} was already stopped "
-                                           "or is not registered.")
+                if admin:
+                    message = (f"Systemd service {self.deployer.service_name(name)} is stopped."
+                               if stopped else f"Systemd service {self.deployer.service_name(name)} was already "
+                                               "stopped or is not registered.")
+                else:
+                    message = f"{name} is stopped." if stopped else f"{name} was already stopped."
                 self.say(chat_id, "✅ " + message)
 
         self._spawn(chat_id, control, user_id=user_id)
@@ -941,7 +953,7 @@ class Bot:
             try:
                 status = self.deployer.status(name, folder)
             except DeployError as error:
-                status = f"unavailable ({error})"
+                status = f"unavailable ({error})" if self._is_admin(user_id) else "unavailable"
             route = routes.get(name.lower())
             if route:
                 port = route["service"].rsplit(":", 1)[-1].rstrip("/")
@@ -953,7 +965,7 @@ class Bot:
                     f"- name: {name} — status: {status} — folder: {folder} — port: {port} — url: {url}"
                 )
             else:
-                lines.append(f"- name: {name} — status: {status} — url: {url}")
+                lines.append(f"- name: {name} — status: {self._public_status(status)} — url: {url}")
         self.say(chat_id, "\n".join(lines))
 
     def cmd_cancel(self, chat_id: int, user_id=None):
@@ -1165,7 +1177,7 @@ class Bot:
             except Cancelled:
                 self.say(chat_id, "Cancelled.")
             except _BOT_ERRORS as e:
-                self.say(chat_id, f"\u274c {e}")
+                self.say(chat_id, f"\u274c {e if self._is_admin(user_id) else self._user_error(e)}")
             except Exception as e:
                 log.exception("job failed")
                 self.say(chat_id, f"\u274c Internal error: {e.__class__.__name__}. See the bot log.")
@@ -1182,12 +1194,34 @@ class Bot:
         self._worker.start()
         return True
 
+    def _user_error(self, error) -> str:
+        """Describe a job failure to a regular user without service, tunnel or server-path details."""
+        if isinstance(error, DeployError):
+            return "The app service could not be managed. Ask an admin to check it."
+        if isinstance(error, CloudflareError):
+            return "The app address could not be configured. Ask an admin to check it."
+        text = str(error)
+        for folder in (str(self.cfg.repos_dir), str(self.cfg.state_dir)):
+            text = text.replace(folder + "/", "").replace(folder, "the server")
+        return text
+
+    def _app_url(self, name: str) -> str:
+        return f"https://{name}.{self.cfg.cloudflare_domain}"
+
+    @staticmethod
+    def _public_status(status: str) -> str:
+        """Return an app status without its process id."""
+        return re.sub(r"\s*\(pid \d+\)", "", status)
+
     def _owner_default(self) -> str:
         return self.cfg.github_owner or self.gh.login
 
     def _prepare(self, owner: str, name: str, progress: Progress, new_only: bool = False, private: bool = True,
-                 template_name: str = NEW_REPO_TEMPLATE, managed_owner: str = ""):
-        """Create a repository from a local app template, or update an existing checkout."""
+                 template_name: str = NEW_REPO_TEMPLATE, managed_owner: str = "", admin: bool = True):
+        """Create a repository from a local app template, or update an existing checkout.
+
+        Progress for regular users names the template and repository instead of server paths.
+        """
         progress.update(f"Looking up {owner}/{name} on GitHub...")
         repo = self.gh.get_repo(owner, name)
         if new_only and repo is not None:
@@ -1202,11 +1236,12 @@ class Bot:
         dest = local_path(self.cfg.repos_dir, name)
         if created:
             template = self.cfg.repos_dir / template_name
-            progress.update(f"Copying {template} into the new repository...")
+            progress.update(f"Copying {template if admin else 'the ' + template_name + ' template'} "
+                            "into the new repository...")
             branch = self.git.seed_from_template(repo["clone_url"], dest, template,
                                                  repo.get("default_branch") or "main")
             return dest, branch, f"created from {template_name}"
-        progress.update(f"Preparing {dest}...")
+        progress.update(f"Preparing {dest if admin else owner + '/' + name}...")
         cloned = self.git.ensure_clone(repo["clone_url"], dest, owner, name)
         branch = self.git.sync(dest)
         return dest, branch, "cloned" if cloned else "already cloned"
@@ -1236,27 +1271,28 @@ class Bot:
         progress = Progress(self.tg, chat_id, self.cfg)
         if not (self.cfg.repos_dir / template).is_dir():
             raise RepoError(f"Template app is not available locally: {template}")
-        creator = ADMIN_OWNER if self._is_admin(user_id) else telegram_owner(user_id)
+        admin = self._is_admin(user_id)
+        creator = ADMIN_OWNER if admin else telegram_owner(user_id)
         dest, _, _ = self._prepare(owner, name, progress, new_only=True, private=private,
-                                   template_name=template, managed_owner=creator)
-        self.state.set_active_repo(user_id, full, self._is_admin(user_id))
+                                   template_name=template, managed_owner=creator, admin=admin)
+        self.state.set_active_repo(user_id, full, admin)
         self.state.save()
         routes = CloudflareRoutes(self.cfg)
-        progress.update(f"{full}: checking tunnel routes for the next port...")
+        progress.update(f"{full}: checking tunnel routes for the next port..." if admin
+                        else f"{full}: preparing the app address...")
         port = routes.next_port()
         prompt = NEW_APP_PROMPT.format(port=port) + request + DEPLOY_NOTE
         if self._cancel.is_set():
             raise Cancelled()
-        progress.update(f"{full}: sending the repository to Copilot for port {port}...")
+        progress.update(f"{full}: sending the repository to Copilot for port {port}..." if admin
+                        else f"{full}: sending the repository to Copilot...")
         try:
             result = self.roundtrip.run(
                 dest, prompt, model or self.state.model,
                 lambda stage, msg: progress.update(self._repo_progress(full, msg), stage), self._cancel)
         except Cancelled:
             progress.flush()
-            if self.git.is_dirty(dest):
-                self.say(chat_id, "\u26a0\ufe0f The checkout has uncommitted changes from the interrupted run; "
-                                  f"review {dest} before the next request.")
+            self._warn_dirty(chat_id, dest, full, admin)
             raise
         progress.update(f"{full}: committing and pushing...")
         pushed = self.git.commit_and_push(dest, request)
@@ -1267,25 +1303,30 @@ class Bot:
                               f"Copilot output:\n{output}")
             return
         sha, pushed_branch = pushed
-        progress.update(f"{full}: registering and restarting its systemd service on port {port}...")
+        progress.update(f"{full}: registering and restarting its systemd service on port {port}..." if admin
+                        else f"{full}: starting the app...")
         deploy = self.deployer.redeploy(name, dest)
         if not deploy.ok:
             progress.flush()
+            error = ("The app was not routed because deployment failed." if admin
+                     else "The app could not be started. Ask an admin to check it.")
             self.say(chat_id, self._new_app_report(full, sha, pushed_branch, result, deploy.message,
-                                                   error="The app was not routed because deployment failed."))
+                                                   error=error, admin=admin))
             return
-        progress.update(f"{full}: creating https://{name}.{self.cfg.cloudflare_domain}...")
+        url = self._app_url(name)
+        progress.update(f"{full}: creating {url}...")
         try:
             tunnel = routes.prepare(name, port)
         except CloudflareError as error:
             progress.flush()
+            error = (f"Tunnel setup failed: {error}" if admin
+                     else "The app address could not be published. Ask an admin to check it.")
             self.say(chat_id, self._new_app_report(full, sha, pushed_branch, result, deploy.message,
-                                                   error=f"Tunnel setup failed: {error}"))
+                                                   error=error, admin=admin))
             return
         progress.flush()
         self.say(chat_id, self._new_app_report(full, sha, pushed_branch, result, deploy.message,
-                                               tunnel=tunnel,
-                                               url=f"https://{name}.{self.cfg.cloudflare_domain}"))
+                                               tunnel=tunnel, url=url, admin=admin))
 
     def _delete_app(self, chat_id: int, ref: str):
         """Attempt every app cleanup independently and report each outcome."""
@@ -1383,9 +1424,10 @@ class Bot:
         if not self._can_fix(user_id, full):
             raise RepoError("You can only fix apps you created.")
         progress = Progress(self.tg, chat_id, self.cfg)
+        admin = self._is_admin(user_id)
         managed_owner = self.state.app_owner(full) or ADMIN_OWNER
-        dest, branch, _ = self._prepare(owner, name, progress, managed_owner=managed_owner)
-        self.state.set_active_repo(user_id, full, self._is_admin(user_id))
+        dest, branch, _ = self._prepare(owner, name, progress, managed_owner=managed_owner, admin=admin)
+        self.state.set_active_repo(user_id, full, admin)
         self.state.save()
         if self._cancel.is_set():
             raise Cancelled()
@@ -1397,9 +1439,7 @@ class Bot:
                                         show_browser, temporary_chat)
         except Cancelled:
             progress.flush()
-            if self.git.is_dirty(dest):
-                self.say(chat_id, "\u26a0\ufe0f The checkout has uncommitted changes from the interrupted run; "
-                                  f"review {dest} before the next request.")
+            self._warn_dirty(chat_id, dest, full, admin)
             raise
         progress.update(f"{full}: committing and pushing...")
         pushed = self.git.commit_and_push(dest, request)
@@ -1408,36 +1448,55 @@ class Bot:
             self.say(chat_id, f"Copilot returned no changes to commit for {full}; nothing was deployed.")
             return
         sha, pushed_branch = pushed
-        progress.update(f"{full}: restarting its systemd service...")
+        progress.update(f"{full}: restarting its systemd service..." if admin else f"{full}: restarting the app...")
         deploy = self.deployer.redeploy(name, dest)
         progress.flush()
-        self.say(chat_id, self._report(full, sha, pushed_branch, result, deploy))
+        self.say(chat_id, self._report(full, sha, pushed_branch, result, deploy,
+                                       url="" if admin else self._app_url(name)))
+
+    def _warn_dirty(self, chat_id: int, dest, full: str, admin: bool):
+        if not self.git.is_dirty(dest):
+            return
+        target = f"review {dest}" if admin else f"ask an admin to review {full}"
+        self.say(chat_id, "\u26a0\ufe0f The checkout has uncommitted changes from the interrupted run; "
+                          f"{target} before the next request.")
 
     @staticmethod
     def _repo_progress(full: str, message: str) -> str:
         """Keep the current-activity header first while retaining repository context."""
         first, separator, rest = message.partition("\n")
         if first.startswith("Currently doing: "):
-            return first + f"\nRepository: {full}" + (separator + rest if separator else "")
+            return first + f"\nRepository: {html.escape(full, quote=False)}" + (separator + rest if separator else "")
         return f"{full}: {message}"
 
-    def _report(self, full: str, sha: str, branch: str, result: dict, deploy) -> str:
+    @staticmethod
+    def _report(full: str, sha: str, branch: str, result: dict, deploy, url: str = "") -> str:
+        """Summarize a fix; a URL selects the regular-user form without service details."""
         diff_lines = [l for l in (result.get("diff_stat") or "").splitlines() if l.strip()]
         mark = "\u2705" if deploy.ok else "\u26a0\ufe0f"
         lines = [f"{mark} {full}: commit {sha} pushed to {branch}."]
         if diff_lines:
             lines.append(f"Changes: {diff_lines[-1].strip()}")
-        lines.append(("Deploy: " if deploy.ok else "Pushed, but the redeploy failed: ") + deploy.message)
+        if not url:
+            lines.append(("Deploy: " if deploy.ok else "Pushed, but the redeploy failed: ") + deploy.message)
+        elif deploy.ok:
+            lines.append(f"App: {url}")
+        else:
+            lines.append("Pushed, but the redeploy failed. Ask an admin to check the app.")
         return "\n".join(lines)
 
     @staticmethod
     def _new_app_report(full: str, sha: str, branch: str, result: dict, deploy_message: str,
-                        tunnel: str = "", startup: str = "", url: str = "", error: str = "") -> str:
+                        tunnel: str = "", startup: str = "", url: str = "", error: str = "",
+                        admin: bool = True) -> str:
+        """Summarize app creation; deployment and tunnel details are shown only to admins."""
         mark = "\u26a0\ufe0f" if error else "\u2705"
-        lines = [f"{mark} {full}: commit {sha} pushed to {branch}.", f"Deploy: {deploy_message}"]
-        if tunnel:
+        lines = [f"{mark} {full}: commit {sha} pushed to {branch}."]
+        if admin:
+            lines.append(f"Deploy: {deploy_message}")
+        if tunnel and admin:
             lines.append(tunnel)
-        if startup:
+        if startup and admin:
             lines.append(startup)
         if url:
             lines.append(f"App: {url}")

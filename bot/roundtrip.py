@@ -1,6 +1,7 @@
 """Runs the Copilot round-trip engine as a subprocess and relays its progress."""
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -26,6 +27,9 @@ ANSWER_MAX_CHARS = 4000
 # Fenced code (closed, or still streaming at the end of the text) is not progress output.
 CODE_FENCE = re.compile(r"^[ \t]*(```|~~~)[^\n]*\n.*?(?:^[ \t]*\1[ \t]*$|\Z)", re.M | re.S)
 CURRENT_STATUS_MAX_CHARS = 500
+# Latest characters of one reasoning passage kept in its collapsible quote.
+REASONING_MAX_CHARS = 1500
+REASONING_ICON = "💭"
 
 
 class RoundTripError(Exception):
@@ -45,6 +49,10 @@ def format_timestamp(moment=None) -> str:
     if len(offset) == 5:
         offset = offset[:3] + ":" + offset[3:]
     return f"{moment:%Y-%m-%d %H:%M:%S} {moment.tzname() or 'UTC'}{offset}"
+
+
+class _Reasoning(str):
+    """Reasoning text rendered as a collapsed Telegram quote instead of a plain status line."""
 
 
 class StatusTimeline:
@@ -151,6 +159,9 @@ def parse_live_event(line: str):
                     kind = ("coding" if CODING_STEP.match(title) else
                             "completed" if not THOUGHT_STEP.match(title) and detail_count == 0 else "thought")
                 step = {"title": title, "kind": kind}
+                reasoning = _reasoning_lines(raw_step.get("lines")) if kind == "thought" else []
+                if reasoning:
+                    step["reasoning"] = reasoning
                 if raw_block.get("active") is True and kind == "thought" and THOUGHT_STEP.match(title):
                     current = _last_visible_line(raw_step.get("lines"))
                     if current:
@@ -168,6 +179,10 @@ def parse_live_event(line: str):
                 "total": block_total,
                 "steps": steps,
             }
+            if not steps and not CODING_STEP.match(block["title"]):
+                reasoning = _reasoning_lines(raw_block.get("lines"))
+                if reasoning:
+                    block["reasoning"] = reasoning
             current = next((step.get("current") for step in reversed(steps) if step.get("current")), "")
             if block["active"] and not current and THOUGHT_STEP.match(block["title"]):
                 current = _last_visible_line(raw_block.get("lines"))
@@ -219,6 +234,23 @@ def _last_visible_line(value):
                  if isinstance(line, str) and _current_text(line)), "")
 
 
+def _reasoning_lines(value):
+    if not isinstance(value, list):
+        return []
+    lines = (" ".join(line.split()) for line in value if isinstance(line, str))
+    return [line for line in lines if line]
+
+
+def _append_reasoning(lines, reasoning):
+    """Add reasoning lines as one collapsible quote, keeping the latest text when it is long."""
+    text = "\n".join(reasoning)
+    if not text:
+        return
+    if len(text) > REASONING_MAX_CHARS:
+        text = "…" + text[-(REASONING_MAX_CHARS - 1):].lstrip()
+    lines.append(_Reasoning(text))
+
+
 def _current_text(value) -> str:
     text = " ".join(str(value or "").split())
     if len(text) > CURRENT_STATUS_MAX_CHARS:
@@ -247,7 +279,7 @@ def _append_answer(lines, text):
 
 
 def format_prompt_status(message: str, tasks, blocks, answers=None, timeline=None, stage="status") -> str:
-    """Render a timestamped activity timeline with the latest activity at the top."""
+    """Render a timestamped activity timeline as Telegram HTML; reasoning text is shown collapsed."""
     lines, answers = [], answers or []
     timeline = timeline or StatusTimeline()
     by_after = {}
@@ -307,6 +339,9 @@ def format_prompt_status(message: str, tasks, blocks, answers=None, timeline=Non
                                    "active" if active else "completed",
                                    current=active or not timeline.current)
             lines.append(f"[{stamp}] {'▶' if active else '✓'} Working through the steps: {summary}")
+            _append_reasoning(lines, [line for item in group
+                                      for source in ([item] + _section_steps(item))
+                                      for line in source.get("reasoning") or []])
             current_block = next((item for item in reversed(group) if item.get("active")), None)
             if current_block and current_block.get("current"):
                 timeline.detail(("reasoning", start, current_block["current"]), current_block["current"])
@@ -318,6 +353,7 @@ def format_prompt_status(message: str, tasks, blocks, answers=None, timeline=Non
             stamp = timeline.stage(("block", block.get("index", index - 1), title), title,
                                    "active" if block.get("active") else "completed", current=block_current)
             lines.append(f"[{stamp}] {'▶' if block.get('active') else '✓'} {title}")
+            _append_reasoning(lines, block.get("reasoning") or [])
             for position, step in enumerate(steps):
                 kind = step.get("kind")
                 step_title = step.get("title") or "Reasoning"
@@ -326,6 +362,7 @@ def format_prompt_status(message: str, tasks, blocks, answers=None, timeline=Non
                                             step_title, kind or "thought",
                                             current=step_current)
                 lines.append(f"  [{step_stamp}] {'✓' if kind == 'completed' else '•'} {step_title}")
+                _append_reasoning(lines, step.get("reasoning") or [])
             if block.get("active") and block.get("current"):
                 timeline.detail(("reasoning", block.get("index", index - 1), block["current"]), block["current"])
         if index in by_after:
@@ -333,13 +370,39 @@ def format_prompt_status(message: str, tasks, blocks, answers=None, timeline=Non
     return _limit_status(lines, timeline.current)
 
 
+def _escape(text: str) -> str:
+    return html.escape(text, quote=False)
+
+
+def _render_line(line) -> str:
+    """Return Telegram HTML for one status line; reasoning is an expandable blockquote behind an icon."""
+    if isinstance(line, _Reasoning):
+        return f"<blockquote expandable>{REASONING_ICON}\n{_escape(line)}</blockquote>"
+    return _escape(line)
+
+
+def _visible_length(line) -> int:
+    return len(REASONING_ICON) + 1 + len(line) if isinstance(line, _Reasoning) else len(line)
+
+
 def _limit_status(lines, current):
+    """Render the status as Telegram HTML, dropping the oldest lines beyond the visible-text limit."""
     header = f"Currently doing: {_current_text(current) or 'Waiting for Copilot'}"
-    body = "\n".join(lines)
     available = TASK_STATUS_LIMIT - len(header) - 2
-    if len(body) > available:
-        body = "…" + body[-(available - 1):].lstrip()
-    return header + ("\n\n" + body if body else "")
+    lines = list(lines)
+    size = sum(_visible_length(line) for line in lines) + max(len(lines) - 1, 0)
+    if size > available:
+        size += 2  # leading ellipsis line
+        while len(lines) > 1 and size - _visible_length(lines[0]) - 1 >= available:
+            size -= _visible_length(lines.pop(0)) + 1
+        excess = size - available
+        if excess > 0:
+            lines[0] = type(lines[0])(lines[0][excess:].lstrip())
+        while lines and not lines[0]:
+            lines.pop(0)
+        lines.insert(0, "…")
+    body = "\n".join(_render_line(line) for line in lines)
+    return _escape(header) + ("\n\n" + body if body else "")
 
 
 def format_stage_status(message: str, timeline=None, stage="job") -> str:
@@ -350,7 +413,7 @@ def format_stage_status(message: str, timeline=None, stage="job") -> str:
 
 
 def format_task_status(message: str, tasks) -> str:
-    """Render the latest Copilot task card as a bounded plain-text Telegram status."""
+    """Render the latest Copilot task card as a bounded Telegram HTML status."""
     return format_prompt_status(message, tasks, [])
 
 

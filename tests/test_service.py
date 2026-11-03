@@ -36,7 +36,7 @@ class FakeTelegram:
     def __init__(self):
         self.sent, self.edits, self.markups = [], [], []
 
-    def send_message(self, chat_id, text, reply_markup=None):
+    def send_message(self, chat_id, text, reply_markup=None, parse_mode=None):
         self.sent.append(text)
         self.markups.append(reply_markup)
         return len(self.sent)
@@ -45,7 +45,7 @@ class FakeTelegram:
         self.sent.append(text)
         self.markups.append(reply_markup)
 
-    def edit_message(self, chat_id, message_id, text):
+    def edit_message(self, chat_id, message_id, text, parse_mode=None):
         self.edits.append(text)
 
 
@@ -95,6 +95,8 @@ class FakeRoundTrip:
             raise Cancelled()
         if self.behavior == "change":
             (Path(repo_dir) / "Makefile").write_text("run:\n\techo hi\n")
+        elif self.behavior == "append":
+            (Path(repo_dir) / "notes.txt").write_text(f"run {len(self.calls)}\n")
         return {"chat_response": "Added it.", "diff_stat": " Makefile | 2 ++\n 1 file changed, 2 insertions(+)\n"}
 
 
@@ -386,6 +388,8 @@ class ServiceTests(unittest.TestCase):
         report = self.tg.sent[-1]
         self.assertIn("https://fresh-app.kurwalab.fyi", report)
         self.assertIn("Copilot output:\nAdded it.", report)
+        self.assertIn("Deploy: Systemd service copilot-app-fresh-app.service", report)
+        self.assertIn("Tunnel: https://fresh-app.kurwalab.fyi -> http://127.0.0.1:8081.", report)
 
     def test_regular_user_creation_records_ownership_and_allows_only_owner_fixes(self):
         self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77, 88}),
@@ -395,6 +399,14 @@ class ServiceTests(unittest.TestCase):
             routes.return_value.next_port.return_value = 8085
             routes.return_value.prepare.return_value = "Tunnel configured."
             self.user_say(77, "/new member-app build it")
+        report = self.tg.sent[-1]
+        self.assertIn("App: https://member-app.kurwalab.fyi", report)
+        self.assertIn("Copilot output:\nAdded it.", report)
+        for hidden in ("Deploy:", "Tunnel", "systemd", "Systemd", "pid", "8085", str(self.cfg.repos_dir)):
+            self.assertNotIn(hidden, report)
+        for progress in self.tg.sent[:-1] + self.tg.edits:
+            for hidden in ("systemd", "tunnel", "port", str(self.cfg.repos_dir)):
+                self.assertNotIn(hidden, progress)
         self.assertEqual(self.state.app_owner("me/member-app"), telegram_owner(77))
         self.assertEqual(self.state.get_active_repo(77), "me/member-app")
         saved = State(self.tmp / "state.json", "fallback")
@@ -407,12 +419,40 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("port:", self.tg.sent[-1])
 
         calls = len(self.rt.calls)
+        self.rt.behavior = "append"
         self.user_say(88, "/fix member-app change the title")
         self.assertEqual(len(self.rt.calls), calls)
         self.assertIn("only fix apps you created", self.tg.sent[-1])
 
         self.user_say(77, "/fix member-app change the title")
         self.assertEqual(len(self.rt.calls), calls + 1)
+        report = self.tg.sent[-1]
+        self.assertIn("App: https://member-app.kurwalab.fyi", report)
+        for hidden in ("Deploy:", "systemd", "Systemd", "pid"):
+            self.assertNotIn(hidden, report)
+
+    def test_regular_user_failures_hide_service_and_tunnel_details(self):
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}),
+                                   cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.next_port.return_value = 8085
+            routes.return_value.prepare.side_effect = CloudflareError("ingress for kurwalab-tunnel rejected")
+            self.user_say(77, "/new member-app build it")
+        report = self.tg.sent[-1]
+        self.assertIn("The app address could not be published", report)
+        self.assertNotIn("kurwalab-tunnel", report)
+        self.assertNotIn("Deploy:", report)
+        self.deployer.ok = False
+        self.rt.behavior = "append"
+        self.user_say(77, "/fix member-app break it")
+        self.assertIn("redeploy failed. Ask an admin", self.tg.sent[-1])
+        self.assertNotIn("copilot-app-", self.tg.sent[-1])
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.next_port.side_effect = CloudflareError("kurwalab-tunnel unavailable")
+            self.user_say(77, "/new other-app build it")
+        self.assertIn("app address could not be configured", self.tg.sent[-1])
+        self.assertNotIn("kurwalab-tunnel", self.tg.sent[-1])
 
     def test_admin_can_fix_a_regular_users_app_without_changing_its_owner(self):
         self.state.set_app_owner("me/app", telegram_owner(77))
@@ -823,14 +863,19 @@ class ServiceTests(unittest.TestCase):
         self.state.set_app_owner("me/theirs", telegram_owner(88))
         self.user_say(77, "/app start mine")
         self.assertEqual(self.deployer.starts, [("mine", self.cfg.repos_dir / "mine")])
+        self.assertEqual(self.tg.sent[-1], "✅ mine is running: https://mine.kurwalab.fyi")
         self.deployer.stop_result = True
         self.user_say(77, "/app stop mine")
         self.assertEqual(self.deployer.stops, [("mine", self.cfg.repos_dir / "mine")])
+        self.assertEqual(self.tg.sent[-1], "✅ mine is stopped.")
+        self.user_say(77, "/app start missing")
+        self.assertEqual(self.tg.sent[-1], "App not found: missing")
         self.user_say(77, "/app stop theirs")
         self.assertIn("only start or stop apps you created", self.tg.sent[-1])
         self.assertEqual(self.deployer.stops, [("mine", self.cfg.repos_dir / "mine")])
         self.say("/app start theirs")
         self.assertEqual(self.deployer.starts[-1], ("theirs", self.cfg.repos_dir / "theirs"))
+        self.assertIn("copilot-app-theirs.service is running (pid 1)", self.tg.sent[-1])
 
     def test_app_control_buttons_show_only_regular_users_owned_apps(self):
         self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77, 88}))
@@ -888,7 +933,7 @@ class ServiceTests(unittest.TestCase):
             self.user_say(77, "/list")
         self.assertEqual(
             self.tg.sent[-1],
-            "Apps:\n- name: eurofish — status: running (pid 1) — url: https://eurofish.kurwalab.fyi",
+            "Apps:\n- name: eurofish — status: running — url: https://eurofish.kurwalab.fyi",
         )
 
     def test_list_reports_unavailable_routes_without_cloudflare_configuration(self):

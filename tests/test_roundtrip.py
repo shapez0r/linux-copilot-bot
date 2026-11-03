@@ -10,11 +10,15 @@ from pathlib import Path
 from unittest import mock
 
 from support import make_config
-from bot.roundtrip import (Cancelled, RoundTrip, RoundTripError, format_prompt_status,
+from bot.roundtrip import (TASK_STATUS_LIMIT, Cancelled, RoundTrip, RoundTripError, format_prompt_status,
                            format_stage_status, format_timestamp, parse_activity_event,
                            parse_live_event, parse_status, parse_status_event, StatusTimeline)
 
 STAMP = "2026-11-01 16:21:21 UTC+00:00"
+
+
+def quote(text):
+    return f"<blockquote expandable>💭\n{text}</blockquote>"
 
 
 def fixed_timeline():
@@ -202,7 +206,7 @@ class RoundTripTests(unittest.TestCase):
         for bad in ("ROUNDTRIP_REASONING:{", "ROUNDTRIP_REASONING:{}", "other"):
             self.assertIsNone(parse_activity_event(bad))
 
-    def test_live_parser_keeps_order_and_omits_reasoning_and_code_details(self):
+    def test_live_parser_keeps_order_collapses_reasoning_and_omits_code_details(self):
         line = "ROUNDTRIP_REASONING:" + json.dumps({
             "blocks": [
                 {"title": "Inspecting", "active": False, "layout": "working",
@@ -224,6 +228,7 @@ class RoundTripTests(unittest.TestCase):
                          f"Currently doing: Comparing behavior\n\nStarting.\n\n"
                          f"[{STAMP}] ✓ Working through the steps: Read files\n\nFound it.\n\n"
                          f"[{STAMP}] ▶ Reasoning\n  [{STAMP}] • Thought process\n"
+                         f"{quote('Comparing behavior')}\n"
                          f"  [{STAMP}] • Coding and executing")
         self.assertNotIn("token=secret", rendered)
         self.assertNotIn("no new output", rendered)
@@ -240,7 +245,7 @@ class RoundTripTests(unittest.TestCase):
         rendered = format_prompt_status("", [], [], live["answers"], fixed_timeline())
         self.assertNotIn("secret_", rendered)
 
-    def test_reasoning_duration_is_shown_without_its_detail_text(self):
+    def test_reasoning_duration_is_shown_with_its_detail_text_collapsed(self):
         line = "ROUNDTRIP_REASONING:" + json.dumps({
             "blocks": [{"title": "Reasoned for 12s", "active": False, "layout": "section",
                         "lines": ["private chain of thought"], "total": 1}],
@@ -248,9 +253,30 @@ class RoundTripTests(unittest.TestCase):
         })
         live = parse_live_event(line)
         self.assertEqual(format_prompt_status("", [], live["blocks"], live["answers"], fixed_timeline()),
-                         f"Currently doing: Reasoned for 12s\n\n[{STAMP}] ✓ Reasoned for 12s\n\n"
-                         "Interim answer.")
-        self.assertNotIn("private chain of thought", str(live))
+                         f"Currently doing: Reasoned for 12s\n\n[{STAMP}] ✓ Reasoned for 12s\n"
+                         f"{quote('private chain of thought')}\n\nInterim answer.")
+
+    def test_working_steps_collapse_reasoning_and_escape_html(self):
+        line = "ROUNDTRIP_REASONING:" + json.dumps({"blocks": [{
+            "title": "Reasoning", "active": True, "layout": "working", "steps": [
+                {"title": "Thought process", "kind": "thought", "lines": ["Check a < b & <b>c</b>"]},
+                {"title": "Coding and executing", "kind": "coding", "lines": ["secret()"]},
+            ]}], "answers": [{"after": 1, "text": "Use <script> & more"}]})
+        live = parse_live_event(line)
+        rendered = format_prompt_status("", [], live["blocks"], live["answers"], fixed_timeline())
+        self.assertIn(quote("Check a &lt; b &amp; &lt;b&gt;c&lt;/b&gt;"), rendered)
+        self.assertIn("Use &lt;script&gt; &amp; more", rendered)
+        self.assertNotIn("secret()", rendered)
+
+    def test_long_status_drops_the_oldest_lines_without_breaking_quotes(self):
+        blocks = [{"index": i, "title": f"Reasoned for {i}s", "active": False, "layout": "section",
+                   "steps": [], "reasoning": ["x" * 1000]} for i in range(8)]
+        rendered = format_prompt_status("", [], blocks, timeline=fixed_timeline())
+        visible = rendered.replace("<blockquote expandable>", "").replace("</blockquote>", "")
+        self.assertLessEqual(len(visible), TASK_STATUS_LIMIT)
+        self.assertEqual(rendered.count("<blockquote expandable>"), rendered.count("</blockquote>"))
+        self.assertIn("\n\n…\n", rendered)
+        self.assertIn("Reasoned for 7s", rendered)
 
     def test_live_answer_without_activity_keeps_the_compact_stage(self):
         self.assertEqual(format_prompt_status("Waiting for Copilot...", [], [], [
@@ -285,7 +311,8 @@ class RoundTripTests(unittest.TestCase):
         live = parse_live_event(line)
         rendered = format_prompt_status("", [], live["blocks"], timeline=fixed_timeline())
         self.assertTrue(rendered.startswith("Currently doing: Comparing the two implementations now."))
-        self.assertNotIn("Checking the tests.", rendered)
+        self.assertTrue(rendered.endswith(
+            quote("Checking the tests.\nComparing the two implementations now.")))
 
     def test_single_stage_formatter_adds_the_header_and_timestamp(self):
         self.assertEqual(format_stage_status("Preparing repository...", fixed_timeline(), "prepare"),

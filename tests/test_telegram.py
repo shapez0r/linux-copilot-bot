@@ -30,5 +30,20 @@ class ChunkTests(unittest.TestCase):
         self.assertEqual(payloads[1]["reply_markup"], keyboard)
 
 
+class FormattedMessageTests(unittest.TestCase):
+    def test_html_messages_set_parse_mode_and_edits_are_not_cut(self):
+        telegram = Telegram("token")
+        text = "<blockquote expandable>" + "x" * MESSAGE_LIMIT + "</blockquote>"
+        with patch.object(telegram, "_call", return_value={"message_id": 1}) as call:
+            telegram.send_message(7, "<b>hi</b>", parse_mode="HTML")
+            telegram.edit_message(7, 1, text, parse_mode="HTML")
+            telegram.edit_message(7, 1, "y" * (MESSAGE_LIMIT + 5))
+        sent, edited, plain = (item.args[1] for item in call.call_args_list)
+        self.assertEqual(sent["parse_mode"], "HTML")
+        self.assertEqual((edited["parse_mode"], edited["text"]), ("HTML", text))
+        self.assertNotIn("parse_mode", plain)
+        self.assertEqual(len(plain["text"]), MESSAGE_LIMIT)
+
+
 if __name__ == "__main__":
     unittest.main()
