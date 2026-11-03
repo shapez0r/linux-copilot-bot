@@ -82,56 +82,87 @@ class CompletionTests(unittest.TestCase):
         self.assertFalse(rt.browser_is_headless(True, {'WAYLAND_DISPLAY': 'wayland-0'}))
         self.assertTrue(rt.browser_is_headless(False, {'DISPLAY': ':0'}))
 
-    def test_visible_stop_controls_define_running_state(self):
+    @staticmethod
+    def stop_page(composer=(), task=None):
+        """A page mock whose composer and optional current task card expose the given Stop buttons."""
+        def locator(buttons):
+            loc = Mock()
+            loc.count.return_value = len(buttons)
+            loc.nth.side_effect = lambda index: buttons[index]
+            return loc
         page = Mock()
-        locator = Mock()
-        hidden, visible = Mock(), Mock()
-        hidden.is_visible.return_value = False
-        visible.is_visible.return_value = True
-        locator.count.return_value = 2
-        locator.nth.side_effect = lambda index: (hidden, visible)[index]
-        cards = Mock()
-        cards.count.return_value = 0
-        page.locator.side_effect = lambda selector: cards if selector == '[data-roundtrip-task-card]' else locator
-        for button in (hidden, visible):
-            button.evaluate.side_effect = lambda script: 'getComputedStyle' in script
-        self.assertTrue(rt.response_is_running(page, rt.selectors_from_env()))
-        visible.is_visible.return_value = False
-        self.assertFalse(rt.response_is_running(page, rt.selectors_from_env()))
+        cards = locator([task] if task is not None else [])
+        if task is not None:
+            task.is_visible.return_value = True
+        page.locator.side_effect = lambda selector: cards if selector == '[data-roundtrip-task-card]' else locator(composer)
+        return page
+
+    @staticmethod
+    def stop_button(visible=True):
+        button = Mock()
+        button.is_visible.return_value = visible
+        button.evaluate.return_value = True
+        return button
+
+    def test_visible_stop_controls_define_running_state(self):
+        hidden, visible = self.stop_button(False), self.stop_button()
+        page = self.stop_page([hidden, visible])
+        with patch.object(rt, 'read_task_cards'):
+            self.assertTrue(rt.response_is_running(page, rt.selectors_from_env()))
+            visible.is_visible.return_value = False
+            self.assertFalse(rt.response_is_running(page, rt.selectors_from_env()))
         self.assertIn('data-icon-name', rt.selectors_from_env()['stop'])
 
-    def test_task_card_is_hovered_and_takes_priority_over_composer(self):
-        page, cards, card, controls, button = (Mock() for _ in range(5))
-        page.locator.return_value = cards
-        cards.count.return_value = 1
-        cards.nth.return_value = card
-        card.is_visible.return_value = True
-        card.locator.return_value = controls
-        controls.count.return_value = 1
-        controls.nth.return_value = button
-        button.is_visible.return_value = True
+    def test_task_card_is_hovered_and_its_stop_is_listed_last(self):
+        card, task_stop, composer_stop = Mock(), self.stop_button(), self.stop_button()
+        card.locator.return_value.count.return_value = 1
+        card.locator.return_value.nth.return_value = task_stop
+        page = self.stop_page([composer_stop], card)
         with patch.object(rt, 'read_task_cards'), patch.object(rt, 'is_prior', return_value=False):
-            self.assertEqual(rt.visible_stop_buttons(page, rt.selectors_from_env()), [button])
+            self.assertEqual(rt.visible_stop_buttons(page, rt.selectors_from_env()), [composer_stop, task_stop])
             card.hover.assert_called_once_with(timeout=1500)
-            button.is_visible.return_value = False
-            self.assertFalse(rt.response_is_running(page, rt.selectors_from_env()))
-            self.assertTrue(all(call.args == ('[data-roundtrip-task-card]',)
-                                for call in page.locator.call_args_list))
+            # Page-wide controls exclude task card controls, which are read only through the hovered card.
+            self.assertIs(composer_stop.evaluate.call_args.args[1], True)
+            self.assertIs(task_stop.evaluate.call_args.args[1], False)
+
+    def test_either_task_or_composer_stop_means_running(self):
+        for task_visible, composer_visible in ((True, False), (False, True)):
+            with self.subTest(task=task_visible, composer=composer_visible):
+                card, task_stop = Mock(), self.stop_button(task_visible)
+                card.locator.return_value.count.return_value = 1
+                card.locator.return_value.nth.return_value = task_stop
+                page = self.stop_page([self.stop_button(composer_visible)], card)
+                with patch.object(rt, 'read_task_cards'), patch.object(rt, 'is_prior', return_value=False):
+                    self.assertTrue(rt.response_is_running(page, rt.selectors_from_env()))
+
+    def test_failed_hover_still_checks_the_composer(self):
+        card, composer_stop = Mock(), self.stop_button()
+        card.hover.side_effect = RuntimeError('hover failed')
+        card.locator.return_value.count.return_value = 0
+        page = self.stop_page([composer_stop], card)
+        with patch.object(rt, 'read_task_cards'), patch.object(rt, 'is_prior', return_value=False):
+            self.assertEqual(rt.visible_stop_buttons(page, rt.selectors_from_env()), [composer_stop])
 
     def test_cancel_clicks_the_same_hover_revealed_task_stop(self):
-        page, cards, card, controls, button = (Mock() for _ in range(5))
-        page.locator.return_value = cards
-        cards.count.return_value = 1
-        cards.nth.return_value = card
-        card.is_visible.return_value = True
-        card.locator.return_value = controls
-        controls.count.return_value = 1
-        controls.nth.return_value = button
-        button.is_visible.side_effect = [True, False]
+        card, task_stop, composer_stop = Mock(), self.stop_button(), self.stop_button()
+        card.locator.return_value.count.return_value = 1
+        card.locator.return_value.nth.return_value = task_stop
+        task_stop.is_visible.side_effect = [True, False]
+        composer_stop.is_visible.side_effect = [True, False]
+        page = self.stop_page([composer_stop], card)
         with patch.object(rt, 'read_task_cards'), patch.object(rt, 'is_prior', return_value=False):
             self.assertTrue(rt.stop_generation(page, rt.selectors_from_env()))
-        button.click.assert_called_once_with(timeout=3000)
+        task_stop.click.assert_called_once_with(timeout=3000)
+        composer_stop.click.assert_not_called()
         self.assertEqual(card.hover.call_count, 2)
+
+    def test_heartbeat_reports_running_prompt_or_timeout_countdown(self):
+        self.assertEqual(rt.heartbeat_message(True, 120.4, 0, 900),
+                         'Prompt still running (Stop control visible); 120s elapsed.')
+        self.assertEqual(rt.heartbeat_message(False, 60, 4, 900),
+                         'Prompt still running (output changed 4s ago); 60s elapsed.')
+        self.assertEqual(rt.heartbeat_message(False, 200, 45.9, 900),
+                         'No Stop control or new output for 45s of 900s allowed; 200s elapsed.')
 
     def test_task_status_message_describes_visible_plan(self):
         tasks = [{'title': 'Add browser games', 'state': 'In progress', 'active': True,
@@ -165,6 +196,15 @@ class CompletionTests(unittest.TestCase):
         loop = next(n for n in ast.walk(fn) if isinstance(n, ast.While) and ast.unparse(n.test) == 'downloaded is None')
         source = ast.unparse(loop)
         self.assertRegex(source, r'if last_running is not None and running != last_running:\n\s+last_activity = now')
+
+    def test_visible_stop_control_holds_off_the_timeout_and_heartbeat_is_periodic(self):
+        tree = ast.parse(SCRIPT.read_text())
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'run_roundtrip')
+        loop = next(n for n in ast.walk(fn) if isinstance(n, ast.While) and ast.unparse(n.test) == 'downloaded is None')
+        source = ast.unparse(loop)
+        self.assertRegex(source, r'if running:\n\s+last_activity = now')
+        self.assertIn('if now - last_update >= HEARTBEAT_SECONDS:', source)
+        self.assertIn("emit_status('heartbeat', heartbeat_message(running, now - started, idle, idle_limit))", source)
 
     def test_signature_survives_a_failing_activity_parser(self):
         page = Mock()
@@ -694,10 +734,29 @@ secret_two()</code>
         self.assertTrue(rt.stop_generation(self.page, self.sel))
         self.assertFalse(rt.response_is_running(self.page, self.sel))
 
-    def test_task_without_stop_does_not_use_composer_stop(self):
+    def test_composer_stop_counts_when_the_task_card_has_none(self):
         self.page.set_content('''<main><details open><summary>Build repository
           <span>Completed</span></summary><ol><li>Test repository</li></ol></details>
           <form><button aria-label="Stop responding">Stop</button></form></main>''')
+        self.assertTrue(rt.response_is_running(self.page, self.sel))
+        self.page.locator('form button').evaluate('button => button.hidden = true')
+        self.assertFalse(rt.response_is_running(self.page, self.sel))
+
+    def test_hover_revealed_task_stop_and_composer_stop_are_both_detected(self):
+        self.page.set_content('''<style>
+          #task button { opacity: 0; } #task:hover button { opacity: 1; }
+          </style><main><article data-message-author-role="assistant">
+          <details id="task" open><summary>Build repository <span>In progress</span></summary>
+          <ol><li aria-current="step">Test repository</li></ol>
+          <button id="task-stop" aria-label="Stop task" onclick="this.remove()">Stop</button>
+          </details></article>
+          <form><button id="composer-stop" aria-label="Stop responding" onclick="this.remove()">Stop</button></form>
+          </main>''')
+        buttons = rt.visible_stop_buttons(self.page, self.sel)
+        self.assertEqual([button.get_attribute('id') for button in buttons], ['composer-stop', 'task-stop'])
+        # Cancellation clicks the task card's Stop first and keeps going until no Stop control remains.
+        self.assertTrue(rt.stop_generation(self.page, self.sel))
+        self.assertEqual(self.page.locator('#task-stop, #composer-stop').count(), 0)
         self.assertFalse(rt.response_is_running(self.page, self.sel))
 
     def test_reused_composer_control_is_not_excluded_by_prior_marker(self):

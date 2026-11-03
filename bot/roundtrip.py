@@ -30,6 +30,10 @@ CURRENT_STATUS_MAX_CHARS = 500
 # Latest characters of one reasoning passage kept in its collapsible quote.
 REASONING_MAX_CHARS = 1500
 REASONING_ICON = "💭"
+HEARTBEAT_STAGE = "heartbeat"
+HEARTBEAT_ICON = "⏳"
+# Engine stages that keep the latest heartbeat line while Copilot is still responding.
+HEARTBEAT_KEEP_STAGES = frozenset({HEARTBEAT_STAGE, "task"})
 
 
 class RoundTripError(Exception):
@@ -78,6 +82,10 @@ class StatusTimeline:
         if current and normalized and (new or previous != state):
             self.current = normalized
         return self._timestamps[key]
+
+    def now(self) -> str:
+        """Return the current timestamp in the timeline's format."""
+        return self._now()
 
     def detail(self, key, text: str):
         normalized = _current_text(text)
@@ -278,8 +286,13 @@ def _append_answer(lines, text):
     lines.extend(text.splitlines())
 
 
-def format_prompt_status(message: str, tasks, blocks, answers=None, timeline=None, stage="status") -> str:
-    """Render a timestamped activity timeline as Telegram HTML; reasoning text is shown collapsed."""
+def format_prompt_status(message: str, tasks, blocks, answers=None, timeline=None, stage="status",
+                         heartbeat=None) -> str:
+    """Render a timestamped activity timeline as Telegram HTML; reasoning text is shown collapsed.
+
+    heartbeat is an optional (timestamp, message) pair shown as the last line, refreshed on every
+    engine heartbeat so the user can see that the prompt is still running.
+    """
     lines, answers = [], answers or []
     timeline = timeline or StatusTimeline()
     by_after = {}
@@ -295,6 +308,7 @@ def format_prompt_status(message: str, tasks, blocks, answers=None, timeline=Non
         lines.append(f"[{stamp}] {status}")
         if 0 in by_after:
             _append_answer(lines, by_after[0])
+        _append_heartbeat(lines, heartbeat)
         return _limit_status(lines, timeline.current)
 
     if 0 in by_after:
@@ -367,7 +381,16 @@ def format_prompt_status(message: str, tasks, blocks, answers=None, timeline=Non
                 timeline.detail(("reasoning", block.get("index", index - 1), block["current"]), block["current"])
         if index in by_after:
             _append_answer(lines, by_after[index])
+    _append_heartbeat(lines, heartbeat)
     return _limit_status(lines, timeline.current)
+
+
+def _append_heartbeat(lines, heartbeat):
+    if heartbeat:
+        stamp, text = heartbeat
+        if lines:
+            lines.append("")
+        lines.append(f"[{stamp}] {HEARTBEAT_ICON} {text}")
 
 
 def _escape(text: str) -> str:
@@ -443,12 +466,20 @@ class RoundTrip:
 
         def read_stderr():
             live_tasks, live, current_message = None, {"blocks": [], "answers": []}, ""
-            timeline = StatusTimeline()
+            timeline, heartbeat, current_stage = StatusTimeline(), None, "status"
             for line in proc.stderr:
                 line = line.rstrip()
                 status = parse_status_event(line)
                 if status:
-                    current_message = status["message"]
+                    if status["stage"] == HEARTBEAT_STAGE:
+                        heartbeat = (timeline.now(), _current_text(status["message"]))
+                        on_status(HEARTBEAT_STAGE, format_prompt_status(
+                            current_message, live_tasks, live["blocks"], live["answers"], timeline,
+                            current_stage, heartbeat))
+                        continue
+                    if status["stage"] not in HEARTBEAT_KEEP_STAGES:
+                        heartbeat = None
+                    current_message, current_stage = status["message"], status["stage"]
                     if status["tasks"] is not None:
                         live_tasks = status["tasks"]
                     if status["stage"] == "completed":
@@ -462,7 +493,7 @@ class RoundTrip:
                         live = {"blocks": [{**block, "active": False} for block in live["blocks"]],
                                 "answers": live["answers"]}
                     message = format_prompt_status(current_message, live_tasks, live["blocks"],
-                                                   live["answers"], timeline, status["stage"])
+                                                   live["answers"], timeline, status["stage"], heartbeat)
                     on_status(status["stage"], message)
                     continue
                 event = parse_live_event(line)
@@ -471,7 +502,7 @@ class RoundTrip:
                     if live["blocks"] or live["answers"] or live_tasks:
                         on_status("activity", format_prompt_status(
                             current_message, live_tasks, live["blocks"], live["answers"],
-                            timeline, "activity"))
+                            timeline, "activity", heartbeat))
                 elif line.strip() and not line.startswith("ROUNDTRIP_CHAT:"):
                     tail.append(line.strip())
 

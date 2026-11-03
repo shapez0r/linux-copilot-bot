@@ -272,40 +272,61 @@ def pause(page, ms):
 
 
 def visible_stop_buttons(page, sel):
-    "Hover current task cards first; use page Stop controls only when no task card exists."
+    """Visible Stop controls in the current task card (revealed by hovering it) and elsewhere on the page.
+
+    Page controls, such as the composer's Stop, come first, so the last entry is the task card's Stop
+    whenever one is visible.
+    """
+    # Page scans skip task card controls; those of the current card are read after hovering it.
+    script = """(el, outsideCards) => {
+        if (el.closest('[data-roundtrip-prior-msg]')) return false;
+        if (outsideCards && el.closest('[data-roundtrip-task-card]')) return false;
+        for (let node = el; node; node = node.parentElement) {
+            if (getComputedStyle(node).opacity === '0') return false;
+        }
+        return true;
+    }"""
+
+    def collect(scope, outside_cards):
+        found = []
+        try:
+            stop = scope.locator(sel["stop"])
+            for i in range(stop.count()):
+                button = stop.nth(i)
+                try:
+                    if button.is_visible() and button.evaluate(script, outside_cards):
+                        found.append(button)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return found
+
+    current = []
     try:
         read_task_cards(page)
         cards = page.locator('[data-roundtrip-task-card]')
         current = [cards.nth(i) for i in range(cards.count())
                    if cards.nth(i).is_visible() and not is_prior(cards.nth(i))]
-        scopes = current[-1:] or [page]
-        buttons = []
-        for scope in scopes:
-            if current:
-                scope.hover(timeout=1500)
-            stop = scope.locator(sel["stop"])
-            for i in range(stop.count()):
-                button = stop.nth(i)
-                if button.is_visible() and button.evaluate("""el => {
-                    if (el.closest('[data-roundtrip-prior-msg]')) return false;
-                    for (let node = el; node; node = node.parentElement) {
-                        if (getComputedStyle(node).opacity === '0') return false;
-                    }
-                    return true;
-                }"""):
-                    buttons.append(button)
-        return buttons
     except Exception:
-        return []
+        pass
+    task_buttons = []
+    if current:
+        try:
+            current[-1].hover(timeout=1500)
+        except Exception:
+            pass
+        task_buttons = collect(current[-1], False)
+    return collect(page, bool(current)) + task_buttons
 
 
 def response_is_running(page, sel):
-    "Copilot is running while the task-card-first lookup exposes a Stop control."
+    """Copilot is running while a Stop control is visible in the current task card or near the composer."""
     return bool(visible_stop_buttons(page, sel))
 
 
 def stop_generation(page, sel, timeout_seconds=15):
-    "Click Copilot's Stop control for the running response and wait until it is gone."
+    "Click Copilot's Stop controls, the task card's first, and wait until none remains visible."
     started = time.monotonic()
     clicked, last_click = False, 0.0
     while time.monotonic() - started < timeout_seconds:
@@ -1089,6 +1110,16 @@ def task_status_message(tasks):
     return f'Copilot task "{title}" is {state.lower()}{detail}.'
 
 
+def heartbeat_message(running, elapsed, idle, limit):
+    """Describe whether the prompt is still running for the periodic progress heartbeat."""
+    elapsed = f"{int(elapsed)}s elapsed"
+    if running:
+        return f"Prompt still running (Stop control visible); {elapsed}."
+    if idle < HEARTBEAT_SECONDS:
+        return f"Prompt still running (output changed {int(idle)}s ago); {elapsed}."
+    return f"No Stop control or new output for {int(idle)}s of {int(limit)}s allowed; {elapsed}."
+
+
 def run(cmd, cwd=None, capture=True):
     # Isolate child stdin from the Cancel listener and disable interactive Git prompts.
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
@@ -1691,6 +1722,8 @@ DOWNLOAD_RETRY_SECONDS = 10
 DOWNLOAD_MAX_BACKOFF = 6
 STOP_APPEAR_GRACE_SECONDS = 3
 STOP_GONE_STABILITY_SECONDS = 1
+# Interval of the "prompt still running" heartbeat while waiting for the response.
+HEARTBEAT_SECONDS = 15
 
 
 def download_retry_due(count, last, now):
@@ -2034,7 +2067,8 @@ def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout)
                 reported_url = conversation_url(page.url, args.url) or chat_url
                 emit_chat(reported_url)
             emit_status("waiting", "Waiting for Copilot to generate a downloadable repository...")
-            # Reset the inactivity timeout when visible output, a task card or the Stop control changes.
+            # A visible Stop control means the prompt is still running; the inactivity countdown runs
+            # only while no Stop control is visible and the output and task cards stay unchanged.
             idle_limit = args.timeout
             started = time.monotonic()
             last_activity = started
@@ -2072,6 +2106,7 @@ def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout)
                     last_activity = now
                 last_running = running
                 if running:
+                    last_activity = now
                     stop_seen = True
                     stop_absent_since = None
                 elif stop_absent_since is None:
@@ -2118,13 +2153,8 @@ def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout)
                 idle = now - last_activity
                 if idle >= idle_limit:
                     break
-                if now - last_update >= 15:
-                    task_message = task_status_message(last_tasks)
-                    prefix = task_message + " " if task_message else "Still waiting for Copilot response. "
-                    emit_status("task" if task_message else "waiting",
-                                f"{prefix}{int(now - started)}s elapsed; no new output for "
-                                f"{int(idle)}s of {idle_limit}s allowed.",
-                                last_tasks if task_message else None)
+                if now - last_update >= HEARTBEAT_SECONDS:
+                    emit_status("heartbeat", heartbeat_message(running, now - started, idle, idle_limit))
                     last_update = now
                 if downloaded is None:
                     pause(page, 1500)
@@ -2133,7 +2163,8 @@ def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout)
                 (work / "copilot-timeout.html").write_text(page.content(), encoding="utf-8")
                 ctx.close()
                 task_note = " " + task_status_message(last_tasks) if last_tasks else ""
-                raise SystemExit(f"No downloadable result: Copilot showed no new output for {args.timeout}s."
+                raise SystemExit(f"No downloadable result: Copilot showed no new output and no Stop control "
+                                 f"for {args.timeout}s."
                                  f"{task_note} Temporary diagnostics were removed with the run directory")
             # Download discovery starts only after Stop is gone; read the final response layout twice.
             emit_status("waiting", "Copilot response finished; downloadable repository found.")
@@ -2203,7 +2234,7 @@ def main():
     fp.add_argument("--work-dir", default=None, help="Optional parent for automatically deleted temporary round-trip files")
     fp.add_argument("--backup-dir", default=None, help="Deprecated; rollback copies are temporary and automatically deleted")
     fp.add_argument("--timeout", type=int, default=900,
-                    help="Seconds without new on-screen output, a task-card change or a Stop-control change "
+                    help="Seconds without a visible Stop control, new on-screen output or a task-card change "
                          "before giving up (default: 900)")
     fp.add_argument("--model", default="GPT/GPT-6",
                     help="Provider/model pair (default: GPT/GPT-6)")

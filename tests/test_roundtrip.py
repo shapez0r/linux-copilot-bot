@@ -103,6 +103,41 @@ class RoundTripTests(unittest.TestCase):
         self.assertNotIn("secret_code", str(self.statuses))
         self.assertNotIn("no new output", str(self.statuses))
 
+    def test_heartbeat_refreshes_its_timestamp_and_clears_when_the_response_ends(self):
+        engine = self.tmp / "heartbeat.py"
+        engine.write_text(textwrap.dedent('''
+            import json, sys
+            def status(stage, message, tasks=None):
+                value = {"stage": stage, "message": message}
+                if tasks is not None:
+                    value["tasks"] = tasks
+                print("ROUNDTRIP_STATUS:" + json.dumps(value), file=sys.stderr, flush=True)
+            status("waiting", "Waiting for Copilot")
+            status("heartbeat", "Prompt still running (Stop control visible); 15s elapsed.")
+            status("heartbeat", "Prompt still running (Stop control visible); 30s elapsed.")
+            status("task", "Copilot task", [{"title": "Build app", "state": "In progress", "steps": []}])
+            status("waiting", "Copilot response finished; downloadable repository found.")
+            print(json.dumps({"chat_response": "done"}))
+        '''))
+        cfg = make_config(self.tmp, engine=engine)
+        stamps = iter(f"2026-11-01 16:21:{second:02d} UTC+00:00" for second in range(10, 60))
+        with mock.patch("bot.roundtrip.format_timestamp", side_effect=lambda *args: next(stamps)):
+            RoundTrip(cfg).run(self.tmp, "x", "GPT/GPT-6",
+                               lambda s, m: self.statuses.append((s, m)), threading.Event())
+        stages = [stage for stage, _ in self.statuses]
+        self.assertEqual(stages, ["waiting", "heartbeat", "heartbeat", "task", "waiting"])
+        first, second = self.statuses[1][1], self.statuses[2][1]
+        self.assertEqual(first, "Currently doing: Waiting for Copilot\n\n"
+                                "[2026-11-01 16:21:10 UTC+00:00] Waiting for Copilot\n\n"
+                                "[2026-11-01 16:21:11 UTC+00:00] \u23f3 Prompt still running "
+                                "(Stop control visible); 15s elapsed.")
+        self.assertTrue(second.endswith("[2026-11-01 16:21:12 UTC+00:00] \u23f3 Prompt still running "
+                                        "(Stop control visible); 30s elapsed."))
+        self.assertNotIn("15s elapsed", second)
+        self.assertIn("Build app", self.statuses[3][1])
+        self.assertIn("30s elapsed", self.statuses[3][1])
+        self.assertNotIn("\u23f3", self.statuses[4][1])
+
     def test_failure_reports_engine_message(self):
         with self.assertRaisesRegex(RoundTripError, "No downloadable result"):
             self.run_engine("fail")
