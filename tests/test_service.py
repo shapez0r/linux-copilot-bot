@@ -13,7 +13,7 @@ from bot.gitops import Git, GitError
 from bot.roundtrip import Cancelled, RoundTripError
 from bot.service import (CONFIRM_DELETE, CREATE_APP, CUSTOM_MODEL, DELETE_APP, DEPLOY_NOTE,
                          FIX_APP, HELP, KNOWN_MODELS, LIST_APPS, MAIN_KEYBOARD, MODEL_KEYBOARD,
-                         NEW_APP_PROMPT,
+                         NEW_APP_PROMPT, PRIVATE_REPO, PUBLIC_REPO, VISIBILITY_KEYBOARD,
                          USER_HELP, USER_KEYBOARD, REGISTER_SERVICES, START_APP, STOP_APP, Bot, Progress)
 from bot.state import ADMIN_OWNER, State, telegram_owner
 
@@ -249,8 +249,14 @@ class ServiceTests(unittest.TestCase):
             self.assertIn("Choose one of the listed models", self.tg.sent[-1])
             self.say("Claude/Opus 9")
             self.say("eurofish")
+            self.assertIn("private by default", self.tg.sent[-1])
+            self.assertEqual(self.tg.markups[-1], VISIBILITY_KEYBOARD)
+            self.say("eurofish")
+            self.assertIn("Choose a private or public repository", self.tg.sent[-1])
+            self.say(PRIVATE_REPO)
             self.assertIn("styling, architecture and stack", self.tg.sent[-1])
             self.say("Build a task board with a different color palette")
+        self.assertEqual(self.gh.created, [("me/menu-app", True)])
         self.assertEqual(self.rt.calls[0][2], "Claude/Opus 9")
         self.assertEqual(self.rt.calls[0][1],
                          NEW_APP_PROMPT.format(port=8081) +
@@ -277,8 +283,29 @@ class ServiceTests(unittest.TestCase):
             self.say(CUSTOM_MODEL)
             self.say("Other/Model 1")
             self.say("eurofish")
+            self.say(PUBLIC_REPO)
             self.say("Build it")
+        self.assertEqual(self.gh.created, [("me/custom-model-app", False)])
         self.assertEqual(self.rt.calls[0][2], "Other/Model 1")
+
+    def test_regular_user_create_app_menu_skips_visibility_and_creates_a_public_repository(self):
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}),
+                                   cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.app_routes.return_value = [
+                {"app": "eurofish", "hostname": "eurofish.kurwalab.fyi",
+                 "service": "http://127.0.0.1:8080"},
+            ]
+            routes.return_value.next_port.return_value = 8081
+            routes.return_value.prepare.return_value = "Tunnel configured."
+            self.user_say(77, CREATE_APP)
+            self.user_say(77, "member-menu-app")
+            self.user_say(77, "Claude/Opus 9")
+            self.user_say(77, "eurofish")
+            self.assertIn("styling, architecture and stack", self.tg.sent[-1])
+            self.user_say(77, "Build it")
+        self.assertEqual(self.gh.created, [("me/member-menu-app", False)])
 
     def test_fix_app_menu_selects_an_app_accepts_a_prompt_and_restores_the_menu(self):
         self.state.repo = "me/app"
@@ -336,7 +363,7 @@ class ServiceTests(unittest.TestCase):
     def test_repository_context_does_not_displace_the_current_header(self):
         message = "Currently doing: Testing\n\n[2026-11-01 16:21:21 UTC+00:00] ▶ Testing"
         self.assertEqual(self.bot._repo_progress("me/app", message),
-                         "Currently doing: Testing\nRepository: me/app\n\n"
+                         "Currently doing: Testing\nRepository: https://github.com/me/app\n\n"
                          "[2026-11-01 16:21:21 UTC+00:00] ▶ Testing")
 
     def test_request_without_repository_asks_to_select_one(self):
@@ -399,6 +426,7 @@ class ServiceTests(unittest.TestCase):
             routes.return_value.next_port.return_value = 8085
             routes.return_value.prepare.return_value = "Tunnel configured."
             self.user_say(77, "/new member-app build it")
+        self.assertEqual(self.gh.created, [("me/member-app", False)])
         report = self.tg.sent[-1]
         self.assertIn("App: https://member-app.kurwalab.fyi", report)
         self.assertIn("Copilot output:\nAdded it.", report)
@@ -454,6 +482,14 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("app address could not be configured", self.tg.sent[-1])
         self.assertNotIn("kurwalab-tunnel", self.tg.sent[-1])
 
+    def test_regular_users_cannot_create_private_repositories(self):
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}),
+                                   cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        self.user_say(77, "/new private member-app build it")
+        self.assertIn("use public repositories", self.tg.sent[-1])
+        self.assertEqual(self.gh.created, [])
+
     def test_admin_can_fix_a_regular_users_app_without_changing_its_owner(self):
         self.state.set_app_owner("me/app", telegram_owner(77))
         self.state.save()
@@ -507,7 +543,7 @@ class ServiceTests(unittest.TestCase):
             with self.subTest(options=options):
                 remaining, private, model, template, name, prompt, error = Bot._new_options(options)
                 self.assertEqual(remaining, "")
-                self.assertTrue(private)
+                self.assertIsNone(private)
                 self.assertEqual(model, "Claude/Opus 5.5")
                 self.assertEqual(template, "simple-arkanoid")
                 self.assertIn(name, ("seabattle", "seabattle-game"))

@@ -55,6 +55,8 @@ CUSTOM_MODEL = "⌨️ Enter another model"
 LIST_ROUTES = "📋 List routes"
 ADD_ROUTE = "➕ Add or update route"
 DELETE_ROUTE = "🗑 Delete route"
+PRIVATE_REPO = "🔒 Private repository"
+PUBLIC_REPO = "🌐 Public repository"
 CONFIRM_DELETE = "✅ Yes, delete it"
 KEEP_APP = "↩️ No, keep it"
 
@@ -94,6 +96,7 @@ ROUTES_KEYBOARD = _keyboard([
     [BACK_TO_MENU],
 ])
 CANCEL_KEYBOARD = _keyboard([[CANCEL_ACTION], [BACK_TO_MENU]])
+VISIBILITY_KEYBOARD = _keyboard([[PRIVATE_REPO, PUBLIC_REPO], [CANCEL_ACTION], [BACK_TO_MENU]])
 
 NEW_USAGE = (
     "Usage: /new [public|private] [model=<provider/model>] [template=<app>] "
@@ -103,7 +106,7 @@ NEW_USAGE = (
 HELP = """Use the buttons below to create and manage apps. You can also send a request as plain text to change the active repository, commit, push and redeploy it with `make run`.
 
 /menu - show the app-management menu
-/new [public|private] [model=<provider/model>] [template=<app>] name="<name|owner/name>" prompt="<request>" - create, build, deploy and publish a new app
+/new [public|private] [model=<provider/model>] [template=<app>] name="<name|owner/name>" prompt="<request>" - create, build, deploy and publish a new app (private by default)
 /delete <name|owner/name> - permanently delete an app service, GitHub repository, local checkout and tunnel route
 /repo [public|private] <name|owner/name> - select a repository; a missing one is created from the eurofish reference app
 /repo - show the active repository
@@ -122,7 +125,7 @@ HELP = """Use the buttons below to create and manage apps. You can also send a r
 USER_HELP = """Use the buttons below to create and list apps, and to fix, start, or stop apps you created.
 
 /menu - show the app menu
-/new [public|private] [model=<provider/model>] [template=<app>] name="<name|owner/name>" prompt="<request>" - create, build, deploy and publish a new app
+/new [model=<provider/model>] [template=<app>] name="<name|owner/name>" prompt="<request>" - create, build, deploy and publish a new app in a public repository
 /fix <repo> <request> - fix an app you created
 /fix [browser|nobrowser] [tempchat|notempchat] <request> - fix your active app
 /list - list every local app with its status and public URL
@@ -499,13 +502,20 @@ class Bot:
                 self.say(chat_id, "Choose one of the templates loaded from the tunnel routes.")
                 return
             data["template"] = text
-            dialog["step"] = "prompt"
-            self.say_keyboard(
-                chat_id,
-                "Describe the app to create. The template's styling, architecture and stack are used by default; "
-                "include any changes you want in this prompt.",
-                CANCEL_KEYBOARD,
-            )
+            if self._is_admin(dialog.get("user_id")):
+                dialog["step"] = "visibility"
+                self.say_keyboard(chat_id, "Choose the GitHub repository visibility. Admin apps are private "
+                                           "by default.", VISIBILITY_KEYBOARD)
+                return
+            data["private"] = False
+            self._ask_create_prompt(chat_id, dialog)
+            return
+        if step == "visibility":
+            if text not in (PRIVATE_REPO, PUBLIC_REPO):
+                self.say_keyboard(chat_id, "Choose a private or public repository.", VISIBILITY_KEYBOARD)
+                return
+            data["private"] = text == PRIVATE_REPO
+            self._ask_create_prompt(chat_id, dialog)
             return
         if step == "prompt":
             request = text.strip()
@@ -515,7 +525,7 @@ class Bot:
             self._dialogs.pop(chat_id, None)
             started = self._spawn(
                 chat_id,
-                lambda: self._new_app(chat_id, data["ref"], request, True,
+                lambda: self._new_app(chat_id, data["ref"], request, data["private"],
                                       data["model"], data["template"], dialog.get("user_id")),
                 after=lambda: self.show_menu(chat_id, "App creation finished. Choose the next action.",
                                              dialog.get("user_id")),
@@ -524,6 +534,15 @@ class Bot:
             if not started:
                 self.show_menu(chat_id, "App creation could not start because another job is running.",
                                dialog.get("user_id"))
+
+    def _ask_create_prompt(self, chat_id: int, dialog: dict):
+        dialog["step"] = "prompt"
+        self.say_keyboard(
+            chat_id,
+            "Describe the app to create. The template's styling, architecture and stack are used by default; "
+            "include any changes you want in this prompt.",
+            CANCEL_KEYBOARD,
+        )
 
     def _begin_model_selection(self, chat_id: int, dialog: dict):
         """Check Copilot's Claude and GPT submenus before offering a model for this dialog."""
@@ -1024,9 +1043,12 @@ class Bot:
 
     @staticmethod
     def _new_options(arg: str):
-        """Read leading visibility, name, model, template and prompt options in any order."""
+        """Read leading visibility, name, model, template and prompt options in any order.
+
+        Visibility is None when neither public nor private is given.
+        """
         remaining = arg.lstrip()
-        private, model, template, name, prompt = True, None, None, None, None
+        private, model, template, name, prompt = None, None, None, None, None
         while remaining:
             parts = remaining.split(None, 1)
             option = parts[0].lower()
@@ -1101,6 +1123,14 @@ class Bot:
         if model is not None and not self._valid_model(model):
             self.say(chat_id, "Use a provider/model pair such as GPT/GPT-6.")
             return
+        # Admin apps are private unless public is requested; regular-user apps are always public.
+        if self._is_admin(user_id):
+            private = private is not False
+        elif private:
+            self.say(chat_id, "Apps created by regular users use public repositories; omit private.")
+            return
+        else:
+            private = False
         if template is not None and not self._valid_route(template):
             self.say(chat_id, "Template app names must be lowercase DNS labels containing only letters, digits and hyphens.")
             return
@@ -1466,7 +1496,8 @@ class Bot:
         """Keep the current-activity header first while retaining repository context."""
         first, separator, rest = message.partition("\n")
         if first.startswith("Currently doing: "):
-            return first + f"\nRepository: {html.escape(full, quote=False)}" + (separator + rest if separator else "")
+            url = html.escape(f"https://github.com/{full}", quote=False)
+            return first + f"\nRepository: {url}" + (separator + rest if separator else "")
         return f"{full}: {message}"
 
     @staticmethod
