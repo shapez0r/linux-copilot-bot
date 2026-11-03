@@ -1374,77 +1374,162 @@ def parse_model(model: str):
         raise ValueError("Model must be a provider/model pair (e.g. GPT/GPT-6)")
     return provider, name
 
-def select_model(page, model: str, sel):
-    """Select a model through its provider submenu."""
-    import re
-    provider_key, requested = parse_model(model)
+PROVIDERS = {
+    "Claude": ("Claude/Anthropic", (r"^Claude\s*$", r"^Anthropic\s*$", r"^Claude\s+Anthropic\s*$",
+                                     r"^Anthropic\s+Claude\s*$"), ("Claude", "Anthropic")),
+    "GPT": ("GPT/OpenAI", (r"^GPT\s*$", r"^OpenAI\s*$", r"^GPT\s+OpenAI\s*$"), ("GPT", "OpenAI")),
+}
+MENU_ITEMS = ('[role="menuitem"]:visible, [role="menuitemradio"]:visible, '
+              '[role="menuitemcheckbox"]:visible, [role="option"]:visible')
+
+
+def _visible_text_nodes(page, pattern):
+    out = []
+    loc = page.get_by_text(re.compile(pattern, re.I))
+    for i in range(loc.count()):
+        node = loc.nth(i)
+        try:
+            if node.is_visible(): out.append(node)
+        except Exception: pass
+    return out
+
+
+def _menu_row(node):
+    """The clickable menu row that contains a text node."""
+    semantic = node.locator('xpath=ancestor-or-self::*[@role="menuitem" or @role="option" or @aria-haspopup="menu" or self::button][1]')
+    if semantic.count():
+        try:
+            if semantic.first.is_visible(): return semantic.first
+        except Exception: pass
+    cur = node
+    for _ in range(7):
+        cur = cur.locator('xpath=..')
+        if not cur.count(): break
+        try:
+            box = cur.bounding_box()
+            if box and box["width"] >= 180 and 35 <= box["height"] <= 110: return cur
+        except Exception: pass
+    return node
+
+
+def open_model_picker(page, sel):
     button = page.locator(sel["model_button"]).first
     button.wait_for(state="visible", timeout=30000)
     button.click()
     page.wait_for_timeout(750)
 
-    def visible_nodes(pattern):
-        out = []
-        loc = page.get_by_text(re.compile(pattern, re.I))
-        for i in range(loc.count()):
-            node = loc.nth(i)
-            try:
-                if node.is_visible(): out.append(node)
-            except Exception: pass
-        return out
 
-    def row_for(node):
-        semantic = node.locator('xpath=ancestor-or-self::*[@role="menuitem" or @role="option" or @aria-haspopup="menu" or self::button][1]')
-        if semantic.count():
-            try:
-                if semantic.first.is_visible(): return semantic.first
-            except Exception: pass
-        cur = node
-        for _ in range(7):
-            cur = cur.locator('xpath=..')
-            if not cur.count(): break
-            try:
-                box = cur.bounding_box()
-                if box and box["width"] >= 180 and 35 <= box["height"] <= 110: return cur
-            except Exception: pass
-        return node
+def close_model_picker(page):
+    for _ in range(2):
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        page.wait_for_timeout(300)
 
-    is_claude = provider_key == "Claude"
-    provider_name = "Claude/Anthropic" if is_claude else "GPT/OpenAI"
-    patterns = ((r"^Claude\s*$", r"^Anthropic\s*$", r"^Claude\s+Anthropic\s*$",
-                 r"^Anthropic\s+Claude\s*$") if is_claude else
-                (r"^GPT\s*$", r"^OpenAI\s*$", r"^GPT\s+OpenAI\s*$"))
-    provider = None
+
+def find_provider_row(page, provider_key):
+    """Return the Claude or GPT row of the open model picker, or None."""
+    _, patterns, terms = PROVIDERS[provider_key]
     for pattern in patterns:
-        nodes = visible_nodes(pattern)
+        nodes = _visible_text_nodes(page, pattern)
         if nodes:
-            provider = row_for(nodes[-1]); break
-    if provider is None:
-        rows = page.locator('[role="menuitem"]:visible, [aria-haspopup="menu"]:visible')
-        for i in range(rows.count()):
-            row = rows.nth(i)
-            try:
-                text = " ".join(row.inner_text().split())
-                terms = ("Claude", "Anthropic") if is_claude else ("GPT", "OpenAI")
-                if all(re.search(r"\b" + term + r"\b", text, re.I) for term in terms):
-                    provider = row; break
-            except Exception: pass
-    if provider is None:
-        raise SystemExit(f"{provider_name} provider row not found after opening the model picker.")
+            return _menu_row(nodes[-1])
+    rows = page.locator('[role="menuitem"]:visible, [aria-haspopup="menu"]:visible')
+    for i in range(rows.count()):
+        row = rows.nth(i)
+        try:
+            text = " ".join(row.inner_text().split())
+            if all(re.search(r"\b" + term + r"\b", text, re.I) for term in terms):
+                return row
+        except Exception: pass
+    return None
 
+
+def hover_provider(page, provider):
+    """Move the pointer across a provider row so its submenu opens."""
     box = provider.bounding_box()
-    if not box: raise SystemExit(f"{provider_name} provider row has no bounding box.")
+    if not box:
+        return False
     y = box["y"] + box["height"] / 2
     page.mouse.move(box["x"] + box["width"] * .25, y)
     page.wait_for_timeout(300)
     page.mouse.move(box["x"] + box["width"] - 10, y, steps=16)
     page.wait_for_timeout(1800)
+    return True
+
+
+def menu_item_labels(page):
+    """Visible menu entries as (first text line, disabled) pairs, in screen order."""
+    items = []
+    loc = page.locator(MENU_ITEMS)
+    for i in range(loc.count()):
+        node = loc.nth(i)
+        try:
+            label = next((line.strip() for line in node.inner_text(timeout=2000).splitlines() if line.strip()), "")
+            disabled = (node.get_attribute("aria-disabled") or "").lower() == "true"
+        except Exception:
+            continue
+        if label:
+            items.append((label, disabled))
+    return items
+
+
+def provider_models(page, provider_key):
+    """Enabled model names in one provider submenu of the open model picker."""
+    provider = find_provider_row(page, provider_key)
+    if provider is None:
+        return []
+    names = set(PROVIDERS[provider_key][2])
+    before = {label for label, _ in menu_item_labels(page)}
+    if not hover_provider(page, provider):
+        return []
+    added = [item for item in menu_item_labels(page) if item[0] not in before]
+    if not added:
+        provider.click(); page.wait_for_timeout(1200)
+        added = [item for item in menu_item_labels(page) if item[0] not in before]
+    models = []
+    for label, disabled in added:
+        if not disabled and label not in names and label not in models:
+            models.append(label)
+    return models
+
+
+def list_models(page, sel):
+    """Return provider/model pairs offered in the Claude and GPT submenus of the model picker."""
+    found = []
+    for provider_key in PROVIDERS:
+        raise_if_quit()
+        open_model_picker(page, sel)
+        try:
+            models = provider_models(page, provider_key)
+        finally:
+            close_model_picker(page)
+        emit_status("models", f"{PROVIDERS[provider_key][0]}: {len(models)} model(s) available.")
+        found.extend(f"{provider_key}/{name}" for name in models)
+    if not found:
+        raise SystemExit("No Claude or GPT models were found in the Copilot model picker. "
+                         "Override COPILOT_MODEL_BUTTON if the picker changed.")
+    return found
+
+
+def select_model(page, model: str, sel):
+    """Select a model through its provider submenu."""
+    provider_key, requested = parse_model(model)
+    provider_key = "Claude" if provider_key == "Claude" else "GPT"
+    provider_name = PROVIDERS[provider_key][0]
+    open_model_picker(page, sel)
+    provider = find_provider_row(page, provider_key)
+    if provider is None:
+        raise SystemExit(f"{provider_name} provider row not found after opening the model picker.")
+    if not hover_provider(page, provider):
+        raise SystemExit(f"{provider_name} provider row has no bounding box.")
     pattern = r"^" + re.escape(requested) + r"\s*$"
-    options = visible_nodes(pattern)
+    options = _visible_text_nodes(page, pattern)
     if not options:
-        provider.click(); page.wait_for_timeout(1200); options = visible_nodes(pattern)
+        provider.click(); page.wait_for_timeout(1200); options = _visible_text_nodes(page, pattern)
     if not options: raise SystemExit(f"Model {requested!r} was not found in the {provider_name} submenu.")
-    option = row_for(options[-1])
+    option = _menu_row(options[-1])
     if option.get_attribute("aria-disabled") == "true": raise SystemExit(f"Model {requested!r} is disabled.")
     option.click(); page.wait_for_timeout(1000)
 
@@ -1697,6 +1782,37 @@ def cmd_login(args):
         input()
         ctx.close()
     print(f"Saved browser profile: {profile}")
+
+
+def cmd_models(args):
+    """Print the Claude and GPT models currently offered by Copilot's model picker as JSON."""
+    from playwright.sync_api import sync_playwright
+    profile = Path(args.profile).expanduser().resolve()
+    if not profile.exists():
+        raise SystemExit("Browser profile missing. Run the login command first.")
+    start_quit_listener()
+    with tempfile.TemporaryDirectory(prefix="copilot-models-") as work, sync_playwright() as p:
+        emit_status("browser", "Launching Copilot browser...")
+        ctx = open_context(p, profile, browser_is_headless(args.show_browser), Path(work))
+        try:
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            emit_status("browser", "Opening Copilot Chat...")
+            page.goto(args.url, wait_until="domcontentloaded", timeout=120000)
+            wait_for_ui(page)
+            sel = selectors_from_env()
+            # The picker is read in the same Temporary chat state that the prompt will use.
+            set_temporary_chat(page, sel, args.temporary_chat)
+            emit_status("models", "Checking the Claude and GPT model submenus...")
+            models = list_models(page, sel)
+        except QuitRequested:
+            emit_status("cancelled", "Model check cancelled.")
+            raise SystemExit(QUIT_EXIT_CODE)
+        finally:
+            try:
+                ctx.close()
+            except Exception:
+                pass
+    print(json.dumps({"models": models}))
 
 
 def read_chat_response(page):
@@ -2007,6 +2123,12 @@ def main():
     fp.add_argument("--attach", action="append", default=[], metavar="PATH",
                     help="Additional file (e.g. a picture) to attach to the prompt; repeat for several files")
     fp.set_defaults(fn=cmd_fix)
+    mp = sp.add_parser("models", help="List the Claude and GPT models offered by the model picker as JSON")
+    mp.add_argument("--show-browser", action="store_true",
+                    help="Show Chromium when a graphical display is available (default: invisible)")
+    mp.add_argument("--no-temporary-chat", dest="temporary_chat", action="store_false", default=True,
+                    help="Read the picker with Temporary chat disabled (default: enabled)")
+    mp.set_defaults(fn=cmd_models)
     args = ap.parse_args(); args.fn(args)
 
 if __name__ == "__main__":

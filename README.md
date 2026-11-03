@@ -60,11 +60,15 @@ Administrators have every bot permission. Regular users can create apps, list al
 Send `/start` or `/menu` to open a role-specific persistent keyboard. Regular users see creation, listing, fixing, and start/stop controls for their apps; administrators also see service registration, deletion, repository, model, status, and tunnel-management options. The guided **Create an app** flow:
 
 1. asks for a lowercase app name;
-2. offers `Claude/Sonnet 5.5`, `Claude/Opus 5.5`, `GPT/GPT-6`, `GPT/GPT-6.1 Sol`, or a free-form provider/model value;
+2. checks the models available in Copilot (see below) and offers them for selection;
 3. loads template choices from local HTTP routes on the configured Cloudflare tunnel and keeps only apps that also have a local checkout under `REPOS_DIR`;
 4. explains that the template's styling, architecture, and stack are retained by default but can be changed in the app description;
 5. accepts the description, then shows the existing edited progress message while Copilot builds, commits, deploys, and publishes the app;
 6. returns the final public app link when provisioning succeeds.
+
+The guided **Fix an app** flow offers the apps the sender may fix, checks the available models, accepts the chosen model and the fix request, and then runs, commits, pushes, and redeploys the app with that model. The chosen model applies only to that request; the shared model set with `/model` is unchanged.
+
+Before either flow offers models, the bot opens Copilot with the browser profile, reads the **Claude** and **GPT** submenus of the model picker, and shows every enabled entry as a `provider/model` button, such as `Claude/Opus 5.5`. The check uses the shared job slot and can be stopped with **Cancel / stop**. If the picker cannot be read, the bot reports why and offers `Claude/Sonnet 5.5`, `Claude/Opus 5.5`, `GPT/GPT-6`, `GPT/GPT-6.1 Sol`, or a free-form provider/model value instead.
 
 Apps created through the guided flow are private GitHub repositories. Use the `/new public ...` command when a public repository is required. The administrator menu also provides app service registration and controls, confirmed app deletion, repository selection, model selection, status, and Cloudflare route management. Command forms remain available for automation and direct use, subject to the same permissions.
 
@@ -134,7 +138,7 @@ Settings come from `.env` (or the file named by `BOT_ENV_FILE`); real environmen
 | `CLOUDFLARE_ZONE_ID` | empty | Zone containing the public hostname; required with the Cloudflare token. |
 | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL` | Copilot Telegram Bot | Identity on bot commits. |
 
-The engine's selector overrides (`COPILOT_COMPOSER`, `COPILOT_FILE_INPUT`, `COPILOT_SEND`, `COPILOT_DOWNLOAD`, `COPILOT_MODEL_BUTTON`, `COPILOT_TEMPORARY_CHAT`, `COPILOT_REASONING`, `COPILOT_STOP`) are CSS selectors read from the bot's environment when Copilot's UI changes. Run `python3 engine/copilot_repo_roundtrip.py --help` for the engine's options.
+The engine's selector overrides (`COPILOT_COMPOSER`, `COPILOT_FILE_INPUT`, `COPILOT_SEND`, `COPILOT_DOWNLOAD`, `COPILOT_MODEL_BUTTON`, `COPILOT_TEMPORARY_CHAT`, `COPILOT_REASONING`, `COPILOT_STOP`) are CSS selectors read from the bot's environment when Copilot's UI changes. Run `python3 engine/copilot_repo_roundtrip.py --help` for the engine's options; its `models` command prints the Claude and GPT models offered by the picker as JSON.
 
 Without `.env` values or `/fix` overrides, requests use `nobrowser` and `tempchat`. Telegram options apply only to the request that contains them and take precedence over `.env`.
 
@@ -149,7 +153,7 @@ Without `.env` values or `/fix` overrides, requests use `nobrowser` and `tempcha
 
 | Path | Purpose |
 | --- | --- |
-| `engine/copilot_repo_roundtrip.py` | Playwright round-trip engine (`login` and `fix`), the single automation engine. |
+| `engine/copilot_repo_roundtrip.py` | Playwright round-trip engine (`login`, `models`, and `fix`), the single automation engine. |
 | `bot/service.py`, `bot/state.py` | Role-aware menus, permissions, app ownership, per-user selections, guided conversations, commands, and the request pipeline. |
 | `bot/telegram_api.py`, `bot/github_api.py` | Telegram long polling, reply keyboards, and GitHub REST clients (standard library only). |
 | `bot/gitops.py`, `bot/repos.py` | Seed, clone, sync, commit, push; repository references. |

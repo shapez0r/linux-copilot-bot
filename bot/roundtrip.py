@@ -412,6 +412,45 @@ class RoundTrip:
                 elif line.strip() and not line.startswith("ROUNDTRIP_CHAT:"):
                     tail.append(line.strip())
 
+        return self._finish(proc, read_stderr, out, tail, cancel, "The Copilot round-trip")
+
+    def models_command(self, show_browser=None, temporary_chat=None):
+        show_browser = self._cfg.show_browser if show_browser is None else show_browser
+        temporary_chat = self._cfg.temporary_chat if temporary_chat is None else temporary_chat
+        cmd = [sys.executable, str(self._cfg.engine), "--profile", str(self._cfg.profile), "models"]
+        if show_browser:
+            cmd.append("--show-browser")
+        if not temporary_chat:
+            cmd.append("--no-temporary-chat")
+        return cmd
+
+    def list_models(self, on_status, cancel: threading.Event) -> list[str]:
+        """Return the provider/model pairs currently offered in Copilot's Claude and GPT submenus."""
+        proc = subprocess.Popen(self.models_command(), stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
+                                env={k: v for k, v in os.environ.items() if k not in SECRET_NAMES})
+        tail, out = deque(maxlen=8), []
+
+        def read_stderr():
+            for line in proc.stderr:
+                line = line.rstrip()
+                status = parse_status(line)
+                if status:
+                    on_status(*status)
+                elif line.strip():
+                    tail.append(line.strip())
+
+        result = self._finish(proc, read_stderr, out, tail, cancel, "The Copilot model check")
+        models = result.get("models") if isinstance(result, dict) else None
+        if not isinstance(models, list):
+            raise RoundTripError("The Copilot model check returned no model list.")
+        valid = [" ".join(str(model).split()) for model in models]
+        return list(dict.fromkeys(model for model in valid
+                                  if model.count("/") == 1 and all(part.strip() for part in model.split("/"))))
+
+    @staticmethod
+    def _finish(proc, read_stderr, out, tail, cancel: threading.Event, label: str):
+        """Relay engine output, forward a cancel request, and parse the JSON result."""
         readers = [threading.Thread(target=read_stderr, daemon=True),
                    threading.Thread(target=lambda: out.append(proc.stdout.read()), daemon=True)]
         for reader in readers:
@@ -439,8 +478,8 @@ class RoundTrip:
         if proc.returncode != 0 and (cancel.is_set() or proc.returncode == QUIT_EXIT_CODE):
             raise Cancelled()
         if proc.returncode != 0:
-            raise RoundTripError("The Copilot round-trip failed: " + (" | ".join(tail) or f"exit code {proc.returncode}"))
+            raise RoundTripError(f"{label} failed: " + (" | ".join(tail) or f"exit code {proc.returncode}"))
         try:
             return json.loads("".join(out))
         except ValueError:
-            raise RoundTripError("The Copilot round-trip returned no valid result.") from None
+            raise RoundTripError(f"{label} returned no valid result.") from None

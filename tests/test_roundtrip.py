@@ -113,6 +113,31 @@ class RoundTripTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "t", "GITHUB_TOKEN": "g"}):
             self.assertEqual(self.run_engine("env")["chat_response"], "")
 
+    def test_model_check_uses_the_engine_models_command(self):
+        self.assertEqual(RoundTrip(self.cfg).models_command()[-1], "models")
+        cfg = make_config(self.tmp, show_browser=True, temporary_chat=False)
+        self.assertEqual(RoundTrip(cfg).models_command()[-3:], ["models", "--show-browser", "--no-temporary-chat"])
+
+    def test_model_check_returns_valid_unique_models_and_relays_status(self):
+        engine = self.tmp / "models.py"
+        engine.write_text(textwrap.dedent('''
+            import json, sys
+            print("ROUNDTRIP_STATUS:" + json.dumps({"stage": "models", "message": "Checking"}),
+                  file=sys.stderr, flush=True)
+            print(json.dumps({"models": ["Claude/Opus 9", "GPT/GPT-9  Pro", "Claude/Opus 9", "broken"]}))
+        '''))
+        cfg = make_config(self.tmp, engine=engine)
+        models = RoundTrip(cfg).list_models(lambda s, m: self.statuses.append((s, m)), threading.Event())
+        self.assertEqual(models, ["Claude/Opus 9", "GPT/GPT-9 Pro"])
+        self.assertEqual(self.statuses, [("models", "Checking")])
+
+    def test_model_check_failure_reports_engine_message(self):
+        engine = self.tmp / "models.py"
+        engine.write_text("import sys\nprint('No Claude or GPT models were found', file=sys.stderr)\nsys.exit(1)\n")
+        cfg = make_config(self.tmp, engine=engine)
+        with self.assertRaisesRegex(RoundTripError, "model check failed: No Claude or GPT models"):
+            RoundTrip(cfg).list_models(lambda s, m: None, threading.Event())
+
     def test_parse_status(self):
         self.assertEqual(parse_status('ROUNDTRIP_STATUS:' + json.dumps({"stage": "a", "message": "b"})), ("a", "b"))
         for bad in ("ROUNDTRIP_STATUS:{", "ROUNDTRIP_STATUS:{}", "other"):

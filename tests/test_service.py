@@ -10,9 +10,10 @@ from bot.cloudflare import CloudflareError
 from bot.deploy import DeployResult
 from bot.github_api import GitHubError
 from bot.gitops import Git, GitError
-from bot.roundtrip import Cancelled
+from bot.roundtrip import Cancelled, RoundTripError
 from bot.service import (CONFIRM_DELETE, CREATE_APP, CUSTOM_MODEL, DELETE_APP, DEPLOY_NOTE,
-                         FIX_APP, HELP, KNOWN_MODELS, LIST_APPS, MAIN_KEYBOARD, NEW_APP_PROMPT,
+                         FIX_APP, HELP, KNOWN_MODELS, LIST_APPS, MAIN_KEYBOARD, MODEL_KEYBOARD,
+                         NEW_APP_PROMPT,
                          USER_HELP, USER_KEYBOARD, REGISTER_SERVICES, START_APP, STOP_APP, Bot, Progress)
 from bot.state import ADMIN_OWNER, State, telegram_owner
 
@@ -79,6 +80,13 @@ class FakeRoundTrip:
 
     def __init__(self, behavior="change"):
         self.behavior, self.calls = behavior, []
+        self.models, self.model_error, self.model_checks = ["Claude/Opus 9", "GPT/GPT-9 Pro"], None, 0
+
+    def list_models(self, on_status, cancel):
+        self.model_checks += 1
+        if self.model_error:
+            raise self.model_error
+        return list(self.models)
 
     def run(self, repo_dir, request, model, on_status, cancel, show_browser=None, temporary_chat=None):
         self.calls.append((Path(repo_dir), request, model, show_browser, temporary_chat))
@@ -230,18 +238,26 @@ class ServiceTests(unittest.TestCase):
                 "Tunnel: https://menu-app.kurwalab.fyi -> http://127.0.0.1:8081.")
             self.say(CREATE_APP)
             self.say("menu-app")
+            self.assertEqual(self.rt.model_checks, 1)
+            self.assertIn("available in Copilot now", self.tg.sent[-1])
+            labels = [button["text"] for row in self.tg.markups[-1]["keyboard"] for button in row]
+            self.assertEqual(labels[:2], ["Claude/Opus 9", "GPT/GPT-9 Pro"])
+            self.assertNotIn(CUSTOM_MODEL, labels)
             self.say(KNOWN_MODELS[0])
+            self.assertIn("Choose one of the listed models", self.tg.sent[-1])
+            self.say("Claude/Opus 9")
             self.say("eurofish")
             self.assertIn("styling, architecture and stack", self.tg.sent[-1])
             self.say("Build a task board with a different color palette")
-        self.assertEqual(self.rt.calls[0][2], "Claude/Sonnet 5.5")
+        self.assertEqual(self.rt.calls[0][2], "Claude/Opus 9")
         self.assertEqual(self.rt.calls[0][1],
                          NEW_APP_PROMPT.format(port=8081) +
                          "Build a task board with a different color palette" + DEPLOY_NOTE)
         self.assertTrue(any("App: https://menu-app.kurwalab.fyi" in message for message in self.tg.sent))
         self.assertEqual(self.tg.markups[-1], MAIN_KEYBOARD)
 
-    def test_create_app_menu_accepts_a_custom_model(self):
+    def test_create_app_menu_falls_back_to_defaults_and_a_custom_model_when_the_check_fails(self):
+        self.rt.model_error = RoundTripError("The Copilot model check failed: picker missing")
         self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
                                    cloudflare_zone_id="b" * 32)
         with patch("bot.service.CloudflareRoutes") as routes:
@@ -253,6 +269,9 @@ class ServiceTests(unittest.TestCase):
             routes.return_value.prepare.return_value = "Tunnel configured."
             self.say(CREATE_APP)
             self.say("custom-model-app")
+            self.assertIn("Could not check the available models", self.tg.sent[-1])
+            self.assertIn("picker missing", self.tg.sent[-1])
+            self.assertEqual(self.tg.markups[-1], MODEL_KEYBOARD)
             self.say(CUSTOM_MODEL)
             self.say("Other/Model 1")
             self.say("eurofish")
@@ -263,10 +282,38 @@ class ServiceTests(unittest.TestCase):
         self.state.repo = "me/app"
         self.say(FIX_APP)
         self.say("me/app")
+        self.assertEqual(self.rt.model_checks, 1)
+        self.assertIn("will fix the app", self.tg.sent[-1])
+        self.say("GPT/GPT-9 Pro")
         self.say("Improve the empty state")
         self.assertEqual(self.rt.calls[0][0], self.dest)
         self.assertEqual(self.rt.calls[0][1], "Improve the empty state" + DEPLOY_NOTE)
+        self.assertEqual(self.rt.calls[0][2], "GPT/GPT-9 Pro")
+        self.assertEqual(self.state.model, "GPT/GPT-6")
         self.assertEqual(self.tg.markups[-1], MAIN_KEYBOARD)
+
+    def test_cancel_during_the_model_check_stops_it_and_closes_the_dialog(self):
+        started, release = threading.Event(), threading.Event()
+
+        def slow_models(on_status, cancel):
+            started.set()
+            self.assertTrue(release.wait(10))
+            if cancel.is_set():
+                raise Cancelled()
+            return ["GPT/GPT-9 Pro"]
+
+        self.rt.list_models = slow_models
+        self.bot.handle_text(1, FIX_APP)
+        self.bot.handle_text(1, "me/app")
+        self.assertTrue(started.wait(10))
+        self.bot.handle_text(1, "Improve it")
+        self.assertIn("Still checking the available models", self.tg.sent[-1])
+        self.bot.handle_text(1, "/cancel")
+        self.assertTrue(self.bot._cancel.is_set())
+        release.set()
+        self.bot._worker.join(timeout=30)
+        self.assertNotIn(1, self.bot._dialogs)
+        self.assertEqual(self.rt.calls, [])
 
     def test_delete_app_menu_requires_confirmation(self):
         self.say(DELETE_APP)

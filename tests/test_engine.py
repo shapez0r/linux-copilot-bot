@@ -499,6 +499,57 @@ secret_two()</code>
         self.assertEqual(blocks[0]['title'], 'Coding and executing')
         self.assertEqual(blocks[0]['layout'], 'working')
 
+    MODEL_PICKER = '''<style>[role="menu"][hidden] { display: none; }
+      [role="menuitem"] { display: block; width: 240px; height: 40px; }</style>
+      <button aria-label="Model" id="picker">Auto</button>
+      <div role="menu" id="main" hidden>
+        <div role="menuitem" aria-haspopup="menu" data-sub="claude">Claude</div>
+        <div role="menuitem" aria-haspopup="menu" data-sub="gpt">GPT</div>
+        <div role="menuitem">Auto</div>
+      </div>
+      <div role="menu" id="claude" hidden>
+        <div role="menuitem">Sonnet 5.5<br><small>Fast</small></div>
+        <div role="menuitem">Opus 5.5</div>
+      </div>
+      <div role="menu" id="gpt" hidden>
+        <div role="menuitem">GPT-6</div>
+        <div role="menuitem">GPT-6.1 Sol</div>
+        <div role="menuitem" aria-disabled="true">GPT-5 Legacy</div>
+      </div>
+      <p id="chosen"></p>
+      <script>
+        const menus = () => document.querySelectorAll('[role="menu"]');
+        picker.onclick = () => { main.hidden = false; };
+        document.querySelectorAll('[data-sub]').forEach(row => row.addEventListener('mouseenter', () => {
+          claude.hidden = gpt.hidden = true;
+          document.getElementById(row.dataset.sub).hidden = false;
+        }));
+        document.querySelectorAll('#claude [role="menuitem"], #gpt [role="menuitem"]').forEach(item =>
+          item.addEventListener('click', () => {
+            chosen.textContent = item.firstChild.textContent;
+            menus().forEach(menu => menu.hidden = true);
+          }));
+        document.addEventListener('keydown', event => {
+          if (event.key === 'Escape') menus().forEach(menu => menu.hidden = true);
+        });
+      </script>'''
+
+    def test_model_check_reads_enabled_entries_of_both_provider_submenus(self):
+        self.page.set_content(self.MODEL_PICKER)
+        self.assertEqual(rt.list_models(self.page, self.sel), [
+            'Claude/Sonnet 5.5', 'Claude/Opus 5.5', 'GPT/GPT-6', 'GPT/GPT-6.1 Sol'])
+        self.assertTrue(self.page.locator('#main').is_hidden())
+
+    def test_model_check_requires_at_least_one_model(self):
+        self.page.set_content('<button aria-label="Model">Auto</button>')
+        with self.assertRaisesRegex(SystemExit, 'No Claude or GPT models'):
+            rt.list_models(self.page, self.sel)
+
+    def test_listed_model_can_be_selected(self):
+        self.page.set_content(self.MODEL_PICKER)
+        rt.select_model(self.page, 'GPT/GPT-6.1 Sol', self.sel)
+        self.assertEqual(self.page.locator('#chosen').inner_text(), 'GPT-6.1 Sol')
+
     def test_descriptive_zip_link_with_opaque_target(self):
         self.page.set_content('<a href="/artifact/123">Download the complete fixed repository ZIP</a>')
         found = rt.download_candidates(self.page, self.sel, [])

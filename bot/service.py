@@ -451,6 +451,9 @@ class Bot:
             self.say(chat_id, "That action expired. Open the menu and try again.")
             return
         flow, step = dialog["flow"], dialog["step"]
+        if step == "loading-models":
+            self.say(chat_id, "Still checking the available models. Wait for the list or use Cancel / stop.")
+            return
         if flow == "create":
             self._handle_create_dialog(chat_id, dialog, text)
         elif flow == "fix":
@@ -484,27 +487,11 @@ class Bot:
                 self.say(chat_id, "App names must be lowercase DNS labels containing only letters, digits and hyphens.")
                 return
             data["ref"] = text.strip()
-            dialog["step"] = "model"
-            self.say_keyboard(chat_id, "Choose the model that will create the app.", MODEL_KEYBOARD)
+            self._begin_model_selection(chat_id, dialog)
             return
-        if step == "model":
-            if text == CUSTOM_MODEL:
-                dialog["step"] = "custom-model"
-                self.say_keyboard(chat_id, "Enter a provider/model value, such as `Provider/Model name`.",
-                                  CANCEL_KEYBOARD)
-                return
-            if text not in KNOWN_MODELS:
-                self.say_keyboard(chat_id, "Choose a listed model or select Enter another model.", MODEL_KEYBOARD)
-                return
-            data["model"] = text
-            self._begin_template_selection(chat_id, dialog)
-            return
-        if step == "custom-model":
-            if not self._valid_model(text):
-                self.say(chat_id, "Use a provider/model pair such as GPT/GPT-6.")
-                return
-            data["model"] = text.strip()
-            self._begin_template_selection(chat_id, dialog)
+        if step in ("model", "custom-model"):
+            if self._handle_model_choice(chat_id, dialog, text):
+                self._begin_template_selection(chat_id, dialog)
             return
         if step == "template":
             if text not in data["templates"]:
@@ -536,6 +523,59 @@ class Bot:
             if not started:
                 self.show_menu(chat_id, "App creation could not start because another job is running.",
                                dialog.get("user_id"))
+
+    def _begin_model_selection(self, chat_id: int, dialog: dict):
+        """Check Copilot's Claude and GPT submenus before offering a model for this dialog."""
+        dialog["step"] = "loading-models"
+        self.say_keyboard(chat_id, "Checking the Claude and GPT models currently available in Copilot...",
+                          CANCEL_KEYBOARD)
+        started = self._spawn(chat_id, lambda: self._load_model_choices(chat_id, dialog),
+                              user_id=dialog.get("user_id"))
+        if not started:
+            self._dialogs.pop(chat_id, None)
+
+    def _load_model_choices(self, chat_id: int, dialog: dict):
+        try:
+            models = self.roundtrip.list_models(lambda stage, message: None, self._cancel)
+            error = "" if models else "the model picker listed no Claude or GPT models"
+        except RoundTripError as exc:
+            models, error = [], str(exc)
+        if self._dialogs.get(chat_id) is not dialog:
+            return
+        data = dialog["data"]
+        purpose = "create the app" if dialog["flow"] == "create" else "fix the app"
+        dialog["step"] = "model"
+        if models:
+            data["models"], data["allow_custom"] = models, False
+            self.say_keyboard(chat_id, f"Choose the model that will {purpose}. These models are available in "
+                                       "Copilot now.", self._choice_keyboard(models))
+            return
+        # Without a readable picker, the default list and free-form entry keep the flow usable.
+        data["models"], data["allow_custom"] = list(KNOWN_MODELS), True
+        self.say_keyboard(chat_id, f"Could not check the available models: {error}\n"
+                                   f"Choose a default model that will {purpose}, or enter another one.",
+                          MODEL_KEYBOARD)
+
+    def _handle_model_choice(self, chat_id: int, dialog: dict, text: str) -> bool:
+        """Store the chosen model; returns False while the dialog still needs a valid choice."""
+        data = dialog["data"]
+        if dialog["step"] == "custom-model":
+            if not self._valid_model(text):
+                self.say(chat_id, "Use a provider/model pair such as GPT/GPT-6.")
+                return False
+            data["model"] = text.strip()
+            return True
+        if text == CUSTOM_MODEL and data.get("allow_custom"):
+            dialog["step"] = "custom-model"
+            self.say_keyboard(chat_id, "Enter a provider/model value, such as `Provider/Model name`.",
+                              CANCEL_KEYBOARD)
+            return False
+        if text not in data.get("models", ()):
+            keyboard = MODEL_KEYBOARD if data.get("allow_custom") else self._choice_keyboard(data["models"])
+            self.say_keyboard(chat_id, "Choose one of the listed models.", keyboard)
+            return False
+        data["model"] = text
+        return True
 
     def _begin_template_selection(self, chat_id: int, dialog: dict):
         dialog["step"] = "loading-templates"
@@ -586,16 +626,24 @@ class Bot:
                 self.say(chat_id, "You can only fix apps you created.")
                 return
             dialog["data"]["repo"] = full
-            dialog["step"] = "prompt"
-            self.say_keyboard(chat_id, "Describe what should be fixed or changed in this app.", CANCEL_KEYBOARD)
+            self._begin_model_selection(chat_id, dialog)
+            return
+        if dialog["step"] in ("model", "custom-model"):
+            if self._handle_model_choice(chat_id, dialog, text):
+                dialog["step"] = "prompt"
+                self.say_keyboard(chat_id, "Describe what should be fixed or changed in this app.",
+                                  CANCEL_KEYBOARD)
+            return
+        if dialog["step"] != "prompt":
             return
         request = text.strip()
         if not request:
             self.say(chat_id, "Enter a nonempty fix request.")
             return
-        repo = dialog["data"]["repo"]
+        repo, model = dialog["data"]["repo"], dialog["data"]["model"]
         self._dialogs.pop(chat_id, None)
-        started = self._spawn(chat_id, lambda: self._request(chat_id, repo, request, user_id=user_id),
+        started = self._spawn(chat_id, lambda: self._request(chat_id, repo, request, user_id=user_id,
+                                                             model=model),
                               after=lambda: self.show_menu(chat_id, "Fix finished. Choose the next action.",
                                                            user_id),
                               user_id=user_id)
@@ -910,6 +958,8 @@ class Bot:
 
     def cmd_cancel(self, chat_id: int, user_id=None):
         if chat_id in self._dialogs:
+            if self._dialogs[chat_id].get("step") == "loading-models" and self._job_user_id == user_id:
+                self._cancel.set()
             self.show_menu(chat_id, "Action cancelled.", user_id)
             return
         if self._lock.locked():
@@ -1327,7 +1377,7 @@ class Bot:
         self.say(chat_id, "\n".join([heading, github, local, tunnel, process, startup, active]))
 
     def _request(self, chat_id: int, ref: str, request: str,
-                 show_browser=None, temporary_chat=None, user_id=None):
+                 show_browser=None, temporary_chat=None, user_id=None, model=None):
         owner, name = parse_repo_ref(ref, self._owner_default())
         full = f"{owner}/{name}"
         if not self._can_fix(user_id, full):
@@ -1341,7 +1391,7 @@ class Bot:
             raise Cancelled()
         progress.update(f"{full}: sending the repository to Copilot...")
         try:
-            result = self.roundtrip.run(dest, request + DEPLOY_NOTE, self.state.model,
+            result = self.roundtrip.run(dest, request + DEPLOY_NOTE, model or self.state.model,
                                         lambda stage, msg: progress.update(self._repo_progress(full, msg), stage),
                                         self._cancel,
                                         show_browser, temporary_chat)
