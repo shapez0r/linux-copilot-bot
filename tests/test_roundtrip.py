@@ -83,6 +83,9 @@ class RoundTripTests(unittest.TestCase):
         configured = RoundTrip(cfg).command(self.tmp, "x", "A/B")
         self.assertIn("--show-browser", configured)
         self.assertIn("--no-temporary-chat", configured)
+        attached = RoundTrip(self.cfg).command(self.tmp, "x", "A/B", attachments=[self.tmp / "a.png", self.tmp / "b.pdf"])
+        self.assertEqual(attached[-6:], ["--attach", str(self.tmp / "a.png"), "--attach", str(self.tmp / "b.pdf"),
+                                         "--", "x"])
         overridden = RoundTrip(cfg).command(self.tmp, "x", "A/B", False, True)
         self.assertNotIn("--show-browser", overridden)
         self.assertNotIn("--no-temporary-chat", overridden)

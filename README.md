@@ -67,10 +67,16 @@ Send `/start` or `/menu` to open a role-specific persistent keyboard. Regular us
 4. for administrators, offers a choice between a private (default) and a public GitHub repository; regular users skip this step and always get a public repository;
 5. for administrators, offers a choice between a **Temporary chat**, which is not saved in Copilot, and a **Regular chat**, which stays in the Copilot chat history; regular users skip this step and use `BOT_TEMPORARY_CHAT`;
 6. explains that the template's styling, architecture, and stack are retained by default but can be changed in the app description;
-7. accepts the description, then shows the existing edited progress message while Copilot builds, commits, deploys, and publishes the app;
+7. accepts the description, together with any files attached as described in [Attaching files](#attaching-files), then shows the existing edited progress message while Copilot builds, commits, deploys, and publishes the app;
 8. returns the final public app link when provisioning succeeds.
 
-The guided **Fix an app** flow offers the apps the sender may fix that have a folder under `REPOS_DIR` (the same folders `/list` shows), so ownership records of apps without a local checkout are not offered; the **Delete an app** picker uses the same rule, and a name can still be typed. The flow then checks the available models, accepts the chosen model, lets administrators choose a temporary or regular Copilot chat, accepts the fix request, and then runs, commits, pushes, and redeploys the app with those choices. The chosen model and chat type apply only to that request; the shared model set with `/model` is unchanged, and regular users always use `BOT_TEMPORARY_CHAT`.
+The guided **Fix an app** flow offers the apps the sender may fix that have a folder under `REPOS_DIR` (the same folders `/list` shows), so ownership records of apps without a local checkout are not offered; the **Delete an app** picker uses the same rule, and a name can still be typed. The flow then checks the available models, accepts the chosen model, lets administrators choose a temporary or regular Copilot chat, accepts the fix request and any attached files, and then runs, commits, pushes, and redeploys the app with those choices. The chosen model and chat type apply only to that request; the shared model set with `/model` is unchanged, and regular users always use `BOT_TEMPORARY_CHAT`.
+
+#### Attaching files
+
+Administrators and regular users can attach any files, such as screenshots, photos, documents, logs, audio, or video, to a request that creates or fixes an app. Send them to the bot before the request text, at any step of the guided flows, or with a caption: the caption is handled as the request text (for example a plain request, `/fix app <request>`, `/new name=app prompt="..."`, or the description in a guided flow), and the files in a Telegram album are all attached to the album's caption. Files without a caption are held for the sender's next create or fix request, which uses and then clears them; the bot confirms the files it is holding. Up to 10 files can be attached to one request, and each file must be at most 20 MB, the largest file a Telegram bot can download. **Cancel / stop**, `/cancel`, and **Main menu** discard held files.
+
+When the request runs, the bot downloads the files into a temporary folder under `STATE_DIR`, attaches them to the Copilot prompt after the repository archive, and removes the folder when the round-trip ends. For `/new`, the files are downloaded before the repository is created, so a failed download stops the request without creating anything. Copilot is told that the files are context and not part of the repository; they are not committed. Copilot must accept each file type: a file it refuses fails the request with an error.
 
 Before either flow offers models, the bot opens Copilot with the browser profile, reads the **Claude** and **GPT** submenus of the model picker, and shows every enabled entry as a `provider/model` button, such as `Claude/Opus 5.5`. The check uses the shared job slot and can be stopped with **Cancel / stop**. If the picker cannot be read, the bot reports why and offers `Claude/Sonnet 5.5`, `Claude/Opus 5.5`, `GPT/GPT-6`, `GPT/GPT-6.1 Sol`, or a free-form provider/model value instead.
 
@@ -84,6 +90,7 @@ Apps created by regular users are public GitHub repositories. Apps created by ad
 | `/repo <name>` or `/repo <owner/name>` | **Admin only.** Select the administrator's active repository. A missing repository is created and seeded from `<REPOS_DIR>/eurofish`; an existing one is cloned or fast-forwarded. A GitHub URL is also accepted. An untracked repository selected this way is assigned to `kurwalab.fyi admins`. |
 | `/repo` | **Admin only.** Show the administrator's active repository. |
 | plain text | Run the text as a request against the sender's active repository. Regular users are restricted to apps they created. |
+| files, screenshots, or photos | Attach them to the sender's next create or fix request; a caption runs as that request. See [Attaching files](#attaching-files). |
 | `/fix <repo> <request>` | Select a repository and run a request in one message. Administrators can use `linux-copilot-bot` to change the bot itself. Regular users are restricted to apps they created. |
 | `/fix [browser\|nobrowser] [tempchat\|notempchat] <request>` | Run a request against the sender's active repository with one or both per-request options. Options may be supplied in either order. Regular users are restricted to apps they created. |
 | `/list` | List every direct app folder under `REPOS_DIR` except the bot repository, using each app's current systemd state. Administrators see name, status, folder, tunnel port, and tunnel URL, plus a `linux-copilot-bot` entry with the bot service's status and folder; regular users see name, status without a process id, and public URL. Missing routes are identified, and route details are marked unavailable when Cloudflare is not configured or cannot be reached. Available to all configured users. |
@@ -94,7 +101,7 @@ Apps created by regular users are public GitHub repositories. Apps created by ad
 | `/cloudflare delete <subdomain>` | **Admin only.** Delete the named ingress route and its matching tunnel CNAME. |
 | `/model <provider/model>` | **Admin only.** Choose the shared Copilot model label (default `GPT/GPT-6`). |
 | `/status` | **Admin only.** Show the sender's repository, model, job state, and whether the app is running. |
-| `/cancel` | Stop the sender's running job. Administrators may stop any running job. |
+| `/cancel` | Stop the sender's running job and discard the sender's held attachments. Administrators may stop any running job. |
 
 Administrators use `public` or `private` to choose visibility when creating a repository; the default is `private`. Regular users' `/new` apps are always public: `public` is accepted and `private` is refused. For `/new`, specify the app repository with `name="<name|owner/name>"`, for example `/new name="fresh-app" prompt="build a starter app"`. Administrators may add `tempchat` or `notempchat` to use a temporary or a saved regular Copilot chat for that app; without either, `BOT_TEMPORARY_CHAT` applies, and regular users' `/new` commands that include either option are refused. The `name`, `model=<provider/model>`, `template=<app>`, and `prompt="<request>"` options may appear in any order with the visibility and chat-type options, before the request. Straight single or double quotes and their typographic equivalents are accepted around option values. Quote a multiword prompt unless `prompt=` is the final option, in which case it consumes the remaining text. Use the other quote style for quotes inside a quoted request. Empty, malformed, or repeated `prompt=` options are rejected. The positional repository and trailing request forms are also accepted, for example `/new fresh-app build a starter app` or `/new prompt="build a starter app" fresh-app`. App names still must be lowercase DNS labels; quotes do not allow spaces or uppercase letters. The model overrides the active model only while creating that app. The template must name an existing local app directory directly under `<REPOS_DIR>`. Existing repositories keep their visibility. Private repositories are cloned using `GITHUB_TOKEN` through `GIT_ASKPASS`, without storing credentials in remote URLs.
 
@@ -109,7 +116,7 @@ One job runs at a time. Progress is shown in a single message that is edited as 
 ### What a request does
 
 - **Prepare:** the checkout must be on a branch with no uncommitted changes; the bot fast-forwards it to `origin`. A mode-only change of `bin/git-askpass` in the bot's own checkout is reverted first; any other change still stops the request.
-- **Round-trip:** the engine uploads a ZIP of the committed `HEAD`, asks Copilot for the complete fixed repository, validates the returned ZIP, and replaces the worktree. The bot appends a note asking Copilot to keep a Makefile whose `run` target starts one HTTP server in the foreground and to keep secrets and runtime data outside the repository.
+- **Round-trip:** the engine uploads a ZIP of the committed `HEAD`, asks Copilot for the complete fixed repository, validates the returned ZIP, and replaces the worktree. Attached files are uploaded with the archive as context. The bot appends a note asking Copilot to keep a Makefile whose `run` target starts one HTTP server in the foreground and to keep secrets and runtime data outside the repository.
 - **Commit and push:** all changes are committed on the current branch with the first line of the request as the subject, and pushed to `origin`. If Copilot changed nothing, nothing is committed or deployed. A failed push leaves the commit locally and is reported; the next request pushes it.
 - **Redeploy:** the bot uses non-interactive `sudo` to write and enable `/etc/systemd/system/copilot-app-<name>.service`, then asks systemd to restart it. The unit sets the app repository as `WorkingDirectory`, executes `make run`, restarts on failure, removes bot secrets from its environment, and appends output to `<STATE_DIR>/logs/<name>.log`. The redeploy counts as successful only when systemd reports the service active through `DEPLOY_SETTLE_SECONDS`; otherwise the systemd state and log tail are sent. A repository without a usable `run` target is pushed but not started.
 - **New-app publish:** after a successful `/new` service restart, the bot creates `<name>.kurwalab.fyi` on `kurwalab-tunnel`, targeting the allocated `127.0.0.1` port. If deployment or routing fails, the report identifies the completed and failed stages.
@@ -151,7 +158,7 @@ Settings come from `.env` (or the file named by `BOT_ENV_FILE`); real environmen
 | `CLOUDFLARE_ZONE_ID` | empty | Zone containing the public hostname; required with the Cloudflare token. |
 | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL` | Copilot Telegram Bot | Identity on bot commits. |
 
-The engine's selector overrides (`COPILOT_COMPOSER`, `COPILOT_FILE_INPUT`, `COPILOT_SEND`, `COPILOT_DOWNLOAD`, `COPILOT_MODEL_BUTTON`, `COPILOT_TEMPORARY_CHAT`, `COPILOT_REASONING`, `COPILOT_STOP`) are CSS selectors read from the bot's environment when Copilot's UI changes. Run `python3 engine/copilot_repo_roundtrip.py --help` for the engine's options; its `models` command prints the Claude and GPT models offered by the picker as JSON.
+The engine's selector overrides (`COPILOT_COMPOSER`, `COPILOT_FILE_INPUT`, `COPILOT_SEND`, `COPILOT_DOWNLOAD`, `COPILOT_MODEL_BUTTON`, `COPILOT_TEMPORARY_CHAT`, `COPILOT_REASONING`, `COPILOT_STOP`) are CSS selectors read from the bot's environment when Copilot's UI changes. Run `python3 engine/copilot_repo_roundtrip.py --help` for the engine's options; its `models` command prints the Claude and GPT models offered by the picker as JSON, and the repeatable `fix --attach <path>` option attaches extra files to the prompt.
 
 Without `.env` values or per-request overrides, requests use `nobrowser` and `tempchat`. Telegram options and guided chat-type choices apply only to the request that contains them and take precedence over `.env`.
 
@@ -159,7 +166,7 @@ Without `.env` values or per-request overrides, requests use `nobrowser` and `te
 
 - The bot obeys only Telegram user ids in `TELEGRAM_ADMIN_IDS` and `TELEGRAM_USER_IDS`. Administrators can manage every app and infrastructure setting; regular users can execute Copilot-written code only through apps recorded as their own.
 - A request can create or change a `Makefile` that the bot then runs. Use a dedicated unprivileged VM user, restrict its passwordless sudo rules to the required service-management commands, restrict the GitHub token to the repositories involved, and keep `.env` and the browser profile readable only by that user.
-- Upload only repositories approved for your organization's Copilot environment.
+- Upload only repositories and attachments approved for your organization's Copilot environment. Attachments are kept only in a temporary folder under `STATE_DIR` while their request runs.
 - Telegram, GitHub, and Cloudflare API tokens are redacted from errors and messages. App units explicitly unset these token variables and `VIRTUAL_ENV`.
 
 ## Layout
@@ -167,8 +174,8 @@ Without `.env` values or per-request overrides, requests use `nobrowser` and `te
 | Path | Purpose |
 | --- | --- |
 | `engine/copilot_repo_roundtrip.py` | Playwright round-trip engine (`login`, `models`, and `fix`), the single automation engine. |
-| `bot/service.py`, `bot/state.py` | Role-aware menus, admin/user view switching, permissions, app ownership, per-user selections, guided conversations, commands, and the request pipeline. |
-| `bot/telegram_api.py`, `bot/github_api.py` | Telegram long polling, reply keyboards, HTML-formatted messages, and GitHub REST clients (standard library only). |
+| `bot/service.py`, `bot/state.py` | Role-aware menus, admin/user view switching, permissions, app ownership, per-user selections, guided conversations, commands, held attachments, and the request pipeline. |
+| `bot/telegram_api.py`, `bot/github_api.py` | Telegram long polling, reply keyboards, HTML-formatted messages, file downloads, and GitHub REST clients (standard library only). |
 | `bot/gitops.py`, `bot/repos.py` | Seed, clone, sync, commit, push; repository references. |
 | `bot/roundtrip.py`, `bot/deploy.py` | Engine subprocess runner; sudo-backed systemd system-unit registration, lifecycle control, status, and app logs. |
 | `bot/cloudflare.py` | Cloudflare tunnel ingress and DNS route management. |

@@ -30,6 +30,34 @@ class ChunkTests(unittest.TestCase):
         self.assertEqual(payloads[1]["reply_markup"], keyboard)
 
 
+class DownloadTests(unittest.TestCase):
+    def test_download_saves_the_file_and_errors_hide_the_token(self):
+        import tempfile
+        import urllib.error
+        from pathlib import Path
+        from unittest import mock
+        from bot.telegram_api import TelegramError
+        telegram = Telegram("secret-token")
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.side_effect = [b"abc", b""]
+        with tempfile.TemporaryDirectory() as work:
+            dest = Path(work) / "shot.png"
+            with patch.object(telegram, "_call", return_value={"file_path": "photos/f.png", "file_size": 3}), \
+                    patch("bot.telegram_api.urllib.request.urlopen", return_value=response) as urlopen:
+                self.assertEqual(telegram.download_file("id", dest), dest)
+            self.assertEqual(dest.read_bytes(), b"abc")
+            self.assertTrue(urlopen.call_args.args[0].full_url.endswith("/file/botsecret-token/photos/f.png"))
+            error = urllib.error.HTTPError("https://api.telegram.org/file/botsecret-token/x", 404, "nf", {}, None)
+            with patch.object(telegram, "_call", return_value={"file_path": "x"}), \
+                    patch("bot.telegram_api.urllib.request.urlopen", side_effect=error), \
+                    self.assertRaises(TelegramError) as caught:
+                telegram.download_file("id", dest)
+            self.assertNotIn("secret-token", str(caught.exception))
+            with patch.object(telegram, "_call", return_value={"file_path": "x", "file_size": 10}), \
+                    self.assertRaisesRegex(TelegramError, "download limit"):
+                telegram.download_file("id", dest, limit=5)
+
+
 class FormattedMessageTests(unittest.TestCase):
     def test_html_messages_set_parse_mode_and_edits_are_not_cut(self):
         telegram = Telegram("token")

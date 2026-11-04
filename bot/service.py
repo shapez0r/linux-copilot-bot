@@ -8,6 +8,7 @@ import shutil
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from .app_list import app_list_messages
@@ -20,7 +21,7 @@ from .repos import RepoError, local_path, parse_repo_ref
 from .roundtrip import (Cancelled, RoundTrip, RoundTripError, StatusTimeline,
                         format_stage_status)
 from .state import ADMIN_OWNER, State, telegram_owner
-from .telegram_api import Telegram, TelegramError
+from .telegram_api import DOWNLOAD_LIMIT, Telegram, TelegramError
 
 log = logging.getLogger("bot")
 
@@ -39,6 +40,8 @@ NEW_APP_PROMPT = (
     "Use this app as the template for a new app running on port {port}. Keep its architecture, stack and "
     "styling by default, but change any of them when the request below asks for it.\n\n"
 )
+# Files sent to the bot are attached to the next app request in the same chat.
+MAX_ATTACHMENTS = 10
 KNOWN_MODELS = (
     "Claude/Sonnet 5.5",
     "Claude/Opus 5.5",
@@ -124,7 +127,14 @@ NEW_USAGE = (
     'name="<name|owner/name>" prompt="<request>"'
 )
 
+ATTACH_HELP = (
+    f"Send files, screenshots or photos (up to {MAX_ATTACHMENTS}, each at most 20 MB) to attach them to your next "
+    "create or fix request; a file caption is used as the request text. Cancel / stop discards attached files."
+)
+
 HELP = f"""Use the buttons below to create and manage apps. You can also send a request as plain text to change the active repository, commit, push and redeploy it with `make run`. Use {USER_VIEW} in the main menu to use the bot as a regular user.
+
+{ATTACH_HELP}
 
 /menu - show the app-management menu
 /new [public|private] [tempchat|notempchat] [model=<provider/model>] [template=<app>] name="<name|owner/name>" prompt="<request>" - create, build, deploy and publish a new app (private by default)
@@ -141,10 +151,12 @@ HELP = f"""Use the buttons below to create and manage apps. You can also send a 
 /cloudflare delete <subdomain> - delete a tunnel route by name
 /model <provider/model> - choose the Copilot model (for example GPT/GPT-6)
 /status - show repository, model, job and app state
-/cancel - stop the running job
+/cancel - stop the running job and discard attached files
 /help - show this message"""
 ADMIN_VIEW_HINT = f"You are an admin in user view. Use {ADMIN_VIEW} in the main menu to return to admin view."
-USER_HELP = """Use the buttons below to create and list apps, and to fix, start, or stop apps you created.
+USER_HELP = f"""Use the buttons below to create and list apps, and to fix, start, or stop apps you created.
+
+{ATTACH_HELP}
 
 /menu - show the app menu
 /new [model=<provider/model>] [template=<app>] name="<name|owner/name>" prompt="<request>" - create, build, deploy and publish a new app in a public repository
@@ -152,7 +164,7 @@ USER_HELP = """Use the buttons below to create and list apps, and to fix, start,
 /fix [browser|nobrowser] [tempchat|notempchat] <request> - fix your active app
 /list - list every local app with its status and public URL
 /app start|stop <name> - start or stop one of your app services
-/cancel - stop your own running job
+/cancel - stop your own running job and discard attached files
 /help - show this message"""
 
 ADMIN_ONLY_BUTTONS = {
@@ -163,7 +175,13 @@ ADMIN_ONLY_COMMANDS = {"delete", "repo", "cloudflare", "model", "status", "regis
 ADMIN_ONLY_MESSAGE = "This action is available only to kurwalab.fyi admins."
 USER_VIEW_ADMIN_ONLY_MESSAGE = f"This action is available only in admin view. Use {ADMIN_VIEW} in the main menu."
 
-_BOT_ERRORS = (RepoError, GitError, GitHubError, RoundTripError, CloudflareError, DeployError)
+
+
+class AttachmentError(Exception):
+    """Raised when a file sent to the bot cannot be downloaded for a request."""
+
+
+_BOT_ERRORS = (RepoError, GitError, GitHubError, RoundTripError, CloudflareError, DeployError, AttachmentError)
 
 
 class Progress:
@@ -207,6 +225,8 @@ class Bot:
         self._job_user_id = None
         self._list_worker = None
         self._dialogs = {}
+        self._pending_files = {}
+        self._media_groups = {}
 
     # ---- Telegram loop -------------------------------------------------
 
@@ -227,6 +247,10 @@ class Bot:
                     self.handle_update(update)
                 except Exception:
                     log.exception("update failed")
+            try:
+                self.flush_media_groups()
+            except Exception:
+                log.exception("media group handling failed")
         self.shutdown()
 
     def shutdown(self):
@@ -242,10 +266,140 @@ class Bot:
             log.warning("ignored message from user %s", sender)
             return
         text = (message.get("text") or "").strip()
-        if text:
+        files = self._message_files(message)
+        if files:
+            self._receive_files(chat["id"], sender, files, (message.get("caption") or "").strip(),
+                                message.get("media_group_id"))
+        elif text:
             self.handle_text(chat["id"], text, sender)
         else:
-            self.say(chat["id"], "Send the request as text.")
+            self.say(chat["id"], "Send the request as text, or send files to attach to it.")
+
+    # ---- Attachments ---------------------------------------------------
+
+    @staticmethod
+    def _message_files(message: dict):
+        """Return the files of one Telegram message as {file_id, name, size} entries."""
+        def entry(item, name):
+            if not isinstance(item, dict) or not item.get("file_id"):
+                return None
+            return {"file_id": item["file_id"], "name": item.get("file_name") or name,
+                    "size": int(item.get("file_size") or 0)}
+
+        photos = [photo for photo in message.get("photo") or [] if isinstance(photo, dict)]
+        sticker = message.get("sticker") or {}
+        sticker_suffix = ".tgs" if sticker.get("is_animated") else ".webm" if sticker.get("is_video") else ".webp"
+        candidates = [
+            # Telegram lists photo sizes from smallest to largest.
+            entry(photos[-1], "photo.jpg") if photos else None,
+            entry(message.get("animation"), "animation.mp4"),
+            # An animation is also reported as a document; attach it once.
+            None if message.get("animation") else entry(message.get("document"), "file"),
+            entry(message.get("video"), "video.mp4"),
+            entry(message.get("audio"), "audio.mp3"),
+            entry(message.get("voice"), "voice.ogg"),
+            entry(message.get("video_note"), "video-note.mp4"),
+            entry(sticker, "sticker" + sticker_suffix),
+        ]
+        return [item for item in candidates if item]
+
+    def _receive_files(self, chat_id: int, user_id, files, caption: str, media_group=None):
+        """Queue files for the next request; a caption runs as that request with the queued files."""
+        error = self._queue_files(chat_id, files)
+        if media_group:
+            # Album items arrive as separate messages; the caption is handled after the whole batch.
+            group = self._media_groups.setdefault((chat_id, media_group),
+                                                  {"user_id": user_id, "caption": "", "failed": False})
+            group["caption"] = group["caption"] or caption
+            if error:
+                group["failed"] = True
+                self.say(chat_id, error)
+            return
+        if error:
+            self.say(chat_id, error + (" The caption was not run as a request." if caption else ""))
+        elif caption:
+            self.handle_text(chat_id, caption, user_id)
+        else:
+            self._acknowledge_files(chat_id)
+
+    def flush_media_groups(self):
+        """Handle the captions of albums received in the last polling batch."""
+        groups, self._media_groups = self._media_groups, {}
+        for (chat_id, _), group in groups.items():
+            if group["failed"]:
+                if group["caption"]:
+                    self.say(chat_id, "The caption was not run as a request because a file could not be "
+                                      "attached. Send the request text to use the attached files.")
+            elif group["caption"]:
+                self.handle_text(chat_id, group["caption"], group["user_id"])
+            else:
+                self._acknowledge_files(chat_id)
+
+    def _queue_files(self, chat_id: int, files) -> str:
+        """Add files to the chat's pending attachments; returns an error message when refused."""
+        pending = self._pending_files.setdefault(chat_id, [])
+        for item in files:
+            if item["size"] > DOWNLOAD_LIMIT:
+                return (f"{item['name']} is larger than 20 MB, the largest file a Telegram bot can download; "
+                        "it was not attached.")
+            if len(pending) >= MAX_ATTACHMENTS:
+                return f"At most {MAX_ATTACHMENTS} files can be attached to one request; {item['name']} was not attached."
+            pending.append(item)
+        return ""
+
+    def _acknowledge_files(self, chat_id: int):
+        pending = self._pending_files.get(chat_id) or []
+        if not pending:
+            return
+        names = ", ".join(item["name"] for item in pending)
+        self.say(chat_id, f"\U0001f4ce Attached for the next request ({len(pending)}): {names}\n"
+                          "Send the request text to start it, or use Cancel / stop to discard the files.")
+
+    def _discard_files(self, chat_id: int) -> str:
+        """Drop the chat's pending attachments and describe what was dropped."""
+        pending = self._pending_files.pop(chat_id, None)
+        return f" Discarded {len(pending)} attached file(s)." if pending else ""
+
+    def _spawn_request(self, chat_id: int, job, after=None, user_id=None) -> bool:
+        """Start a create or fix job with the chat's pending attachments, which it then consumes."""
+        files = list(self._pending_files.get(chat_id) or [])
+        started = self._spawn(chat_id, lambda: job(files), after=after, user_id=user_id)
+        if started:
+            self._pending_files.pop(chat_id, None)
+        return started
+
+    @contextmanager
+    def _downloaded(self, files, progress, label: str):
+        """Download attachments into a temporary folder that is removed after the request."""
+        if not files:
+            yield []
+            return
+        self.cfg.state_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="attachments-", dir=self.cfg.state_dir) as work:
+            paths, used = [], set()
+            progress.update(f"{label}: downloading {len(files)} attached file(s)...")
+            for item in files:
+                if self._cancel.is_set():
+                    raise Cancelled()
+                path = Path(work) / self._attachment_name(item["name"], used)
+                try:
+                    paths.append(self.tg.download_file(item["file_id"], path))
+                except TelegramError as error:
+                    raise AttachmentError(f"Could not download the attached file {item['name']}: "
+                                          f"{redact(str(error), self.cfg.secrets)}") from None
+            yield paths
+
+    @staticmethod
+    def _attachment_name(name: str, used: set) -> str:
+        """Return a safe, unique file name for an attachment."""
+        base = re.sub(r"[^\w.\- ]+", "_", Path(str(name)).name).strip(" .")[:100] or "file"
+        stem, dot, suffix = base.rpartition(".")
+        stem, suffix = (stem, dot + suffix) if stem else (base, "")
+        candidate, index = base, 2
+        while candidate.lower() in used:
+            candidate, index = f"{stem}-{index}{suffix}", index + 1
+        used.add(candidate.lower())
+        return candidate
 
     def say(self, chat_id: int, text: str):
         try:
@@ -296,7 +450,8 @@ class Bot:
         if user_id is not None and user_id not in self.cfg.authorized_ids:
             return
         if text == BACK_TO_MENU:
-            self.show_menu(chat_id, user_id=user_id)
+            discarded = self._discard_files(chat_id)
+            self.show_menu(chat_id, "What would you like to do?" + discarded, user_id=user_id)
             return
         if text == CANCEL_ACTION:
             self.cmd_cancel(chat_id, user_id)
@@ -609,11 +764,11 @@ class Bot:
                 self.say(chat_id, "Enter a nonempty app description.")
                 return
             self._dialogs.pop(chat_id, None)
-            started = self._spawn(
+            started = self._spawn_request(
                 chat_id,
-                lambda: self._new_app(chat_id, data["ref"], request, data["private"],
-                                      data["model"], data["template"], dialog.get("user_id"),
-                                      data.get("temporary_chat")),
+                lambda files: self._new_app(chat_id, data["ref"], request, data["private"],
+                                            data["model"], data["template"], dialog.get("user_id"),
+                                            data.get("temporary_chat"), files),
                 after=lambda: self.show_menu(chat_id, "App creation finished. Choose the next action.",
                                              dialog.get("user_id")),
                 user_id=dialog.get("user_id"),
@@ -627,7 +782,8 @@ class Bot:
         self.say_keyboard(
             chat_id,
             "Describe the app to create. The template's styling, architecture and stack are used by default; "
-            "include any changes you want in this prompt.",
+            "include any changes you want in this prompt. You can also send files, screenshots or photos "
+            "to attach to it, or use a file caption as the description.",
             CANCEL_KEYBOARD,
         )
 
@@ -649,7 +805,9 @@ class Bot:
 
     def _ask_fix_prompt(self, chat_id: int, dialog: dict):
         dialog["step"] = "prompt"
-        self.say_keyboard(chat_id, "Describe what should be fixed or changed in this app.", CANCEL_KEYBOARD)
+        self.say_keyboard(chat_id, "Describe what should be fixed or changed in this app. You can also send "
+                                   "files, screenshots or photos to attach to the request, or use a file "
+                                   "caption as the description.", CANCEL_KEYBOARD)
 
     def _begin_model_selection(self, chat_id: int, dialog: dict):
         """Check Copilot's Claude and GPT submenus before offering a model for this dialog."""
@@ -775,8 +933,9 @@ class Bot:
         repo, model = dialog["data"]["repo"], dialog["data"]["model"]
         temporary_chat = dialog["data"].get("temporary_chat")
         self._dialogs.pop(chat_id, None)
-        started = self._spawn(chat_id, lambda: self._request(chat_id, repo, request, user_id=user_id,
-                                                             model=model, temporary_chat=temporary_chat),
+        started = self._spawn_request(chat_id, lambda files: self._request(
+                                          chat_id, repo, request, user_id=user_id, model=model,
+                                          temporary_chat=temporary_chat, attachments=files),
                               after=lambda: self.show_menu(chat_id, "Fix finished. Choose the next action.",
                                                            user_id),
                               user_id=user_id)
@@ -1123,19 +1282,20 @@ class Bot:
             log.warning("send failed: %s", redact(str(error), self.cfg.secrets))
 
     def cmd_cancel(self, chat_id: int, user_id=None):
+        discarded = self._discard_files(chat_id)
         if chat_id in self._dialogs:
             if self._dialogs[chat_id].get("step") == "loading-models" and self._job_user_id == user_id:
                 self._cancel.set()
-            self.show_menu(chat_id, "Action cancelled.", user_id)
+            self.show_menu(chat_id, "Action cancelled." + discarded, user_id)
             return
         if self._lock.locked():
             if not self._is_admin(user_id) and self._job_user_id != user_id:
-                self.say(chat_id, "You can only cancel your own running job.")
+                self.say(chat_id, "You can only cancel your own running job." + discarded)
                 return
             self._cancel.set()
-            self.say(chat_id, "Cancelling; Copilot is asked to stop.")
+            self.say(chat_id, "Cancelling; Copilot is asked to stop." + discarded)
         else:
-            self.say(chat_id, "No job is running.")
+            self.say(chat_id, ("No job is running." + discarded) if discarded else "No job is running.")
 
     def cmd_fix(self, chat_id: int, arg: str, user_id=None):
         """Run a request with optional browser and Temporary chat overrides."""
@@ -1292,9 +1452,9 @@ class Bot:
         if self._cloudflare_unavailable(chat_id):
             return
         ref, request = parts[0], parts[1].strip()
-        self._spawn(chat_id, lambda: self._new_app(
-            chat_id, ref, request, private, model, template or NEW_REPO_TEMPLATE, user_id, temporary_chat),
-            user_id=user_id)
+        self._spawn_request(chat_id, lambda files: self._new_app(
+            chat_id, ref, request, private, model, template or NEW_REPO_TEMPLATE, user_id, temporary_chat,
+            files), user_id=user_id)
 
     def cmd_delete(self, chat_id: int, arg: str):
         if len(arg.split()) != 1:
@@ -1331,9 +1491,9 @@ class Bot:
         if not self._can_fix(user_id, full):
             self.say(chat_id, "You can only fix apps you created.")
             return
-        self._spawn(chat_id, lambda: self._request(chat_id, full, request,
-                                                   show_browser, temporary_chat, user_id),
-                    user_id=user_id)
+        self._spawn_request(chat_id, lambda files: self._request(
+            chat_id, full, request, show_browser, temporary_chat, user_id, attachments=files),
+            user_id=user_id)
 
     # ---- Job execution -------------------------------------------------
 
@@ -1441,7 +1601,7 @@ class Bot:
                  + (" Send your next message describing what to build." if new_only else ""))
 
     def _new_app(self, chat_id: int, ref: str, request: str, private: bool, model=None,
-                  template: str = NEW_REPO_TEMPLATE, user_id=None, temporary_chat=None):
+                  template: str = NEW_REPO_TEMPLATE, user_id=None, temporary_chat=None, attachments=()):
         owner, name = parse_repo_ref(ref, self._owner_default())
         if not self._valid_route(name):
             raise RepoError("App names must be lowercase DNS labels containing only letters, digits and hyphens.")
@@ -1453,63 +1613,65 @@ class Bot:
             raise RepoError(f"{full} already exists. Choose another app name.")
         if self._is_bot_app(template) or not (self.cfg.repos_dir / template).is_dir():
             raise RepoError(f"Template app is not available locally: {template}")
-        admin = self._is_admin(user_id)
-        creator = ADMIN_OWNER if admin else telegram_owner(user_id)
-        dest, _, _ = self._prepare(owner, name, progress, new_only=True, private=private,
-                                   template_name=template, managed_owner=creator, admin=admin)
-        self.state.set_active_repo(user_id, full, admin)
-        self.state.save()
-        routes = CloudflareRoutes(self.cfg)
-        progress.update(f"{full}: checking tunnel routes for the next port..." if admin
-                        else f"{full}: preparing the app address...")
-        port = routes.next_port()
-        prompt = NEW_APP_PROMPT.format(port=port) + request + DEPLOY_NOTE
-        if self._cancel.is_set():
-            raise Cancelled()
-        progress.update(f"{full}: sending the repository to Copilot for port {port}..." if admin
-                        else f"{full}: sending the repository to Copilot...")
-        try:
-            result = self.roundtrip.run(
-                dest, prompt, model or self.state.model,
-                lambda stage, msg: progress.update(self._repo_progress(full, msg), stage), self._cancel,
-                temporary_chat=temporary_chat)
-        except Cancelled:
+        # Files are downloaded before the repository is created, so a failed download leaves nothing behind.
+        with self._downloaded(attachments, progress, full) as files:
+            admin = self._is_admin(user_id)
+            creator = ADMIN_OWNER if admin else telegram_owner(user_id)
+            dest, _, _ = self._prepare(owner, name, progress, new_only=True, private=private,
+                                       template_name=template, managed_owner=creator, admin=admin)
+            self.state.set_active_repo(user_id, full, admin)
+            self.state.save()
+            routes = CloudflareRoutes(self.cfg)
+            progress.update(f"{full}: checking tunnel routes for the next port..." if admin
+                            else f"{full}: preparing the app address...")
+            port = routes.next_port()
+            prompt = NEW_APP_PROMPT.format(port=port) + request + DEPLOY_NOTE
+            if self._cancel.is_set():
+                raise Cancelled()
+            progress.update(f"{full}: sending the repository to Copilot for port {port}..." if admin
+                            else f"{full}: sending the repository to Copilot...")
+            try:
+                result = self.roundtrip.run(
+                    dest, prompt, model or self.state.model,
+                    lambda stage, msg: progress.update(self._repo_progress(full, msg), stage), self._cancel,
+                    temporary_chat=temporary_chat, attachments=files)
+            except Cancelled:
+                progress.flush()
+                self._warn_dirty(chat_id, dest, full, admin)
+                raise
+            progress.update(f"{full}: committing and pushing...")
+            pushed = self.git.commit_and_push(dest, request)
+            if pushed is None:
+                progress.flush()
+                output = (result.get("chat_response") or "(no final text returned)").strip()
+                self.say(chat_id, f"Copilot returned no changes to commit for {full}; nothing was deployed.\n\n"
+                                  f"Copilot output:\n{output}")
+                return
+            sha, pushed_branch = pushed
+            progress.update(f"{full}: registering and restarting its systemd service on port {port}..." if admin
+                            else f"{full}: starting the app...")
+            deploy = self.deployer.redeploy(name, dest)
+            if not deploy.ok:
+                progress.flush()
+                error = ("The app was not routed because deployment failed." if admin
+                         else "The app could not be started. Ask an admin to check it.")
+                self.say(chat_id, self._new_app_report(full, sha, pushed_branch, result, deploy.message,
+                                                       error=error, admin=admin))
+                return
+            url = self._app_url(name)
+            progress.update(f"{full}: creating {url}...")
+            try:
+                tunnel = routes.prepare(name, port)
+            except CloudflareError as error:
+                progress.flush()
+                error = (f"Tunnel setup failed: {error}" if admin
+                         else "The app address could not be published. Ask an admin to check it.")
+                self.say(chat_id, self._new_app_report(full, sha, pushed_branch, result, deploy.message,
+                                                       error=error, admin=admin))
+                return
             progress.flush()
-            self._warn_dirty(chat_id, dest, full, admin)
-            raise
-        progress.update(f"{full}: committing and pushing...")
-        pushed = self.git.commit_and_push(dest, request)
-        if pushed is None:
-            progress.flush()
-            output = (result.get("chat_response") or "(no final text returned)").strip()
-            self.say(chat_id, f"Copilot returned no changes to commit for {full}; nothing was deployed.\n\n"
-                              f"Copilot output:\n{output}")
-            return
-        sha, pushed_branch = pushed
-        progress.update(f"{full}: registering and restarting its systemd service on port {port}..." if admin
-                        else f"{full}: starting the app...")
-        deploy = self.deployer.redeploy(name, dest)
-        if not deploy.ok:
-            progress.flush()
-            error = ("The app was not routed because deployment failed." if admin
-                     else "The app could not be started. Ask an admin to check it.")
             self.say(chat_id, self._new_app_report(full, sha, pushed_branch, result, deploy.message,
-                                                   error=error, admin=admin))
-            return
-        url = self._app_url(name)
-        progress.update(f"{full}: creating {url}...")
-        try:
-            tunnel = routes.prepare(name, port)
-        except CloudflareError as error:
-            progress.flush()
-            error = (f"Tunnel setup failed: {error}" if admin
-                     else "The app address could not be published. Ask an admin to check it.")
-            self.say(chat_id, self._new_app_report(full, sha, pushed_branch, result, deploy.message,
-                                                   error=error, admin=admin))
-            return
-        progress.flush()
-        self.say(chat_id, self._new_app_report(full, sha, pushed_branch, result, deploy.message,
-                                               tunnel=tunnel, url=url, admin=admin))
+                                                   tunnel=tunnel, url=url, admin=admin))
 
     def _delete_app(self, chat_id: int, ref: str):
         """Attempt every app cleanup independently and report each outcome."""
@@ -1601,13 +1763,14 @@ class Bot:
         self.say(chat_id, "\n".join([heading, github, local, tunnel, process, startup, active]))
 
     def _request(self, chat_id: int, ref: str, request: str,
-                 show_browser=None, temporary_chat=None, user_id=None, model=None):
+                 show_browser=None, temporary_chat=None, user_id=None, model=None, attachments=()):
         owner, name = self._resolve_ref(ref)
         full = f"{owner}/{name}"
         if not self._can_fix(user_id, full):
             raise RepoError("You can only fix apps you created.")
         if self._is_bot_app(name):
-            self._bot_request(chat_id, owner, name, request, show_browser, temporary_chat, user_id, model)
+            self._bot_request(chat_id, owner, name, request, show_browser, temporary_chat, user_id, model,
+                              attachments)
             return
         progress = Progress(self.tg, chat_id, self.cfg)
         admin = self._is_admin(user_id)
@@ -1617,12 +1780,13 @@ class Bot:
         self.state.save()
         if self._cancel.is_set():
             raise Cancelled()
-        progress.update(f"{full}: sending the repository to Copilot...")
         try:
-            result = self.roundtrip.run(dest, request + DEPLOY_NOTE, model or self.state.model,
-                                        lambda stage, msg: progress.update(self._repo_progress(full, msg), stage),
-                                        self._cancel,
-                                        show_browser, temporary_chat)
+            with self._downloaded(attachments, progress, full) as files:
+                progress.update(f"{full}: sending the repository to Copilot...")
+                result = self.roundtrip.run(dest, request + DEPLOY_NOTE, model or self.state.model,
+                                            lambda stage, msg: progress.update(self._repo_progress(full, msg), stage),
+                                            self._cancel, show_browser, temporary_chat,
+                                            attachments=files)
         except Cancelled:
             progress.flush()
             self._warn_dirty(chat_id, dest, full, admin)
@@ -1641,7 +1805,7 @@ class Bot:
                                        url="" if admin else self._app_url(name)))
 
     def _bot_request(self, chat_id: int, owner: str, name: str, request: str,
-                     show_browser=None, temporary_chat=None, user_id=None, model=None):
+                     show_browser=None, temporary_chat=None, user_id=None, model=None, attachments=()):
         """Change the bot's own repository from a separate clone, then update and restart the bot.
 
         The live checkout keeps its ignored files (.env, .venv), which a full worktree replacement would remove.
@@ -1658,10 +1822,12 @@ class Bot:
             dest = Path(work) / name
             progress.update(f"{full}: cloning a separate working copy...")
             self.git.run("clone", "--branch", branch, self.gh.get_repo(owner, name)["clone_url"], str(dest))
-            progress.update(f"{full}: sending the repository to Copilot...")
-            result = self.roundtrip.run(dest, request + BOT_DEPLOY_NOTE, model or self.state.model,
-                                        lambda stage, msg: progress.update(self._repo_progress(full, msg), stage),
-                                        self._cancel, show_browser, temporary_chat)
+            with self._downloaded(attachments, progress, full) as files:
+                progress.update(f"{full}: sending the repository to Copilot...")
+                result = self.roundtrip.run(dest, request + BOT_DEPLOY_NOTE, model or self.state.model,
+                                            lambda stage, msg: progress.update(self._repo_progress(full, msg), stage),
+                                            self._cancel, show_browser, temporary_chat,
+                                            attachments=files)
             progress.update(f"{full}: committing and pushing...")
             pushed = self.git.commit_and_push(dest, request)
         if pushed is None:

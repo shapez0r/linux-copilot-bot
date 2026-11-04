@@ -18,6 +18,7 @@ from bot.service import (ADMIN_USER_VIEW_KEYBOARD, ADMIN_VIEW, ADMIN_VIEW_HINT, 
                          REGULAR_CHAT, TEMPORARY_CHAT, USER_HELP, USER_KEYBOARD, REGISTER_SERVICES,
                          START_APP, STOP_APP, Bot, Progress)
 from bot.state import ADMIN_OWNER, State, telegram_owner
+from bot.telegram_api import TelegramError
 
 
 class LocalGit(Git):
@@ -50,6 +51,12 @@ class FakeTelegram:
     def edit_message(self, chat_id, message_id, text, parse_mode=None):
         self.edits.append(text)
 
+    def download_file(self, file_id, dest):
+        if file_id == "broken":
+            raise TelegramError("download: HTTP 404")
+        Path(dest).write_bytes(f"data-{file_id}".encode())
+        return Path(dest)
+
 
 class FakeGitHub:
     login = "me"
@@ -81,7 +88,7 @@ class FakeRoundTrip:
     """Edits the checkout the way an applied Copilot result would."""
 
     def __init__(self, behavior="change"):
-        self.behavior, self.calls = behavior, []
+        self.behavior, self.calls, self.attachments = behavior, [], []
         self.models, self.model_error, self.model_checks = ["Claude/Opus 9", "GPT/GPT-9 Pro"], None, 0
 
     def list_models(self, on_status, cancel):
@@ -90,8 +97,10 @@ class FakeRoundTrip:
             raise self.model_error
         return list(self.models)
 
-    def run(self, repo_dir, request, model, on_status, cancel, show_browser=None, temporary_chat=None):
+    def run(self, repo_dir, request, model, on_status, cancel, show_browser=None, temporary_chat=None,
+            attachments=()):
         self.calls.append((Path(repo_dir), request, model, show_browser, temporary_chat))
+        self.attachments.append([(Path(path).name, Path(path).read_bytes()) for path in attachments])
         on_status("browser", "Opening Copilot")
         if self.behavior == "cancel":
             raise Cancelled()
@@ -1232,10 +1241,10 @@ class ServiceTests(unittest.TestCase):
         started = threading.Event()
 
         class Slow(FakeRoundTrip):
-            def run(inner, *args):
+            def run(inner, *args, **kwargs):
                 started.set()
                 release.wait(10)
-                return super().run(*args)
+                return super().run(*args, **kwargs)
 
         self.bot.roundtrip = Slow()
         self.bot.handle_text(1, "/fix app first")
@@ -1271,6 +1280,112 @@ class ServiceTests(unittest.TestCase):
         self.bot.run_forever(stop)
         self.assertEqual(offsets, [0, 0, 7])
         self.assertEqual(self.tg.sent, [HELP])
+
+    @staticmethod
+    def file_update(sender=42, caption=None, group=None, **content):
+        message = {"from": {"id": sender}, "chat": {"id": sender, "type": "private"}, **content}
+        if caption is not None:
+            message["caption"] = caption
+        if group is not None:
+            message["media_group_id"] = group
+        return {"message": message}
+
+    def send_file(self, sender=42, **kwargs):
+        self.bot.handle_update(self.file_update(sender, **kwargs))
+        self.bot.flush_media_groups()
+        for worker in (self.bot._worker, self.bot._list_worker):
+            if worker is not None:
+                worker.join(timeout=30)
+
+    def test_message_files_cover_documents_photos_and_media(self):
+        files = Bot._message_files({
+            "photo": [{"file_id": "small", "file_size": 1}, {"file_id": "large", "file_size": 9}],
+            "document": {"file_id": "doc", "file_name": "spec.pdf", "file_size": 3},
+            "voice": {"file_id": "voice"},
+        })
+        self.assertEqual(files, [{"file_id": "large", "name": "photo.jpg", "size": 9},
+                                 {"file_id": "doc", "name": "spec.pdf", "size": 3},
+                                 {"file_id": "voice", "name": "voice.ogg", "size": 0}])
+        animation = {"file_id": "gif", "file_name": "clip.mp4"}
+        self.assertEqual([item["file_id"] for item in Bot._message_files(
+            {"animation": animation, "document": animation})], ["gif"])
+
+    def test_attachment_names_are_safe_and_unique(self):
+        used = set()
+        self.assertEqual(Bot._attachment_name("../../etc/passwd", used), "passwd")
+        self.assertEqual(Bot._attachment_name("photo.jpg", used), "photo.jpg")
+        self.assertEqual(Bot._attachment_name("Photo.jpg", used), "Photo-2.jpg")
+        self.assertEqual(Bot._attachment_name("a b;c$.png", used), "a b_c_.png")
+        self.assertEqual(Bot._attachment_name("...", used), "file")
+
+    def test_files_are_attached_to_the_guided_fix_request(self):
+        self.user_say(42, FIX_APP)
+        self.user_say(42, "me/app")
+        self.user_say(42, "GPT/GPT-9 Pro")
+        self.user_say(42, TEMPORARY_CHAT)
+        self.assertIn("screenshots or photos", self.tg.sent[-1])
+        self.send_file(42, photo=[{"file_id": "shot", "file_size": 10}])
+        self.assertIn("Attached for the next request (1): photo.jpg", self.tg.sent[-1])
+        self.send_file(42, document={"file_id": "log", "file_name": "error.log"})
+        self.assertEqual(self.rt.calls, [])
+        self.user_say(42, "Fix the layout shown in the screenshot")
+        self.assertEqual(self.rt.calls[0][1], "Fix the layout shown in the screenshot" + DEPLOY_NOTE)
+        self.assertEqual(self.rt.attachments, [[("photo.jpg", b"data-shot"), ("error.log", b"data-log")]])
+        self.assertEqual(self.bot._pending_files, {})
+        self.assertEqual(list((self.cfg.state_dir).glob("attachments-*")), [])
+        self.user_say(42, "/fix app another change")
+        self.assertEqual(self.rt.attachments[-1], [])
+
+    def test_caption_runs_as_the_request_with_its_file(self):
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}),
+                                   cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.next_port.return_value = 8085
+            routes.return_value.prepare.return_value = "Tunnel configured."
+            self.send_file(77, caption="/new member-app build an app like this mockup",
+                           document={"file_id": "mock", "file_name": "mockup.png", "file_size": 5})
+        self.assertEqual(self.gh.created, [("me/member-app", False)])
+        self.assertEqual(self.rt.calls[0][1], NEW_APP_PROMPT.format(port=8085) +
+                         "build an app like this mockup" + DEPLOY_NOTE)
+        self.assertEqual(self.rt.attachments, [[("mockup.png", b"data-mock")]])
+        for message in self.tg.sent + self.tg.edits:
+            self.assertNotIn(str(self.cfg.state_dir), message)
+
+    def test_album_caption_runs_once_with_every_file(self):
+        self.state.set_active_repo(42, "me/app", True)
+        self.bot.handle_update(self.file_update(42, caption="match these photos", group="g",
+                                                photo=[{"file_id": "one"}]))
+        self.bot.handle_update(self.file_update(42, group="g", photo=[{"file_id": "two"}]))
+        self.assertEqual(self.rt.calls, [])
+        self.bot.flush_media_groups()
+        self.bot._worker.join(timeout=30)
+        self.assertEqual(len(self.rt.calls), 1)
+        self.assertEqual(self.rt.attachments, [[("photo.jpg", b"data-one"), ("photo-2.jpg", b"data-two")]])
+
+    def test_cancel_discards_files_and_limits_are_enforced(self):
+        self.send_file(42, document={"file_id": "big", "file_name": "big.zip", "file_size": 21 * 1024 * 1024})
+        self.assertIn("larger than 20 MB", self.tg.sent[-1])
+        self.assertEqual(self.bot._pending_files.get(42, []), [])
+        for index in range(10):
+            self.send_file(42, document={"file_id": f"f{index}", "file_name": f"f{index}.txt"})
+        self.send_file(42, document={"file_id": "extra", "file_name": "extra.txt"})
+        self.assertIn("At most 10 files", self.tg.sent[-1])
+        self.user_say(42, "/cancel")
+        self.assertIn("Discarded 10 attached file(s).", self.tg.sent[-1])
+        self.assertNotIn(42, self.bot._pending_files)
+
+    def test_failed_download_is_reported_without_running_copilot(self):
+        self.state.set_active_repo(42, "me/app", True)
+        self.send_file(42, caption="use this", document={"file_id": "broken", "file_name": "x.txt"})
+        self.assertIn("Could not download the attached file x.txt", self.tg.sent[-1])
+        self.assertEqual(self.rt.calls, [])
+        self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        self.send_file(42, caption="/new fresh-app build it",
+                       document={"file_id": "broken", "file_name": "x.txt"})
+        self.assertIn("Could not download the attached file x.txt", self.tg.sent[-1])
+        self.assertEqual(self.gh.created, [])
 
     def test_secrets_are_redacted_from_messages(self):
         self.bot.say(1, "token gh-secret and tg-secret")

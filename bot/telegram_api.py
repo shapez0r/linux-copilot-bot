@@ -4,8 +4,10 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 MESSAGE_LIMIT = 4000  # Telegram allows 4096 characters per message.
+DOWNLOAD_LIMIT = 20 * 1024 * 1024  # Largest file the Bot API lets a bot download.
 
 
 class TelegramError(Exception):
@@ -28,6 +30,7 @@ def chunk_text(text: str, limit: int = MESSAGE_LIMIT):
 class Telegram:
     def __init__(self, token: str, base_url: str = "https://api.telegram.org"):
         self._url = f"{base_url}/bot{token}/"
+        self._file_url = f"{base_url}/file/bot{token}/"
 
     def _call(self, method: str, payload: dict, timeout: float = 30):
         request = urllib.request.Request(
@@ -73,3 +76,29 @@ class Telegram:
         if parse_mode:
             payload["parse_mode"] = parse_mode
         self._call("editMessageText", payload)
+
+    def download_file(self, file_id: str, dest: Path, limit: int = DOWNLOAD_LIMIT) -> Path:
+        """Save a file sent to the bot; errors never include the download URL, which holds the token."""
+        info = self._call("getFile", {"file_id": file_id})
+        path = info.get("file_path") if isinstance(info, dict) else None
+        if not path:
+            raise TelegramError("getFile: no file path returned")
+        if int(info.get("file_size") or 0) > limit:
+            raise TelegramError("getFile: file is larger than the download limit")
+        request = urllib.request.Request(self._file_url + path)
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response, open(dest, "wb") as output:
+                copied = 0
+                while True:
+                    chunk = response.read(1 << 16)
+                    if not chunk:
+                        break
+                    copied += len(chunk)
+                    if copied > limit:
+                        raise TelegramError("download: file is larger than the download limit")
+                    output.write(chunk)
+        except urllib.error.HTTPError as e:
+            raise TelegramError(f"download: HTTP {e.code}") from None
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+            raise TelegramError(f"download: {e.__class__.__name__}") from None
+        return Path(dest)
