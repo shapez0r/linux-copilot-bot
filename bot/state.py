@@ -1,8 +1,9 @@
-"""Persistent app ownership and per-user bot settings."""
+"""Persistent app ownership, bot access, and per-user bot settings."""
 from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 ADMIN_OWNER = "kurwalab.fyi admins"
@@ -28,6 +29,9 @@ class State:
         self.app_owners = {}
         self.active_repos = {}
         self.user_view_ids = set()
+        # Telegram user ids (as strings) mapped to {"name": display label, "time": epoch seconds}.
+        self.approved_users = {}
+        self.access_requests = {}
         try:
             data = json.loads(path.read_text())
             self.repo = str(data.get("repo", ""))
@@ -47,6 +51,8 @@ class State:
                 }
             if isinstance(user_view, list):
                 self.user_view_ids = {str(user_id) for user_id in user_view if str(user_id).isdigit()}
+            self.approved_users = self._people(data.get("approved_users"))
+            self.access_requests = self._people(data.get("access_requests"))
         except (OSError, ValueError, AttributeError):
             pass
         if self.repo:
@@ -99,6 +105,41 @@ class State:
         else:
             self.user_view_ids.discard(str(user_id))
 
+    @staticmethod
+    def _people(value) -> dict:
+        if not isinstance(value, dict):
+            return {}
+        people = {}
+        for user_id, info in value.items():
+            if not str(user_id).isdigit() or int(user_id) < 1 or not isinstance(info, dict):
+                continue
+            try:
+                stamp = int(info.get("time") or 0)
+            except (TypeError, ValueError):
+                stamp = 0
+            people[str(user_id)] = {"name": str(info.get("name") or ""), "time": stamp}
+        return people
+
+    def is_approved(self, user_id) -> bool:
+        return user_id is not None and str(user_id) in self.approved_users
+
+    def has_request(self, user_id) -> bool:
+        return user_id is not None and str(user_id) in self.access_requests
+
+    def add_request(self, user_id, name: str):
+        self.access_requests[str(user_id)] = {"name": name, "time": int(time.time())}
+
+    def approve(self, user_id, name: str = ""):
+        """Grant regular-user access; the request's display name is kept when none is given."""
+        request = self.access_requests.pop(str(user_id), {})
+        self.approved_users[str(user_id)] = {"name": name or request.get("name", ""), "time": int(time.time())}
+
+    def reject(self, user_id) -> bool:
+        return self.access_requests.pop(str(user_id), None) is not None
+
+    def revoke(self, user_id) -> bool:
+        return self.approved_users.pop(str(user_id), None) is not None
+
     def repos_for_owner(self, owner: str):
         return [repo for repo, app_owner in self.app_owners.items() if app_owner == owner]
 
@@ -115,5 +156,7 @@ class State:
             "app_owners": self.app_owners,
             "active_repos": self.active_repos,
             "user_view_ids": sorted(self.user_view_ids, key=int),
+            "approved_users": self.approved_users,
+            "access_requests": self.access_requests,
         }, sort_keys=True))
         os.replace(tmp, self._path)

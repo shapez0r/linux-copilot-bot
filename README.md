@@ -15,7 +15,7 @@ A Telegram bot for an Ubuntu VM that turns chat messages from authorized users i
 
 - Ubuntu with Python 3.9+, `python3-venv`, Git, and `make`.
 - A Microsoft 365 account with access to Copilot Chat.
-- A Telegram bot token from [@BotFather](https://t.me/BotFather) and the numeric Telegram user id of each administrator and regular user (for example from @userinfobot).
+- A Telegram bot token from [@BotFather](https://t.me/BotFather) and the numeric Telegram user id of each administrator (for example from @userinfobot). Regular users request access in the bot.
 - A GitHub token with read/write access to repository contents. Creating repositories requires permission to create repositories for the owner, and `/delete` requires permission to delete repositories.
 - A local app checkout to use as a new-repository template. The default is `<REPOS_DIR>/eurofish` (`/home/localadmin/repos/eurofish` with the default configuration).
 - For `/new`, route commands, and the tunnel portion of `/delete`, a remotely managed Cloudflare Tunnel and an API token with **Account / Cloudflare Tunnel / Edit** and **Zone / DNS / Edit** permissions.
@@ -53,13 +53,20 @@ The generated unit runs under the account that launched the bot, sets the reposi
 
 ## Using the bot
 
-Only user ids listed in `TELEGRAM_ADMIN_IDS` or `TELEGRAM_USER_IDS` are served, and only in private chats; every other message is ignored. Separate multiple ids with commas and do not put an id in both settings. `TELEGRAM_OWNER_ID` remains accepted as an alias for `TELEGRAM_ADMIN_IDS`.
+The bot works only in private chats; messages in groups and channels are ignored. Administrators are the user ids listed in `TELEGRAM_ADMIN_IDS` (comma-separated; `TELEGRAM_OWNER_ID` remains accepted as an alias). Everyone else becomes a regular user only after an administrator approves an access request:
+
+1. Any Telegram user who sends `/start` gets a welcome message and a **🔑 Request access** button. Until approved, every other message, command, button, or file gets only a short reply pointing to that button; nothing else runs and files are not downloaded.
+2. Tapping the button adds the user's numeric id, name, and username to the request queue and notifies every administrator. Repeated taps while a request is pending do not notify again, and the queue holds at most 100 pending requests.
+3. Administrators in admin view open the queue with **📨 Access requests** (or `/requests`), pick a request, and choose **✅ Approve access** or **🚫 Reject request**; `/approve <id>` and `/reject <id>` do the same. `/approve <id>` also grants access to a user who has not sent a request.
+4. An approved user receives the regular-user menu right away. A rejected user is told and may request access again. `/revoke <id>` removes an approved user's access and discards their open dialog and held files; apps they created keep their owner record.
+
+Approved users and pending requests are stored in `STATE_DIR` and persist across restarts.
 
 Administrators have every bot permission. Regular users can create apps, list all apps, fix apps they created, and start or stop only their own app services. Administrators can start or stop any app, register services for existing app folders, and change the bot itself (see [Changing the bot](#changing-the-bot)). The app list opens with a status summary (for example 🟢 2 running · ⚪ 3 stopped) followed by one card per app: a status icon, the bold name, and the status, with the public URL beneath as plain text that Telegram links itself, so tapping it opens the app without a confirmation prompt; admin cards also show the tunnel port and folder. Long lists are split into complete HTML messages that repeat a short heading. The app list is built from every direct folder under `REPOS_DIR` except the bot repository, including stopped or untracked apps; administrators also see the bot's own `linux-copilot-bot` entry. Its status comes from systemd and distinguishes running, stopped, failed, transitional, and unregistered services. Administrators see each app's name, status, full folder, tunnel port, and tunnel URL; regular users see its name, status without a process id, and public URL. Messages to regular users identify apps only by name and public URL: they omit deployment and tunnel sections, tunnel routes and ports, process ids, server paths, and systemd service details, and failures in those areas are reported generically. The bot repository never appears to regular users (or to administrators in user view): it is left out of their app list, fix and start/stop choices, and template choices, and their requests for it are refused like requests for any app they do not own. Each created app is recorded with an owner: regular-user apps belong to the creating Telegram user id, while administrator-created and newly registered existing apps are owned by `kurwalab.fyi admins`. Active repositories are stored per Telegram user, the selected default model is shared, and all users share the single job slot.
 
 Administrators can switch between **admin view** and **user view** at any time with the **👤 Switch to user view** and **🛡 Switch to admin view** buttons, which are always in their main menu. In user view, an administrator sees and uses the bot exactly as a regular user: the regular-user menu, help, listings, messages, and permissions apply, admin-only commands and buttons are refused, and apps created in that view are public and owned by the administrator's Telegram user id. The choice is stored per administrator and persists across restarts. Regular users cannot switch views.
 
-Send `/start` or `/menu` to open a role-specific persistent keyboard. Regular users see creation, listing, fixing, and start/stop controls for their apps; administrators in admin view also see service registration, deletion, repository, model, status, and tunnel-management options, and every administrator menu includes the view switch. The guided **Create an app** flow:
+Send `/start` or `/menu` to open a role-specific persistent keyboard. Regular users see creation, listing, fixing, and start/stop controls for their apps; administrators in admin view also see service registration, access requests, deletion, repository, model, status, and tunnel-management options, and every administrator menu includes the view switch. The guided **Create an app** flow:
 
 1. asks for a lowercase app name;
 2. checks the models available in Copilot (see below) and offers them for selection;
@@ -101,6 +108,10 @@ Apps created by regular users are public GitHub repositories. Apps created by ad
 | `/cloudflare delete <subdomain>` | **Admin only.** Delete the named ingress route and its matching tunnel CNAME. |
 | `/model <provider/model>` | **Admin only.** Choose the shared Copilot model label (default `GPT/GPT-6`). |
 | `/status` | **Admin only.** Show the sender's repository, model, job state, and whether the app is running. |
+| `/requests` | **Admin only.** List pending access requests and approved users, and open the pending requests for review. |
+| `/approve <id>` | **Admin only.** Give a Telegram user id regular-user access, with or without a pending request, and notify that user. |
+| `/reject <id>` | **Admin only.** Decline a pending access request and notify the user. |
+| `/revoke <id>` | **Admin only.** Remove an approved user's access; their apps are kept. Configured administrators cannot be approved, rejected, or revoked. |
 | `/cancel` | Stop the sender's running job and discard the sender's held attachments. Administrators may stop any running job. |
 
 Administrators use `public` or `private` to choose visibility when creating a repository; the default is `private`. Regular users' `/new` apps are always public: `public` is accepted and `private` is refused. For `/new`, specify the app repository with `name="<name|owner/name>"`, for example `/new name="fresh-app" prompt="build a starter app"`. Administrators may add `tempchat` or `notempchat` to use a temporary or a saved regular Copilot chat for that app; without either, `BOT_TEMPORARY_CHAT` applies, and regular users' `/new` commands that include either option are refused. The `name`, `model=<provider/model>`, `template=<app>`, and `prompt="<request>"` options may appear in any order with the visibility and chat-type options, before the request. Straight single or double quotes and their typographic equivalents are accepted around option values. Quote a multiword prompt unless `prompt=` is the final option, in which case it consumes the remaining text. Use the other quote style for quotes inside a quoted request. Empty, malformed, or repeated `prompt=` options are rejected. The positional repository and trailing request forms are also accepted, for example `/new fresh-app build a starter app` or `/new prompt="build a starter app" fresh-app`. App names still must be lowercase DNS labels; quotes do not allow spaces or uppercase letters. The model overrides the active model only while creating that app. The template must name an existing local app directory directly under `<REPOS_DIR>`. Existing repositories keep their visibility. Private repositories are cloned using `GITHUB_TOKEN` through `GIT_ASKPASS`, without storing credentials in remote URLs.
@@ -141,12 +152,11 @@ Settings come from `.env` (or the file named by `BOT_ENV_FILE`); real environmen
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | required | Bot token. |
-| `TELEGRAM_ADMIN_IDS` | required | Comma-separated numeric ids with full bot access. `TELEGRAM_ADMIN_ID` and `TELEGRAM_OWNER_ID` are accepted aliases. |
-| `TELEGRAM_USER_IDS` | empty | Comma-separated numeric ids that may create and list apps and fix, start, or stop their own apps. `TELEGRAM_USER_ID` is accepted as an alias. |
+| `TELEGRAM_ADMIN_IDS` | required | Comma-separated numeric ids with full bot access. `TELEGRAM_ADMIN_ID` and `TELEGRAM_OWNER_ID` are accepted aliases. Regular users are approved in the bot instead of being configured. |
 | `GITHUB_TOKEN` | required | Used for GitHub API calls and Git over HTTPS through `GIT_ASKPASS` (including private repository clones); it is never written into remote URLs. |
 | `GITHUB_OWNER` | token's account | Owner for bare repository names. |
 | `REPOS_DIR` | `/home/localadmin/repos` | Parent of app checkouts and local app templates; `eurofish` is the default template. |
-| `STATE_DIR` | `~/.copilot-telegram-bot` | App ownership, per-user active repositories, administrators' view choices, shared model, app logs, and the executable copy of the Git credential helper. |
+| `STATE_DIR` | `~/.copilot-telegram-bot` | Approved users, pending access requests, app ownership, per-user active repositories, administrators' view choices, shared model, app logs, and the executable copy of the Git credential helper. |
 | `COPILOT_PROFILE` | `~/.copilot-repo-browser` | Browser profile created by `make login`. |
 | `COPILOT_MODEL` | `GPT/GPT-6` | Initial model label; change it later with `/model`. |
 | `BOT_SHOW_BROWSER` | `false` | Default browser visibility. `browser` or `nobrowser` on `/fix` overrides it for that request. Without `DISPLAY` or `WAYLAND_DISPLAY`, a visible request runs hidden; use VNC or X forwarding to see it. |
@@ -163,7 +173,7 @@ Without `.env` values or per-request overrides, requests use `nobrowser` and `te
 
 ## Security
 
-- The bot obeys only Telegram user ids in `TELEGRAM_ADMIN_IDS` and `TELEGRAM_USER_IDS`. Administrators can manage every app and infrastructure setting; regular users can execute Copilot-written code only through apps recorded as their own.
+- The bot obeys only the Telegram user ids in `TELEGRAM_ADMIN_IDS` and the users an administrator approved; any other user can only send an access request. Administrators can manage every app and infrastructure setting; regular users can execute Copilot-written code only through apps recorded as their own.
 - A request can create or change a `Makefile` that the bot then runs. Use a dedicated unprivileged VM user, restrict its passwordless sudo rules to the required service-management commands, restrict the GitHub token to the repositories involved, and keep `.env` and the browser profile readable only by that user.
 - Upload only repositories and attachments approved for your organization's Copilot environment. Each fix upload includes the branch's full Git history, and commit messages include Copilot's outputs; on public repositories these are visible to anyone. Attachments are kept only in a temporary folder under `STATE_DIR` while their request runs.
 - Telegram, GitHub, and Cloudflare API tokens are redacted from errors and messages. App units explicitly unset these token variables and `VIRTUAL_ENV`.
@@ -173,7 +183,7 @@ Without `.env` values or per-request overrides, requests use `nobrowser` and `te
 | Path | Purpose |
 | --- | --- |
 | `engine/copilot_repo_roundtrip.py` | Playwright round-trip engine (`login`, `models`, and `fix`), the single automation engine. |
-| `bot/service.py`, `bot/state.py` | Role-aware menus, admin/user view switching, permissions, app ownership, per-user selections, guided conversations, commands, held attachments, and the request pipeline. |
+| `bot/service.py`, `bot/state.py` | Access requests and approvals, role-aware menus, admin/user view switching, permissions, app ownership, per-user selections, guided conversations, commands, held attachments, and the request pipeline. |
 | `bot/app_list.py` | Telegram HTML app list: status summary and per-app cards, split into messages within Telegram's size limit. |
 | `bot/telegram_api.py`, `bot/github_api.py` | Telegram long polling, reply keyboards, HTML-formatted messages, file downloads, and GitHub REST clients (standard library only). |
 | `bot/gitops.py`, `bot/repos.py` | Seed, clone, sync, commit, push; repository references. |

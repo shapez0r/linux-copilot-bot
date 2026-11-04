@@ -1,4 +1,4 @@
-"""Authorized-user commands and the repository request pipeline."""
+"""Access requests, authorized-user commands, and the repository request pipeline."""
 from __future__ import annotations
 
 import html
@@ -42,6 +42,8 @@ NEW_APP_PROMPT = (
 )
 # Files sent to the bot are attached to the next app request in the same chat.
 MAX_ATTACHMENTS = 10
+# Bounds the pending access-request queue, which any Telegram user can add to.
+MAX_ACCESS_REQUESTS = 100
 KNOWN_MODELS = (
     "Claude/Sonnet 5.5",
     "Claude/Opus 5.5",
@@ -74,6 +76,10 @@ TEMPORARY_CHAT = "🕶 Temporary chat"
 REGULAR_CHAT = "💾 Regular chat"
 USER_VIEW = "👤 Switch to user view"
 ADMIN_VIEW = "🛡 Switch to admin view"
+REQUEST_ACCESS = "🔑 Request access"
+ACCESS_REQUESTS = "📨 Access requests"
+APPROVE_ACCESS = "✅ Approve access"
+REJECT_ACCESS = "🚫 Reject request"
 
 
 def _keyboard(rows):
@@ -89,7 +95,7 @@ MAIN_KEYBOARD = _keyboard([
     [CREATE_APP, LIST_APPS],
     [FIX_APP, DELETE_APP],
     [START_APP, STOP_APP],
-    [REGISTER_SERVICES],
+    [REGISTER_SERVICES, ACCESS_REQUESTS],
     [TUNNEL_ROUTES, SELECT_REPOSITORY],
     [SET_MODEL, SHOW_STATUS],
     [CANCEL_ACTION],
@@ -121,6 +127,9 @@ ROUTES_KEYBOARD = _keyboard([
 CANCEL_KEYBOARD = _keyboard([[CANCEL_ACTION], [BACK_TO_MENU]])
 VISIBILITY_KEYBOARD = _keyboard([[PRIVATE_REPO, PUBLIC_REPO], [CANCEL_ACTION], [BACK_TO_MENU]])
 CHAT_MODE_KEYBOARD = _keyboard([[TEMPORARY_CHAT, REGULAR_CHAT], [CANCEL_ACTION], [BACK_TO_MENU]])
+GUEST_KEYBOARD = _keyboard([[REQUEST_ACCESS]])
+DECISION_KEYBOARD = _keyboard([[APPROVE_ACCESS, REJECT_ACCESS], [CANCEL_ACTION], [BACK_TO_MENU]])
+REMOVE_KEYBOARD = {"remove_keyboard": True}
 
 NEW_USAGE = (
     "Usage: /new [public|private] [tempchat|notempchat] [model=<provider/model>] [template=<app>] "
@@ -151,6 +160,10 @@ HELP = f"""Use the buttons below to create and manage apps. You can also send a 
 /cloudflare delete <subdomain> - delete a tunnel route by name
 /model <provider/model> - choose the Copilot model (for example GPT/GPT-6)
 /status - show repository, model, job and app state
+/requests - show pending access requests and approved users
+/approve <user id> - give a Telegram user regular-user access
+/reject <user id> - decline a pending access request
+/revoke <user id> - remove a regular user's access
 /cancel - stop the running job and discard attached files
 /help - show this message"""
 ADMIN_VIEW_HINT = f"You are an admin in user view. Use {ADMIN_VIEW} in the main menu to return to admin view."
@@ -169,11 +182,16 @@ USER_HELP = f"""Use the buttons below to create and list apps, and to fix, start
 
 ADMIN_ONLY_BUTTONS = {
     DELETE_APP, TUNNEL_ROUTES, SELECT_REPOSITORY, SET_MODEL, SHOW_STATUS,
-    LIST_ROUTES, ADD_ROUTE, DELETE_ROUTE, REGISTER_SERVICES,
+    LIST_ROUTES, ADD_ROUTE, DELETE_ROUTE, REGISTER_SERVICES, ACCESS_REQUESTS,
 }
-ADMIN_ONLY_COMMANDS = {"delete", "repo", "cloudflare", "model", "status", "register"}
+ADMIN_ONLY_COMMANDS = {"delete", "repo", "cloudflare", "model", "status", "register",
+                       "requests", "approve", "reject", "revoke"}
 ADMIN_ONLY_MESSAGE = "This action is available only to kurwalab.fyi admins."
 USER_VIEW_ADMIN_ONLY_MESSAGE = f"This action is available only in admin view. Use {ADMIN_VIEW} in the main menu."
+GUEST_WELCOME = (f"This bot creates and manages apps for approved users. Tap {REQUEST_ACCESS} to ask a "
+                 "kurwalab.fyi admin for access; you will be notified when it is approved.")
+GUEST_PENDING = "Your access request is waiting for admin approval. You will be notified when it is approved."
+GUEST_NO_ACCESS = f"You do not have access to this bot yet. Send /start and tap {REQUEST_ACCESS}."
 
 
 
@@ -262,8 +280,11 @@ class Bot:
         message = update.get("message") or {}
         sender = (message.get("from") or {}).get("id")
         chat = message.get("chat") or {}
-        if sender not in self.cfg.authorized_ids or chat.get("type") != "private":
+        if not isinstance(sender, int) or chat.get("type") != "private":
             log.warning("ignored message from user %s", sender)
+            return
+        if not self._authorized(sender):
+            self._handle_guest(chat["id"], sender, message)
             return
         text = (message.get("text") or "").strip()
         files = self._message_files(message)
@@ -416,6 +437,10 @@ class Bot:
     def _is_configured_admin(self, user_id) -> bool:
         return user_id is None or self.cfg.is_admin(user_id)
 
+    def _authorized(self, user_id) -> bool:
+        """Configured admins and users approved through an access request may use the bot."""
+        return self._is_configured_admin(user_id) or self.state.is_approved(user_id)
+
     def _is_admin(self, user_id) -> bool:
         """Return whether the sender acts as an admin; admins in user view get regular-user behavior."""
         return self._is_configured_admin(user_id) and not self.state.user_view(user_id)
@@ -444,10 +469,141 @@ class Bot:
         self._dialogs.pop(chat_id, None)
         self.say_keyboard(chat_id, text, self._main_keyboard(user_id))
 
+    # ---- Access requests -----------------------------------------------
+
+    @staticmethod
+    def _display_name(sender: dict) -> str:
+        """A short label for a Telegram user: full name and @username when present."""
+        name = " ".join(str(sender.get(key) or "").strip() for key in ("first_name", "last_name")).strip()
+        username = str(sender.get("username") or "").strip()
+        label = " ".join(part for part in (name, f"@{username}" if username else "") if part)
+        return " ".join(label.split())[:64]
+
+    @staticmethod
+    def _person_label(user_id, info: dict) -> str:
+        name = (info or {}).get("name") or "unknown name"
+        return f"{name} · {user_id}"
+
+    def _handle_guest(self, chat_id: int, user_id: int, message: dict):
+        """Serve a user without access: /start offers the request button; everything else is refused."""
+        text = (message.get("text") or "").strip()
+        command = text.split()[0][1:].split("@")[0].lower() if text.startswith("/") else ""
+        if text == REQUEST_ACCESS:
+            self._request_access(chat_id, user_id, self._display_name(message.get("from") or {}))
+        elif self.state.has_request(user_id):
+            self.say_keyboard(chat_id, GUEST_PENDING, GUEST_KEYBOARD)
+        elif command in ("start", "menu", "help"):
+            self.say_keyboard(chat_id, GUEST_WELCOME, GUEST_KEYBOARD)
+        else:
+            self.say_keyboard(chat_id, GUEST_NO_ACCESS, GUEST_KEYBOARD)
+
+    def _request_access(self, chat_id: int, user_id: int, name: str):
+        if self.state.has_request(user_id):
+            self.say_keyboard(chat_id, GUEST_PENDING, GUEST_KEYBOARD)
+            return
+        if len(self.state.access_requests) >= MAX_ACCESS_REQUESTS:
+            self.say_keyboard(chat_id, "The access request queue is full. Try again later.", GUEST_KEYBOARD)
+            return
+        self.state.add_request(user_id, name)
+        self.state.save()
+        self.say_keyboard(chat_id, "Your access request was sent to the kurwalab.fyi admins. "
+                                   "You will be notified when it is approved.", GUEST_KEYBOARD)
+        label = self._person_label(user_id, self.state.access_requests[str(user_id)])
+        for admin_id in sorted(self.cfg.admin_ids):
+            self.say(admin_id, f"📨 New access request from {label}.\n"
+                               f"Review it with {ACCESS_REQUESTS} in admin view, or send /approve {user_id} "
+                               f"or /reject {user_id}.")
+
+    def _access_summary(self) -> str:
+        requests = sorted(self.state.access_requests.items(), key=lambda item: item[1]["time"])
+        approved = sorted(self.state.approved_users.items(), key=lambda item: item[1]["time"])
+        lines = [f"Pending access requests ({len(requests)}):"]
+        lines += [f"- {self._person_label(user_id, info)}" for user_id, info in requests] or ["- none"]
+        lines += ["", f"Approved users ({len(approved)}):"]
+        lines += [f"- {self._person_label(user_id, info)}" for user_id, info in approved] or ["- none"]
+        return "\n".join(lines)
+
+    def _show_access_requests(self, chat_id: int, user_id=None):
+        """Open the request queue as a picker of pending requests."""
+        requests = sorted(self.state.access_requests.items(), key=lambda item: item[1]["time"])
+        if not requests:
+            self.show_menu(chat_id, self._access_summary(), user_id)
+            return
+        self._dialogs[chat_id] = {"flow": "access", "step": "choose", "data": {}, "user_id": user_id}
+        choices = [self._person_label(request_id, info) for request_id, info in requests]
+        self.say_keyboard(chat_id, self._access_summary() + "\n\nChoose a request to review.",
+                          self._choice_keyboard(choices))
+
+    def _handle_access_dialog(self, chat_id: int, dialog: dict, text: str, user_id=None):
+        if dialog["step"] == "choose":
+            match = re.search(r"(\d+)\s*$", text)
+            target = match.group(1) if match else ""
+            if not self.state.has_request(target):
+                self.say(chat_id, "Choose one of the listed requests.")
+                return
+            dialog["step"], dialog["data"]["target"] = "decide", int(target)
+            label = self._person_label(target, self.state.access_requests[target])
+            self.say_keyboard(chat_id, f"Approve or reject access for {label}?", DECISION_KEYBOARD)
+            return
+        if text not in (APPROVE_ACCESS, REJECT_ACCESS):
+            self.say(chat_id, f"Choose {APPROVE_ACCESS} or {REJECT_ACCESS}.")
+            return
+        self._dialogs.pop(chat_id, None)
+        command = "approve" if text == APPROVE_ACCESS else "reject"
+        self.cmd_access(chat_id, command, str(dialog["data"]["target"]), user_id)
+
+    def cmd_requests(self, chat_id: int, arg: str, user_id=None):
+        if arg:
+            self.say(chat_id, "Usage: /requests")
+            return
+        self._show_access_requests(chat_id, user_id)
+
+    def cmd_access(self, chat_id: int, action: str, arg: str, user_id=None):
+        """Approve or reject an access request, or revoke an approved user's access."""
+        if not re.fullmatch(r"[1-9]\d{0,19}", arg):
+            self.say(chat_id, f"Usage: /{action} <numeric Telegram user id>")
+            return
+        target = int(arg)
+        if self.cfg.is_admin(target):
+            self.show_menu(chat_id, f"{target} is a configured admin; admin access comes from TELEGRAM_ADMIN_IDS.",
+                           user_id)
+            return
+        if action == "approve":
+            if self.state.is_approved(target):
+                self.show_menu(chat_id, f"{target} already has access.", user_id)
+                return
+            self.state.approve(target)
+            self.state.save()
+            label = self._person_label(target, self.state.approved_users[str(target)])
+            self.say_keyboard(target, "Your access request was approved. Create and manage apps with the "
+                                      "buttons below.", USER_KEYBOARD)
+            self.show_menu(chat_id, f"Approved {label}. They can now use the bot as a regular user.", user_id)
+        elif action == "reject":
+            info = self.state.access_requests.get(str(target))
+            if not self.state.reject(target):
+                self.show_menu(chat_id, f"No pending access request from {target}.", user_id)
+                return
+            self.state.save()
+            self.say_keyboard(target, "Your access request was declined.", GUEST_KEYBOARD)
+            self.show_menu(chat_id, f"Rejected the access request from {self._person_label(target, info)}.",
+                           user_id)
+        else:
+            info = self.state.approved_users.get(str(target))
+            if not self.state.revoke(target):
+                self.show_menu(chat_id, f"{target} is not an approved user.", user_id)
+                return
+            self.state.save()
+            # Private chat ids equal user ids, so the revoked user's open dialog and held files are dropped.
+            self._dialogs.pop(target, None)
+            self._pending_files.pop(target, None)
+            self.say_keyboard(target, "Your access to this bot was removed.", REMOVE_KEYBOARD)
+            self.show_menu(chat_id, f"Removed access for {self._person_label(target, info)}. Their apps are kept.",
+                           user_id)
+
     # ---- Commands ------------------------------------------------------
 
     def handle_text(self, chat_id: int, text: str, user_id=None):
-        if user_id is not None and user_id not in self.cfg.authorized_ids:
+        if not self._authorized(user_id):
             return
         if text == BACK_TO_MENU:
             discarded = self._discard_files(chat_id)
@@ -459,8 +615,11 @@ class Bot:
         if text in (USER_VIEW, ADMIN_VIEW):
             self._switch_view(chat_id, text == USER_VIEW, user_id)
             return
+        if text == REQUEST_ACCESS:
+            self.show_menu(chat_id, "You already have access to this bot.", user_id)
+            return
         if text in (CREATE_APP, LIST_APPS, FIX_APP, START_APP, STOP_APP, REGISTER_SERVICES,
-                    DELETE_APP, TUNNEL_ROUTES,
+                    DELETE_APP, TUNNEL_ROUTES, ACCESS_REQUESTS,
                     SELECT_REPOSITORY, SET_MODEL, SHOW_STATUS, LIST_ROUTES, ADD_ROUTE, DELETE_ROUTE):
             self._handle_menu_button(chat_id, text, user_id)
             return
@@ -508,6 +667,10 @@ class Bot:
             self.cmd_model(chat_id, arg)
         elif command == "status":
             self.cmd_status(chat_id, user_id)
+        elif command == "requests":
+            self.cmd_requests(chat_id, arg, user_id)
+        elif command in ("approve", "reject", "revoke"):
+            self.cmd_access(chat_id, command, arg, user_id)
         elif command == "cancel":
             self.cmd_cancel(chat_id, user_id)
         else:
@@ -529,6 +692,8 @@ class Bot:
             self.say_keyboard(chat_id, "Manage Cloudflare Tunnel routes.", ROUTES_KEYBOARD)
         elif label == LIST_ROUTES:
             self.cmd_cloudflare(chat_id, "list")
+        elif label == ACCESS_REQUESTS:
+            self._show_access_requests(chat_id, user_id)
         elif label == CREATE_APP:
             if self._cloudflare_unavailable(chat_id) or self._job_blocks_dialog(chat_id):
                 return
@@ -713,6 +878,8 @@ class Bot:
             self._handle_route_add_dialog(chat_id, dialog, text)
         elif flow == "route-delete":
             self._handle_route_delete_dialog(chat_id, dialog, text)
+        elif flow == "access":
+            self._handle_access_dialog(chat_id, dialog, text, user_id)
         else:
             self.show_menu(chat_id, "That action expired. Choose another action.", user_id)
 

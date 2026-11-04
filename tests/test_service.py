@@ -11,7 +11,9 @@ from bot.deploy import DeployResult
 from bot.github_api import GitHubError
 from bot.gitops import Git, GitError
 from bot.roundtrip import Cancelled, RoundTripError
-from bot.service import (ADMIN_USER_VIEW_KEYBOARD, ADMIN_VIEW, ADMIN_VIEW_HINT, BOT_DEPLOY_NOTE, CHAT_MODE_KEYBOARD,
+from bot.service import (ACCESS_REQUESTS, APPROVE_ACCESS, DECISION_KEYBOARD, GUEST_KEYBOARD,
+                         GUEST_NO_ACCESS, GUEST_PENDING, GUEST_WELCOME, REMOVE_KEYBOARD, REQUEST_ACCESS,
+                         ADMIN_USER_VIEW_KEYBOARD, ADMIN_VIEW, ADMIN_VIEW_HINT, BOT_DEPLOY_NOTE, CHAT_MODE_KEYBOARD,
                          CONFIRM_DELETE, CREATE_APP, CUSTOM_MODEL, DELETE_APP, USER_VIEW,
                          DEPLOY_NOTE, FIX_APP, HELP, KNOWN_MODELS, LIST_APPS, MAIN_KEYBOARD, MODEL_KEYBOARD,
                          NEW_APP_PROMPT, PRIVATE_REPO, PUBLIC_REPO, VISIBILITY_KEYBOARD,
@@ -37,16 +39,18 @@ class LocalGit(Git):
 
 class FakeTelegram:
     def __init__(self):
-        self.sent, self.edits, self.markups = [], [], []
+        self.sent, self.edits, self.markups, self.chats = [], [], [], []
 
     def send_message(self, chat_id, text, reply_markup=None, parse_mode=None):
         self.sent.append(text)
         self.markups.append(reply_markup)
+        self.chats.append(chat_id)
         return len(self.sent)
 
     def send_long(self, chat_id, text, reply_markup=None):
         self.sent.append(text)
         self.markups.append(reply_markup)
+        self.chats.append(chat_id)
 
     def edit_message(self, chat_id, message_id, text, parse_mode=None):
         self.edits.append(text)
@@ -199,18 +203,137 @@ class ServiceTests(unittest.TestCase):
             if worker is not None:
                 worker.join(timeout=30)
 
+    def approve(self, *user_ids):
+        for user_id in user_ids:
+            self.state.approve(user_id, f"User {user_id}")
+
+    def guest_say(self, user_id, text, **sender):
+        self.bot.handle_update({"message": {"from": {"id": user_id, **sender},
+                                            "chat": {"id": user_id, "type": "private"}, "text": text}})
+
     def test_only_authorized_users_in_private_chats_are_served(self):
         def update(sender, chat_type="private"):
             return {"message": {"from": {"id": sender}, "chat": {"id": 1, "type": chat_type}, "text": "/help"}}
-        self.bot.handle_update(update(7))
         self.bot.handle_update(update(42, "group"))
+        self.bot.handle_update(update(7, "group"))
         self.assertEqual(self.tg.sent, [])
         self.bot.handle_update(update(42))
         self.assertEqual(self.tg.sent, [HELP])
+        self.bot.handle_update(update(7))
+        self.assertEqual(self.tg.sent[-1], GUEST_WELCOME)
+        self.assertEqual(self.tg.markups[-1], GUEST_KEYBOARD)
 
-        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}))
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}))
         self.bot.handle_update(update(77))
-        self.assertEqual(self.tg.sent, [HELP, USER_HELP])
+        self.assertEqual(self.tg.sent[-1], USER_HELP)
+
+    def test_unknown_user_can_only_request_access_and_admins_are_notified(self):
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42, 43}))
+        self.guest_say(500, "/start")
+        self.assertEqual((self.tg.sent[-1], self.tg.markups[-1]), (GUEST_WELCOME, GUEST_KEYBOARD))
+        for text in ("/list", "/new fresh-app build it", "build me an app", CREATE_APP, LIST_APPS):
+            with self.subTest(text=text):
+                self.guest_say(500, text)
+                self.assertEqual(self.tg.sent[-1], GUEST_NO_ACCESS)
+        self.bot.handle_update(self.file_update(500, caption="/fix app x",
+                                                document={"file_id": "doc", "file_name": "a.txt"}))
+        self.assertEqual(self.tg.sent[-1], GUEST_NO_ACCESS)
+        self.assertNotIn(500, self.bot._pending_files)
+        self.assertEqual((self.rt.calls, self.gh.created, self.rt.model_checks), ([], [], 0))
+
+        sent = len(self.tg.sent)
+        self.guest_say(500, REQUEST_ACCESS, first_name="Ann", last_name="Lee", username="ann")
+        self.assertIn("was sent to the kurwalab.fyi admins", self.tg.sent[sent])
+        self.assertEqual(self.tg.chats[sent + 1:], [42, 43])
+        self.assertIn("New access request from Ann Lee @ann · 500", self.tg.sent[-1])
+        self.assertIn("/approve 500", self.tg.sent[-1])
+        self.assertTrue(State(self.tmp / "state.json", "x").has_request(500))
+
+        sent = len(self.tg.sent)
+        self.guest_say(500, REQUEST_ACCESS)
+        self.guest_say(500, "/start")
+        self.assertEqual(self.tg.sent[sent:], [GUEST_PENDING, GUEST_PENDING])
+        self.guest_say(500, "/list")
+        self.assertEqual(self.tg.sent[-1], GUEST_PENDING)
+
+    def test_admin_approves_a_request_from_the_queue_and_the_user_gets_the_menu(self):
+        self.guest_say(500, REQUEST_ACCESS, first_name="Ann")
+        self.user_say(42, ACCESS_REQUESTS)
+        self.assertIn("Pending access requests (1):\n- Ann · 500", self.tg.sent[-1])
+        labels = [button["text"] for row in self.tg.markups[-1]["keyboard"] for button in row]
+        self.assertIn("Ann · 500", labels)
+        self.user_say(42, "someone else")
+        self.assertIn("Choose one of the listed requests", self.tg.sent[-1])
+        self.user_say(42, "Ann · 500")
+        self.assertEqual(self.tg.markups[-1], DECISION_KEYBOARD)
+        self.user_say(42, APPROVE_ACCESS)
+        self.assertEqual(self.tg.chats[-2], 500)
+        self.assertIn("was approved", self.tg.sent[-2])
+        self.assertEqual(self.tg.markups[-2], USER_KEYBOARD)
+        self.assertIn("Approved Ann · 500", self.tg.sent[-1])
+        self.assertEqual(self.tg.markups[-1], MAIN_KEYBOARD)
+        saved = State(self.tmp / "state.json", "x")
+        self.assertTrue(saved.is_approved(500))
+        self.assertFalse(saved.has_request(500))
+
+        self.guest_say(500, "/start")
+        self.assertEqual(self.tg.markups[-1], USER_KEYBOARD)
+        self.guest_say(500, "/help")
+        self.assertEqual(self.tg.sent[-1], USER_HELP)
+        self.guest_say(500, "/status")
+        self.assertIn("only to kurwalab.fyi admins", self.tg.sent[-1])
+        self.guest_say(500, REQUEST_ACCESS)
+        self.assertEqual(self.tg.sent[-1], "You already have access to this bot.")
+        self.assertEqual(self.rt.calls, [])
+
+        self.user_say(42, ACCESS_REQUESTS)
+        self.assertIn("Pending access requests (0):\n- none", self.tg.sent[-1])
+        self.assertIn("Approved users (1):\n- Ann · 500", self.tg.sent[-1])
+
+    def test_admin_rejects_requests_and_revokes_access(self):
+        self.guest_say(500, REQUEST_ACCESS, first_name="Ann")
+        self.user_say(42, "/reject 500")
+        self.assertEqual(self.tg.chats[-2], 500)
+        self.assertIn("declined", self.tg.sent[-2])
+        self.assertFalse(self.state.has_request(500) or self.state.is_approved(500))
+        self.guest_say(500, "/list")
+        self.assertEqual(self.tg.sent[-1], GUEST_NO_ACCESS)
+        self.user_say(42, "/reject 500")
+        self.assertIn("No pending access request", self.tg.sent[-1])
+
+        self.user_say(42, "/approve 600")
+        self.assertTrue(self.state.is_approved(600))
+        self.user_say(42, "/approve 600")
+        self.assertIn("already has access", self.tg.sent[-1])
+        self.bot._pending_files[600] = [{"file_id": "x", "name": "x", "size": 1}]
+        self.user_say(42, "/revoke 600")
+        self.assertEqual((self.tg.chats[-2], self.tg.markups[-2]), (600, REMOVE_KEYBOARD))
+        self.assertFalse(State(self.tmp / "state.json", "x").is_approved(600))
+        self.assertNotIn(600, self.bot._pending_files)
+        self.guest_say(600, "/list")
+        self.assertEqual(self.tg.sent[-1], GUEST_NO_ACCESS)
+
+        for command in ("/approve", "/approve abc", "/revoke 0", "/reject 1 2"):
+            with self.subTest(command=command):
+                self.user_say(42, command)
+                self.assertIn("Usage:", self.tg.sent[-1])
+        self.user_say(42, "/revoke 42")
+        self.assertIn("configured admin", self.tg.sent[-1])
+
+    def test_access_management_is_admin_only(self):
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}))
+        self.state.add_request(500, "Ann")
+        for text in ("/requests", "/approve 500", "/reject 500", "/revoke 77", ACCESS_REQUESTS):
+            with self.subTest(text=text):
+                self.user_say(77, text)
+                self.assertIn("only to kurwalab.fyi admins", self.tg.sent[-1])
+        self.user_say(42, USER_VIEW)
+        self.user_say(42, "/approve 500")
+        self.assertIn("only in admin view", self.tg.sent[-1])
+        self.assertTrue(self.state.has_request(500))
+        self.assertTrue(self.state.is_approved(77))
 
     def test_start_shows_the_app_management_menu(self):
         self.say("/start")
@@ -218,7 +341,8 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.tg.markups[-1], MAIN_KEYBOARD)
 
     def test_regular_users_see_create_list_fix_and_own_app_controls(self):
-        self.bot.cfg = make_config(self.tmp, user_ids=frozenset({77}))
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp)
         self.user_say(77, "/start")
         self.assertEqual(self.tg.markups[-1], USER_KEYBOARD)
         labels = {button["text"] for row in USER_KEYBOARD["keyboard"] for button in row}
@@ -227,7 +351,8 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.tg.sent[-1], USER_HELP)
 
     def test_regular_users_cannot_invoke_admin_commands_or_buttons(self):
-        self.bot.cfg = make_config(self.tmp, user_ids=frozenset({77}))
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp)
         for command in ("/delete app", "/repo app", "/cloudflare list", "/model GPT/GPT-6", "/status",
                         "/register"):
             with self.subTest(command=command):
@@ -239,7 +364,8 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("only to kurwalab.fyi admins", self.tg.sent[-1])
 
     def test_admins_can_switch_between_admin_and_user_views(self):
-        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}))
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}))
         admin_labels = {button["text"] for row in MAIN_KEYBOARD["keyboard"] for button in row}
         self.assertIn(USER_VIEW, admin_labels)
         self.user_say(42, USER_VIEW)
@@ -264,7 +390,8 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.tg.sent[-1], HELP)
 
     def test_user_view_applies_regular_user_listing_and_ownership(self):
-        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}))
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}))
         (self.cfg.repos_dir / "theirs").mkdir(exist_ok=True)
         self.state.set_app_owner("me/theirs", telegram_owner(77))
         self.user_say(42, USER_VIEW)
@@ -281,7 +408,8 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("📁", self.tg.sent[-1])
 
     def test_regular_users_cannot_switch_views(self):
-        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}))
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}))
         for label in (USER_VIEW, ADMIN_VIEW):
             with self.subTest(label=label):
                 self.user_say(77, label)
@@ -289,7 +417,8 @@ class ServiceTests(unittest.TestCase):
         self.assertFalse(self.state.user_view(77))
 
     def test_regular_users_see_only_their_apps_in_the_fix_picker(self):
-        self.bot.cfg = make_config(self.tmp, user_ids=frozenset({77, 88}))
+        self.approve(77, 88)
+        self.bot.cfg = make_config(self.tmp)
         self.state.set_app_owner("me/mine", telegram_owner(77))
         self.state.set_app_owner("me/theirs", telegram_owner(88))
         self.state.set_app_owner("me/admin-app", ADMIN_OWNER)
@@ -381,7 +510,8 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.rt.calls[0][2], "Other/Model 1")
 
     def test_regular_user_create_app_menu_skips_visibility_and_creates_a_public_repository(self):
-        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}),
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}),
                                    cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
                                    cloudflare_zone_id="b" * 32)
         with patch("bot.service.CloudflareRoutes") as routes:
@@ -428,7 +558,8 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.rt.calls[0][3:], (None, False))
 
     def test_regular_user_fix_app_menu_skips_the_chat_type(self):
-        self.bot.cfg = make_config(self.tmp, user_ids=frozenset({77}))
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp)
         self.state.set_app_owner("me/app", telegram_owner(77))
         git("clone", str(self.origin), str(self.dest))
         self.user_say(77, FIX_APP)
@@ -538,7 +669,8 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.rt.histories, [False])
 
     def test_regular_user_creation_records_ownership_and_allows_only_owner_fixes(self):
-        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77, 88}),
+        self.approve(77, 88)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}),
                                    cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
                                    cloudflare_zone_id="b" * 32)
         with patch("bot.service.CloudflareRoutes") as routes:
@@ -579,7 +711,8 @@ class ServiceTests(unittest.TestCase):
             self.assertNotIn(hidden, report)
 
     def test_regular_user_failures_hide_service_and_tunnel_details(self):
-        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}),
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}),
                                    cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
                                    cloudflare_zone_id="b" * 32)
         with patch("bot.service.CloudflareRoutes") as routes:
@@ -602,7 +735,8 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("kurwalab-tunnel", self.tg.sent[-1])
 
     def test_regular_users_cannot_create_private_repositories(self):
-        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}),
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}),
                                    cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
                                    cloudflare_zone_id="b" * 32)
         self.user_say(77, "/new private member-app build it")
@@ -661,7 +795,8 @@ class ServiceTests(unittest.TestCase):
                 self.assertEqual((remaining, temporary_chat, name, error), ("build it", expected, "fresh-app", ""))
 
     def test_new_chat_type_option_is_passed_for_admins_and_refused_for_regular_users(self):
-        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}),
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}),
                                    cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
                                    cloudflare_zone_id="b" * 32)
         self.user_say(77, "/new notempchat member-app build it")
@@ -1035,7 +1170,8 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("Systemd app service registration", self.tg.sent[-1])
 
     def test_app_controls_enforce_regular_user_ownership(self):
-        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77, 88}))
+        self.approve(77, 88)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}))
         for name in ("mine", "theirs"):
             (self.cfg.repos_dir / name).mkdir(exist_ok=True)
         self.state.set_app_owner("me/mine", telegram_owner(77))
@@ -1057,7 +1193,8 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("copilot-app-theirs.service is running (pid 1)", self.tg.sent[-1])
 
     def test_app_control_buttons_show_only_regular_users_owned_apps(self):
-        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77, 88}))
+        self.approve(77, 88)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}))
         for name in ("mine", "theirs"):
             (self.cfg.repos_dir / name).mkdir(exist_ok=True)
         self.state.set_app_owner("me/mine", telegram_owner(77))
@@ -1095,7 +1232,8 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("🟢 2 running · ⚪ 3 stopped", listing)
 
     def test_list_shows_the_bot_only_to_admins_and_uses_detailed_systemd_status(self):
-        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}))
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}))
         (self.cfg.repos_dir / "linux-copilot-bot").mkdir(exist_ok=True)
         self.deployer.statuses["eurofish"] = "failed"
         self.user_say(42, "/list")
@@ -1155,7 +1293,8 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue((live / "Makefile").is_file())
 
     def test_regular_users_never_see_or_change_the_bot(self):
-        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}),
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}),
                                    cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
                                    cloudflare_zone_id="b" * 32)
         self.make_bot_checkout()
@@ -1190,7 +1329,8 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.deployer.bot_restarts, 0)
 
     def test_regular_list_omits_admin_only_folder_and_port(self):
-        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}),
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}),
                                    cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
                                    cloudflare_zone_id="b" * 32)
         self.deployer.running = [("eurofish", 101)]
@@ -1344,7 +1484,8 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.rt.attachments[-1], [])
 
     def test_caption_runs_as_the_request_with_its_file(self):
-        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}),
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}),
                                    cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
                                    cloudflare_zone_id="b" * 32)
         with patch("bot.service.CloudflareRoutes") as routes:

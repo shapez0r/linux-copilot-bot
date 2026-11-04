@@ -65,13 +65,13 @@ def main(argv=None) -> int:
             log.info("%s", deployer.ensure_bot_service(config.ROOT))
         except DeployError as error:
             log.warning("Bot service registration failed: %s", config.redact(str(error), cfg.secrets))
-    bot = Bot(cfg, Telegram(cfg.telegram_token), gh, Git(cfg, gh.login), RoundTrip(cfg), deployer,
-              State(cfg.state_dir / "state.json", cfg.model))
+    state = State(cfg.state_dir / "state.json", cfg.model)
+    bot = Bot(cfg, Telegram(cfg.telegram_token), gh, Git(cfg, gh.login), RoundTrip(cfg), deployer, state)
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
-    log.info("Listening for %d Telegram admin(s) and %d regular user(s)",
-             len(cfg.admin_ids), len(cfg.user_ids))
+    log.info("Listening for %d Telegram admin(s), %d approved user(s) and %d pending access request(s)",
+             len(cfg.admin_ids), len(state.approved_users), len(state.access_requests))
     bot.run_forever(stop)
     return 0
 
