@@ -57,7 +57,9 @@ Only user ids listed in `TELEGRAM_ADMIN_IDS` or `TELEGRAM_USER_IDS` are served, 
 
 Administrators have every bot permission. Regular users can create apps, list all apps, fix apps they created, and start or stop only their own app services. Administrators can start or stop any app and register services for existing app folders. The app list is built from every direct folder under `REPOS_DIR` except the bot repository, including stopped or untracked apps. Its status comes from systemd and distinguishes running, stopped, failed, transitional, and unregistered services. Administrators see each app's name, status, full folder, tunnel port, and tunnel URL; regular users see its name, status without a process id, and public URL. Messages to regular users identify apps only by name and public URL: they omit deployment and tunnel sections, tunnel routes and ports, process ids, server paths, and systemd service details, and failures in those areas are reported generically. Each created app is recorded with an owner: regular-user apps belong to the creating Telegram user id, while administrator-created and newly registered existing apps are owned by `kurwalab.fyi admins`. Active repositories are stored per Telegram user, the selected default model is shared, and all users share the single job slot.
 
-Send `/start` or `/menu` to open a role-specific persistent keyboard. Regular users see creation, listing, fixing, and start/stop controls for their apps; administrators also see service registration, deletion, repository, model, status, and tunnel-management options. The guided **Create an app** flow:
+Administrators can switch between **admin view** and **user view** at any time with the **👤 Switch to user view** and **🛡 Switch to admin view** buttons, which are always in their main menu. In user view, an administrator sees and uses the bot exactly as a regular user: the regular-user menu, help, listings, messages, and permissions apply, admin-only commands and buttons are refused, and apps created in that view are public and owned by the administrator's Telegram user id. The choice is stored per administrator and persists across restarts. Regular users cannot switch views.
+
+Send `/start` or `/menu` to open a role-specific persistent keyboard. Regular users see creation, listing, fixing, and start/stop controls for their apps; administrators in admin view also see service registration, deletion, repository, model, status, and tunnel-management options, and every administrator menu includes the view switch. The guided **Create an app** flow:
 
 1. asks for a lowercase app name;
 2. checks the models available in Copilot (see below) and offers them for selection;
@@ -128,7 +130,7 @@ Settings come from `.env` (or the file named by `BOT_ENV_FILE`); real environmen
 | `GITHUB_TOKEN` | required | Used for GitHub API calls and Git over HTTPS through `GIT_ASKPASS` (including private repository clones); it is never written into remote URLs. |
 | `GITHUB_OWNER` | token's account | Owner for bare repository names. |
 | `REPOS_DIR` | `/home/localadmin/repos` | Parent of app checkouts and local app templates; `eurofish` is the default template. |
-| `STATE_DIR` | `~/.copilot-telegram-bot` | App ownership, per-user active repositories, shared model, and app logs. |
+| `STATE_DIR` | `~/.copilot-telegram-bot` | App ownership, per-user active repositories, administrators' view choices, shared model, and app logs. |
 | `COPILOT_PROFILE` | `~/.copilot-repo-browser` | Browser profile created by `make login`. |
 | `COPILOT_MODEL` | `GPT/GPT-6` | Initial model label; change it later with `/model`. |
 | `COPILOT_TIMEOUT` | `900` | Seconds without a visible Stop control, output change, or task-card change before a run gives up. The run keeps waiting while a Stop control is visible in the current task card (revealed by hovering it) or near the prompt input, even when no output change is detected. Output detection starts after submission and covers the whole page, including open shadow roots and same-origin frames. |
@@ -156,7 +158,7 @@ Without `.env` values or per-request overrides, requests use `nobrowser` and `te
 | Path | Purpose |
 | --- | --- |
 | `engine/copilot_repo_roundtrip.py` | Playwright round-trip engine (`login`, `models`, and `fix`), the single automation engine. |
-| `bot/service.py`, `bot/state.py` | Role-aware menus, permissions, app ownership, per-user selections, guided conversations, commands, and the request pipeline. |
+| `bot/service.py`, `bot/state.py` | Role-aware menus, admin/user view switching, permissions, app ownership, per-user selections, guided conversations, commands, and the request pipeline. |
 | `bot/telegram_api.py`, `bot/github_api.py` | Telegram long polling, reply keyboards, HTML-formatted messages, and GitHub REST clients (standard library only). |
 | `bot/gitops.py`, `bot/repos.py` | Seed, clone, sync, commit, push; repository references. |
 | `bot/roundtrip.py`, `bot/deploy.py` | Engine subprocess runner; sudo-backed systemd system-unit registration, lifecycle control, status, and app logs. |

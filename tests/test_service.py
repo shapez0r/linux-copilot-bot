@@ -11,7 +11,8 @@ from bot.deploy import DeployResult
 from bot.github_api import GitHubError
 from bot.gitops import Git, GitError
 from bot.roundtrip import Cancelled, RoundTripError
-from bot.service import (CHAT_MODE_KEYBOARD, CONFIRM_DELETE, CREATE_APP, CUSTOM_MODEL, DELETE_APP,
+from bot.service import (ADMIN_USER_VIEW_KEYBOARD, ADMIN_VIEW, ADMIN_VIEW_HINT, CHAT_MODE_KEYBOARD,
+                         CONFIRM_DELETE, CREATE_APP, CUSTOM_MODEL, DELETE_APP, USER_VIEW,
                          DEPLOY_NOTE, FIX_APP, HELP, KNOWN_MODELS, LIST_APPS, MAIN_KEYBOARD, MODEL_KEYBOARD,
                          NEW_APP_PROMPT, PRIVATE_REPO, PUBLIC_REPO, VISIBILITY_KEYBOARD,
                          REGULAR_CHAT, TEMPORARY_CHAT, USER_HELP, USER_KEYBOARD, REGISTER_SERVICES,
@@ -216,6 +217,56 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("only to kurwalab.fyi admins", self.tg.sent[-1])
         self.user_say(77, REGISTER_SERVICES)
         self.assertIn("only to kurwalab.fyi admins", self.tg.sent[-1])
+
+    def test_admins_can_switch_between_admin_and_user_views(self):
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}))
+        admin_labels = {button["text"] for row in MAIN_KEYBOARD["keyboard"] for button in row}
+        self.assertIn(USER_VIEW, admin_labels)
+        self.user_say(42, USER_VIEW)
+        self.assertIn("User view enabled", self.tg.sent[-1])
+        self.assertEqual(self.tg.markups[-1], ADMIN_USER_VIEW_KEYBOARD)
+        user_labels = {button["text"] for row in ADMIN_USER_VIEW_KEYBOARD["keyboard"] for button in row}
+        self.assertEqual(user_labels, {CREATE_APP, LIST_APPS, FIX_APP, START_APP, STOP_APP, ADMIN_VIEW})
+        self.assertTrue(State(self.tmp / "state.json", "x").user_view(42))
+        self.user_say(42, "/status")
+        self.assertIn("only in admin view", self.tg.sent[-1])
+        self.user_say(42, DELETE_APP)
+        self.assertIn("only in admin view", self.tg.sent[-1])
+        self.user_say(42, "/help")
+        self.assertEqual(self.tg.sent[-1], USER_HELP + "\n\n" + ADMIN_VIEW_HINT)
+        self.user_say(42, "/start")
+        self.assertEqual(self.tg.markups[-1], ADMIN_USER_VIEW_KEYBOARD)
+        self.user_say(42, ADMIN_VIEW)
+        self.assertIn("Admin view enabled", self.tg.sent[-1])
+        self.assertEqual(self.tg.markups[-1], MAIN_KEYBOARD)
+        self.assertFalse(State(self.tmp / "state.json", "x").user_view(42))
+        self.user_say(42, "/help")
+        self.assertEqual(self.tg.sent[-1], HELP)
+
+    def test_user_view_applies_regular_user_listing_and_ownership(self):
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}))
+        (self.cfg.repos_dir / "theirs").mkdir(exist_ok=True)
+        self.state.set_app_owner("me/theirs", telegram_owner(77))
+        self.user_say(42, USER_VIEW)
+        self.user_say(42, "/list")
+        self.assertNotIn("folder:", self.tg.sent[-1])
+        self.assertNotIn("port:", self.tg.sent[-1])
+        self.user_say(42, "/fix theirs change it")
+        self.assertIn("only fix apps you created", self.tg.sent[-1])
+        self.user_say(42, "/app stop theirs")
+        self.assertIn("only start or stop apps you created", self.tg.sent[-1])
+        self.assertEqual(self.rt.calls, [])
+        self.user_say(42, ADMIN_VIEW)
+        self.user_say(42, "/list")
+        self.assertIn("folder:", self.tg.sent[-1])
+
+    def test_regular_users_cannot_switch_views(self):
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}))
+        for label in (USER_VIEW, ADMIN_VIEW):
+            with self.subTest(label=label):
+                self.user_say(77, label)
+                self.assertIn("only to kurwalab.fyi admins", self.tg.sent[-1])
+        self.assertFalse(self.state.user_view(77))
 
     def test_regular_users_see_only_their_apps_in_the_fix_picker(self):
         self.bot.cfg = make_config(self.tmp, user_ids=frozenset({77, 88}))

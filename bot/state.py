@@ -27,12 +27,14 @@ class State:
         self.model = default_model
         self.app_owners = {}
         self.active_repos = {}
+        self.user_view_ids = set()
         try:
             data = json.loads(path.read_text())
             self.repo = str(data.get("repo", ""))
             self.model = str(data.get("model", default_model))
             owners = data.get("app_owners", {})
             active = data.get("active_repos", {})
+            user_view = data.get("user_view_ids", [])
             if isinstance(owners, dict):
                 self.app_owners = {
                     str(repo): str(owner) for repo, owner in owners.items()
@@ -43,6 +45,8 @@ class State:
                     str(user_id): str(repo) for user_id, repo in active.items()
                     if str(user_id).isdigit() and isinstance(repo, str) and "/" in repo
                 }
+            if isinstance(user_view, list):
+                self.user_view_ids = {str(user_id) for user_id in user_view if str(user_id).isdigit()}
         except (OSError, ValueError, AttributeError):
             pass
         if self.repo:
@@ -83,6 +87,18 @@ class State:
             if active.lower() != target
         }
 
+    def user_view(self, user_id) -> bool:
+        """Return whether an administrator chose to use the bot as a regular user."""
+        return user_id is not None and str(user_id) in self.user_view_ids
+
+    def set_user_view(self, user_id, enabled: bool):
+        if user_id is None:
+            return
+        if enabled:
+            self.user_view_ids.add(str(user_id))
+        else:
+            self.user_view_ids.discard(str(user_id))
+
     def repos_for_owner(self, owner: str):
         return [repo for repo, app_owner in self.app_owners.items() if app_owner == owner]
 
@@ -98,5 +114,6 @@ class State:
             "model": self.model,
             "app_owners": self.app_owners,
             "active_repos": self.active_repos,
+            "user_view_ids": sorted(self.user_view_ids, key=int),
         }, sort_keys=True))
         os.replace(tmp, self._path)

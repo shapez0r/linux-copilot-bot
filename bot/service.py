@@ -61,6 +61,8 @@ CONFIRM_DELETE = "✅ Yes, delete it"
 KEEP_APP = "↩️ No, keep it"
 TEMPORARY_CHAT = "🕶 Temporary chat"
 REGULAR_CHAT = "💾 Regular chat"
+USER_VIEW = "👤 Switch to user view"
+ADMIN_VIEW = "🛡 Switch to admin view"
 
 
 def _keyboard(rows):
@@ -80,11 +82,19 @@ MAIN_KEYBOARD = _keyboard([
     [TUNNEL_ROUTES, SELECT_REPOSITORY],
     [SET_MODEL, SHOW_STATUS],
     [CANCEL_ACTION],
+    [USER_VIEW],
 ])
 USER_KEYBOARD = _keyboard([
     [CREATE_APP, LIST_APPS],
     [FIX_APP],
     [START_APP, STOP_APP],
+])
+# Administrators in user view get the regular-user menu plus a way back to admin view.
+ADMIN_USER_VIEW_KEYBOARD = _keyboard([
+    [CREATE_APP, LIST_APPS],
+    [FIX_APP],
+    [START_APP, STOP_APP],
+    [ADMIN_VIEW],
 ])
 MODEL_KEYBOARD = _keyboard([
     [KNOWN_MODELS[0], KNOWN_MODELS[1]],
@@ -106,7 +116,7 @@ NEW_USAGE = (
     'name="<name|owner/name>" prompt="<request>"'
 )
 
-HELP = """Use the buttons below to create and manage apps. You can also send a request as plain text to change the active repository, commit, push and redeploy it with `make run`.
+HELP = f"""Use the buttons below to create and manage apps. You can also send a request as plain text to change the active repository, commit, push and redeploy it with `make run`. Use {USER_VIEW} in the main menu to use the bot as a regular user.
 
 /menu - show the app-management menu
 /new [public|private] [tempchat|notempchat] [model=<provider/model>] [template=<app>] name="<name|owner/name>" prompt="<request>" - create, build, deploy and publish a new app (private by default)
@@ -125,6 +135,7 @@ HELP = """Use the buttons below to create and manage apps. You can also send a r
 /status - show repository, model, job and app state
 /cancel - stop the running job
 /help - show this message"""
+ADMIN_VIEW_HINT = f"You are an admin in user view. Use {ADMIN_VIEW} in the main menu to return to admin view."
 USER_HELP = """Use the buttons below to create and list apps, and to fix, start, or stop apps you created.
 
 /menu - show the app menu
@@ -142,6 +153,7 @@ ADMIN_ONLY_BUTTONS = {
 }
 ADMIN_ONLY_COMMANDS = {"delete", "repo", "cloudflare", "model", "status", "register"}
 ADMIN_ONLY_MESSAGE = "This action is available only to kurwalab.fyi admins."
+USER_VIEW_ADMIN_ONLY_MESSAGE = f"This action is available only in admin view. Use {ADMIN_VIEW} in the main menu."
 
 _BOT_ERRORS = (RepoError, GitError, GitHubError, RoundTripError, CloudflareError, DeployError)
 
@@ -239,11 +251,32 @@ class Bot:
         except TelegramError as e:
             log.warning("send failed: %s", redact(str(e), self.cfg.secrets))
 
-    def _is_admin(self, user_id) -> bool:
+    def _is_configured_admin(self, user_id) -> bool:
         return user_id is None or self.cfg.is_admin(user_id)
 
+    def _is_admin(self, user_id) -> bool:
+        """Return whether the sender acts as an admin; admins in user view get regular-user behavior."""
+        return self._is_configured_admin(user_id) and not self.state.user_view(user_id)
+
     def _main_keyboard(self, user_id):
-        return MAIN_KEYBOARD if self._is_admin(user_id) else USER_KEYBOARD
+        if self._is_admin(user_id):
+            return MAIN_KEYBOARD
+        return ADMIN_USER_VIEW_KEYBOARD if self._is_configured_admin(user_id) else USER_KEYBOARD
+
+    def _admin_only(self, chat_id: int, user_id=None):
+        self.say(chat_id, USER_VIEW_ADMIN_ONLY_MESSAGE if self._is_configured_admin(user_id)
+                 else ADMIN_ONLY_MESSAGE)
+
+    def _switch_view(self, chat_id: int, user_view: bool, user_id=None):
+        """Let a configured admin choose between admin and regular-user behavior."""
+        if not self._is_configured_admin(user_id):
+            self.say(chat_id, ADMIN_ONLY_MESSAGE)
+            return
+        self.state.set_user_view(user_id, user_view)
+        self.state.save()
+        text = (f"User view enabled. You now see and use the bot as a regular user. {ADMIN_VIEW_HINT}"
+                if user_view else "Admin view enabled. All admin actions and details are available.")
+        self.show_menu(chat_id, text, user_id)
 
     def show_menu(self, chat_id: int, text: str = "What would you like to do?", user_id=None):
         self._dialogs.pop(chat_id, None)
@@ -260,6 +293,9 @@ class Bot:
         if text == CANCEL_ACTION:
             self.cmd_cancel(chat_id, user_id)
             return
+        if text in (USER_VIEW, ADMIN_VIEW):
+            self._switch_view(chat_id, text == USER_VIEW, user_id)
+            return
         if text in (CREATE_APP, LIST_APPS, FIX_APP, START_APP, STOP_APP, REGISTER_SERVICES,
                     DELETE_APP, TUNNEL_ROUTES,
                     SELECT_REPOSITORY, SET_MODEL, SHOW_STATUS, LIST_ROUTES, ADD_ROUTE, DELETE_ROUTE):
@@ -275,12 +311,17 @@ class Bot:
         command = parts[0][1:].split("@")[0].lower()
         arg = parts[1].strip() if len(parts) > 1 else ""
         if command in ADMIN_ONLY_COMMANDS and not self._is_admin(user_id):
-            self.say(chat_id, ADMIN_ONLY_MESSAGE)
+            self._admin_only(chat_id, user_id)
             return
         if command == "start":
             self.show_menu(chat_id, "Welcome. Create and manage apps with the buttons below.", user_id)
         elif command == "help":
-            help_text = HELP if self._is_admin(user_id) else USER_HELP
+            if self._is_admin(user_id):
+                help_text = HELP
+            elif self._is_configured_admin(user_id):
+                help_text = f"{USER_HELP}\n\n{ADMIN_VIEW_HINT}"
+            else:
+                help_text = USER_HELP
             self.say_keyboard(chat_id, help_text, self._main_keyboard(user_id))
         elif command == "menu":
             self.show_menu(chat_id, user_id=user_id)
@@ -312,7 +353,7 @@ class Bot:
     def _handle_menu_button(self, chat_id: int, label: str, user_id=None):
         """Start a guided action selected from a reply-keyboard button."""
         if label in ADMIN_ONLY_BUTTONS and not self._is_admin(user_id):
-            self.say(chat_id, ADMIN_ONLY_MESSAGE)
+            self._admin_only(chat_id, user_id)
             return
         if label == LIST_APPS:
             self.cmd_list(chat_id, "", user_id)
@@ -1242,6 +1283,8 @@ class Bot:
             return False
         self._cancel.clear()
         self._job_user_id = user_id
+        # Errors use the view that was active when the job started.
+        admin = self._is_admin(user_id)
 
         def run():
             try:
@@ -1249,7 +1292,7 @@ class Bot:
             except Cancelled:
                 self.say(chat_id, "Cancelled.")
             except _BOT_ERRORS as e:
-                self.say(chat_id, f"\u274c {e if self._is_admin(user_id) else self._user_error(e)}")
+                self.say(chat_id, f"\u274c {e if admin else self._user_error(e)}")
             except Exception as e:
                 log.exception("job failed")
                 self.say(chat_id, f"\u274c Internal error: {e.__class__.__name__}. See the bot log.")
