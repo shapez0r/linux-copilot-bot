@@ -16,7 +16,7 @@ class AppListTests(unittest.TestCase):
                    AppEntry('booting', 'activating (start)')]
         message, = app_list_messages(entries)
         self.assertTrue(message.startswith('📱 <b>Apps</b>\n🟢 1 running · ⚪ 1 stopped · 🔴 1 failed · 🟡 1 changing\n\n'))
-        self.assertIn('🟢 <b>a</b> · running\n<blockquote>🔗 <a href="https://a.example">https://a.example</a></blockquote>',
+        self.assertIn('🟢 <b>a</b> · running\n<blockquote>🔗 https://a.example</blockquote>',
                       message)
         self.assertIn('⚪ <b>long-name</b> · stopped\n<blockquote>🔗 not configured</blockquote>', message)
         self.assertIn('🔴 <b>broken</b> · failed\n\n', message)
@@ -39,7 +39,8 @@ class AppListTests(unittest.TestCase):
         message, = app_list_messages([AppEntry('a&b', 'failed (<x>)', 'https://a.example/?q="1"&r=2', '', '<folder> & "dir"')])
         self.assertIn('<b>a&amp;b</b>', message)
         self.assertIn('&lt;folder&gt;', message)
-        self.assertIn('href="https://a.example/?q=&quot;1&quot;&amp;r=2"', message)
+        self.assertIn('https://a.example/?q=&quot;1&quot;&amp;r=2', message)
+        self.assertNotIn('<a ', message)
         self.assertNotIn('<folder>', message)
         HTMLParser().feed(message)
 

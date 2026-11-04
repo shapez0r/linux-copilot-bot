@@ -1085,7 +1085,7 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("🟢 <b>stravall</b> · running (pid 1)", listing)
         self.assertIn("⚪ <b>eurocat</b> · stopped", listing)
         self.assertIn("🔌 Port 8084", listing)
-        self.assertIn('<a href="https://eurocat.kurwalab.fyi">https://eurocat.kurwalab.fyi</a>', listing)
+        self.assertIn('🔗 https://eurocat.kurwalab.fyi', listing)
         self.assertIn("⚪ <b>ihatepdf</b> · stopped", listing)
         self.assertIn("🔌 Port not configured", listing)
         self.assertIn("🟢 2 running · ⚪ 3 stopped", listing)
@@ -1199,7 +1199,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(
             self.tg.sent[-1],
             "📱 <b>Apps</b>\n🟢 1 running\n\n🟢 <b>eurofish</b> · running\n"
-            '<blockquote>🔗 <a href="https://eurofish.kurwalab.fyi">https://eurofish.kurwalab.fyi</a></blockquote>',
+            '<blockquote>🔗 https://eurofish.kurwalab.fyi</blockquote>',
         )
 
     def test_list_reports_unavailable_routes_without_cloudflare_configuration(self):

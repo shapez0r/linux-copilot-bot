@@ -56,9 +56,9 @@ def _detail_lines(entry: AppEntry):
     if entry.note:
         lines.append(f"🤖 {_esc(entry.note)}")
     if entry.url:
-        link = f'<a href="{_esc(entry.url)}">{_esc(entry.url)}</a>' if entry.url.startswith("https://") \
-            else _esc(entry.url)
-        lines.append(f"🔗 {link}")
+        # Plain URL text: Telegram links it itself and opens it without the confirmation that
+        # explicit <a href> hyperlinks trigger.
+        lines.append(f"🔗 {_esc(entry.url)}")
     if entry.port:
         lines.append(f"🔌 Port {_esc(entry.port)}")
     if entry.folder:
