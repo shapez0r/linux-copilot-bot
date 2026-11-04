@@ -64,11 +64,19 @@ class CompletionTests(unittest.TestCase):
         for enabled in (True, False):
             with self.subTest(enabled=enabled):
                 page, button = Mock(), Mock()
-                page.locator.return_value.first = button
-                with patch.object(rt, 'temporary_chat_active', side_effect=[not enabled, enabled]):
+                with patch.object(rt, 'temporary_chat_active', side_effect=[not enabled, enabled]), \
+                        patch.object(rt, 'visible_temporary_toggle', return_value=button):
                     rt.set_temporary_chat(page, rt.selectors_from_env(), enabled)
-                button.wait_for.assert_called_once_with(state='visible', timeout=30000)
                 button.click.assert_called_once_with()
+
+    def test_missing_temporary_chat_toggle_is_reported_after_the_timeout(self):
+        page = Mock()
+        with patch.object(rt, 'temporary_chat_active', return_value=False), \
+                patch.object(rt, 'visible_temporary_toggle', return_value=None), \
+                patch.object(rt, 'open_temporary_chat_menu', return_value=None) as menus, \
+                self.assertRaisesRegex(SystemExit, 'Temporary chat button was not found'):
+            rt.set_temporary_chat(page, rt.selectors_from_env(), True, timeout_seconds=0)
+        menus.assert_not_called()
 
     def test_temporary_chat_is_not_clicked_when_state_already_matches(self):
         page = Mock()
@@ -628,6 +636,39 @@ secret_two()</code>
         self.page.set_content(self.MODEL_PICKER)
         rt.select_model(self.page, 'GPT/GPT-6.1 Sol', self.sel)
         self.assertEqual(self.page.locator('#chosen').inner_text(), 'GPT-6.1 Sol')
+
+    def test_hidden_duplicate_temporary_toggle_does_not_hide_the_visible_one(self):
+        self.page.set_content('''<button id="hidden" aria-label="Temporary chat" hidden></button>
+          <button id="shown" aria-label="Temporary chat" aria-pressed="false"
+            onclick="this.setAttribute('aria-pressed', 'true')"></button>''')
+        rt.set_temporary_chat(self.page, self.sel, True, timeout_seconds=5)
+        self.assertEqual(self.page.locator('#shown').get_attribute('aria-pressed'), 'true')
+
+    def test_text_labelled_temporary_toggle_is_not_read_as_active(self):
+        self.page.set_content('''<button id="toggle" role="switch" aria-checked="false"
+            onclick="this.setAttribute('aria-checked', String(this.getAttribute('aria-checked') !== 'true'))">
+            Temporary chat</button>''')
+        self.assertFalse(rt.temporary_chat_active(self.page, self.sel))
+        rt.set_temporary_chat(self.page, self.sel, True, timeout_seconds=5)
+        self.assertEqual(self.page.locator('#toggle').get_attribute('aria-checked'), 'true')
+        rt.set_temporary_chat(self.page, self.sel, False, timeout_seconds=5)
+        self.assertEqual(self.page.locator('#toggle').get_attribute('aria-checked'), 'false')
+
+    def test_temporary_chat_heading_outside_controls_marks_the_active_state(self):
+        self.page.set_content('<main><h2>Temporary chat</h2></main>')
+        self.assertTrue(rt.temporary_chat_active(self.page, self.sel))
+
+    def test_temporary_chat_entry_inside_a_popup_menu_is_used(self):
+        self.page.set_content('''<button id="menu-button" aria-label="New chat options" aria-haspopup="menu"
+            onclick="document.getElementById('menu').hidden = false"></button>
+          <div role="menu" id="menu" hidden>
+            <div role="menuitem" onclick="document.getElementById('menu').hidden = true;
+              document.querySelector('textarea').placeholder = 'Temporarily chatting'">Temporary chat</div>
+          </div><textarea placeholder="Message Copilot"></textarea>''')
+        with patch.object(rt, 'TEMPORARY_MENU_DELAY_SECONDS', 0):
+            rt.set_temporary_chat(self.page, self.sel, True, timeout_seconds=5)
+        self.assertTrue(rt.temporary_chat_active(self.page, self.sel))
+        self.assertTrue(self.page.locator('#menu').is_hidden())
 
     def test_descriptive_zip_link_with_opaque_target(self):
         self.page.set_content('<a href="/artifact/123">Download the complete fixed repository ZIP</a>')

@@ -1663,45 +1663,125 @@ def select_model(page, model: str, sel):
     option.click(); page.wait_for_timeout(1000)
 
 
+# Copilot can render the Temporary chat toggle as an icon button, a labelled button, a switch or a menu
+# entry; these are tried after the COPILOT_TEMPORARY_CHAT selector.
+TEMPORARY_CHAT_CONTROLS = (
+    '[role="switch"][aria-label*="temporary" i], [role="menuitemcheckbox"][aria-label*="temporary" i], '
+    '[role="menuitem"][aria-label*="temporary" i], button:has-text("Temporary chat"), '
+    '[role="button"]:has-text("Temporary chat"), [role="switch"]:has-text("Temporary chat"), '
+    '[role="menuitem"]:has-text("Temporary chat"), [role="menuitemcheckbox"]:has-text("Temporary chat")'
+)
+# Menu buttons that may hold the Temporary chat entry; only controls that open a popup are clicked.
+TEMPORARY_CHAT_MENUS = re.compile(r"new chat|more options|more actions|chat options|^more$|\.\.\.|\u2026", re.I)
+# Controls whose own label is "Temporary chat"; that text is a toggle, not a sign of the active state.
+INTERACTIVE_ANCESTOR = ('button, a, [role="button"], [role="switch"], [role="menuitem"], '
+                        '[role="menuitemcheckbox"], [role="menuitemradio"], [role="option"], [role="menu"]')
+# Seconds of searching for a directly visible toggle before popup menus are opened.
+TEMPORARY_MENU_DELAY_SECONDS = 5
+
+
+def _temporary_chat_selectors(sel):
+    return [selector for selector in (sel.get("temporary_chat"), TEMPORARY_CHAT_CONTROLS) if selector]
+
+
 def temporary_chat_active(page, sel):
     """True when Copilot shows the temporary chat state (toggle pressed, heading or composer hint)."""
-    import re
-    try:
-        toggles = page.locator(sel["temporary_chat"])
-        for i in range(toggles.count()):
-            node = toggles.nth(i)
-            if not node.is_visible():
-                continue
-            for attr in ("aria-pressed", "aria-checked", "aria-selected"):
-                if (node.get_attribute(attr) or "").lower() == "true":
+    for selector in _temporary_chat_selectors(sel):
+        try:
+            toggles = page.locator(selector)
+            for i in range(toggles.count()):
+                node = toggles.nth(i)
+                if not node.is_visible():
+                    continue
+                for attr in ("aria-pressed", "aria-checked", "aria-selected"):
+                    if (node.get_attribute(attr) or "").lower() == "true":
+                        return True
+                label = (node.get_attribute("aria-label") or node.get_attribute("title") or "").lower()
+                if re.search(r"\b(exit|leave|end|turn off|disable|stop)\b", label):
                     return True
-            label = (node.get_attribute("aria-label") or node.get_attribute("title") or "").lower()
-            if re.search(r"\b(exit|leave|end|turn off|disable|stop)\b", label):
-                return True
-    except Exception:
-        pass
+        except Exception:
+            pass
     for locator in (page.get_by_text(re.compile(r"^\s*Temporary chat\s*$", re.I)),
                     page.locator('[placeholder*="Temporarily" i], [aria-placeholder*="Temporarily" i], '
                                  '[data-placeholder*="Temporarily" i], [aria-label*="Temporarily" i]')):
         try:
-            if any(locator.nth(i).is_visible() for i in range(locator.count())):
-                return True
+            for i in range(locator.count()):
+                node = locator.nth(i)
+                if node.is_visible() and not node.evaluate(
+                        "(e, controls) => !!e.closest(controls)", INTERACTIVE_ANCESTOR):
+                    return True
         except Exception:
             pass
     return False
+
+
+def visible_temporary_toggle(page, sel):
+    """The first visible Temporary chat control; hidden duplicates (e.g. collapsed layouts) are skipped."""
+    for selector in _temporary_chat_selectors(sel):
+        try:
+            toggles = page.locator(selector)
+            for i in range(toggles.count()):
+                node = toggles.nth(i)
+                if node.is_visible():
+                    return node
+        except Exception:
+            continue
+    return None
+
+
+def open_temporary_chat_menu(page, sel, tried):
+    """Open untried popup menus and return a Temporary chat entry found in one, leaving that menu open."""
+    try:
+        buttons = page.get_by_role("button", name=TEMPORARY_CHAT_MENUS)
+        count = buttons.count()
+    except Exception:
+        return None
+    for i in range(count):
+        button = buttons.nth(i)
+        try:
+            if not button.is_visible() or not button.get_attribute("aria-haspopup"):
+                continue
+            key = (button.get_attribute("aria-label") or "", button.inner_text(timeout=1000).strip(), i)
+            if key in tried:
+                continue
+            tried.add(key)
+            button.click(timeout=3000)
+        except Exception:
+            continue
+        page.wait_for_timeout(600)
+        toggle = visible_temporary_toggle(page, sel)
+        if toggle is not None:
+            return toggle
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        page.wait_for_timeout(300)
+    return None
 
 
 def set_temporary_chat(page, sel, enabled, timeout_seconds=30):
     """Set Copilot's Temporary chat toggle to the requested state before model selection."""
     if temporary_chat_active(page, sel) == enabled:
         return
-    button = page.locator(sel["temporary_chat"]).first
-    try:
-        button.wait_for(state="visible", timeout=timeout_seconds * 1000)
-    except Exception:
-        raise SystemExit("Temporary chat button was not found. Override COPILOT_TEMPORARY_CHAT, "
-                         "or change the temporary-chat option.")
-    button.click()
+    started = time.monotonic()
+    deadline = started + timeout_seconds
+    tried_menus = set()
+    while True:
+        raise_if_quit()
+        toggle = visible_temporary_toggle(page, sel)
+        if toggle is None and time.monotonic() - started >= TEMPORARY_MENU_DELAY_SECONDS:
+            toggle = open_temporary_chat_menu(page, sel, tried_menus)
+        if toggle is not None:
+            break
+        # The page can finish rendering the requested state while the toggle is searched for.
+        if temporary_chat_active(page, sel) == enabled:
+            return
+        if time.monotonic() >= deadline:
+            raise SystemExit("Temporary chat button was not found. Override COPILOT_TEMPORARY_CHAT, "
+                             "or change the temporary-chat option.")
+        page.wait_for_timeout(500)
+    toggle.click()
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         page.wait_for_timeout(500)
