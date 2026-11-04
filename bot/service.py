@@ -10,6 +10,7 @@ import threading
 import time
 from pathlib import Path
 
+from .app_list import app_list_messages
 from .config import Config, redact
 from .cloudflare import CloudflareError, CloudflareRoutes
 from .deploy import BOT_APP, BOT_SERVICE, DeployError, Deployer
@@ -1085,7 +1086,7 @@ class Bot:
             except CloudflareError:
                 routes_available = False
 
-        lines = ["Apps:"]
+        entries = []
         for folder in apps:
             name = folder.name
             try:
@@ -1099,19 +1100,27 @@ class Bot:
             else:
                 port = url = "not configured" if routes_available else "unavailable"
             if self._is_admin(user_id):
-                lines.append(
-                    f"- name: {name} — status: {status} — folder: {folder} — port: {port} — url: {url}"
-                )
+                details = f"{name}\nStatus: {status}\nfolder: {folder}\nport: {port} — url: {url}"
             else:
-                lines.append(f"- name: {name} — status: {self._public_status(status)} — url: {url}")
+                status = self._public_status(status)
+                details = f"{name}\nurl: {url}"
+                if status != status.split(" (", 1)[0][:24]:
+                    details += f"\nStatus: {status}"
+            entries.append((name, status, details))
         if bot is not None:
             try:
                 status = self.deployer.bot_status()
             except DeployError as error:
                 status = f"unavailable ({error})"
-            lines.append(f"- name: {bot.name} (this bot, {BOT_SERVICE}) — status: {status} — folder: {bot} "
-                         "— port: not applicable — url: not applicable")
-        self.say(chat_id, "\n".join(lines))
+            details = (f"{bot.name} (this bot, {BOT_SERVICE})\nStatus: {status}\nfolder: {bot}\n"
+                       "port: not applicable — url: not applicable")
+            entries.append((bot.name, status, details))
+        try:
+            safe_entries = [tuple(redact(value, self.cfg.secrets) for value in entry) for entry in entries]
+            for message in app_list_messages(safe_entries):
+                self.tg.send_message(chat_id, message, parse_mode="HTML")
+        except TelegramError as error:
+            log.warning("send failed: %s", redact(str(error), self.cfg.secrets))
 
     def cmd_cancel(self, chat_id: int, user_id=None):
         if chat_id in self._dialogs:

@@ -550,7 +550,7 @@ class ServiceTests(unittest.TestCase):
         with patch("bot.service.CloudflareRoutes") as routes:
             routes.return_value.app_routes.return_value = []
             self.user_say(77, "/list")
-        self.assertIn("name: member-app", self.tg.sent[-1])
+        self.assertIn("member-app", self.tg.sent[-1])
         self.assertNotIn("folder:", self.tg.sent[-1])
         self.assertNotIn("port:", self.tg.sent[-1])
 
@@ -1070,13 +1070,13 @@ class ServiceTests(unittest.TestCase):
             self.say("/list")
         listing = self.tg.sent[-1]
         for name in ("ihatepdf", "eurofish", "stravall", "carcalendar", "eurocat"):
-            self.assertIn(f"name: {name}", listing)
+            self.assertIn(name, listing)
             self.assertIn(f"folder: {self.cfg.repos_dir / name}", listing)
-        self.assertIn("name: eurofish — status: running", listing)
-        self.assertIn("name: stravall — status: running", listing)
-        self.assertIn("name: eurocat — status: stopped", listing)
+        self.assertIn("eurofish\nStatus: running", listing)
+        self.assertIn("stravall\nStatus: running", listing)
+        self.assertIn("eurocat\nStatus: stopped", listing)
         self.assertIn("port: 8084 — url: https://eurocat.kurwalab.fyi", listing)
-        self.assertIn("name: ihatepdf — status: stopped", listing)
+        self.assertIn("ihatepdf\nStatus: stopped", listing)
         self.assertIn("port: not configured — url: not configured", listing)
 
     def test_list_shows_the_bot_only_to_admins_and_uses_detailed_systemd_status(self):
@@ -1084,8 +1084,8 @@ class ServiceTests(unittest.TestCase):
         (self.cfg.repos_dir / "linux-copilot-bot").mkdir(exist_ok=True)
         self.deployer.statuses["eurofish"] = "failed"
         self.user_say(42, "/list")
-        self.assertIn("name: eurofish — status: failed", self.tg.sent[-1])
-        self.assertIn("name: linux-copilot-bot (this bot, copilot-telegram-bot.service) — status: running (pid 7)",
+        self.assertIn("eurofish\nStatus: failed", self.tg.sent[-1])
+        self.assertIn("linux-copilot-bot (this bot, copilot-telegram-bot.service)\nStatus: running (pid 7)",
                       self.tg.sent[-1])
         self.assertNotIn("copilot-app-linux-copilot-bot", self.tg.sent[-1])
         self.user_say(77, "/list")
@@ -1187,12 +1187,12 @@ class ServiceTests(unittest.TestCase):
             self.user_say(77, "/list")
         self.assertEqual(
             self.tg.sent[-1],
-            "Apps:\n- name: eurofish — status: running — url: https://eurofish.kurwalab.fyi",
+            "Apps:\n<pre>App       Status\n--------  --------------\neurofish  running</pre>\n\neurofish\nurl: https://eurofish.kurwalab.fyi",
         )
 
     def test_list_reports_unavailable_routes_without_cloudflare_configuration(self):
         self.say("/list")
-        self.assertIn("name: eurofish — status: stopped", self.tg.sent[-1])
+        self.assertIn("eurofish\nStatus: stopped", self.tg.sent[-1])
         self.assertIn("port: unavailable — url: unavailable", self.tg.sent[-1])
         self.say("/list extra")
         self.assertEqual(self.tg.sent[-1], "Usage: /list")
