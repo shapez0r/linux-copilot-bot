@@ -69,7 +69,7 @@ class ConfigTests(unittest.TestCase):
             config.load({}, env_file=self.tmp / "none")
         base = {"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_OWNER_ID": "1", "GITHUB_TOKEN": "g"}
         for bad in ({"TELEGRAM_OWNER_ID": "abc"}, {"TELEGRAM_OWNER_ID": "1,"},
-                    {"TELEGRAM_OWNER_ID": "0,1"}, {"COPILOT_MODEL": "GPT"}, {"COPILOT_TIMEOUT": "0"},
+                    {"TELEGRAM_OWNER_ID": "0,1"}, {"COPILOT_MODEL": "GPT"},
                     {"BOT_SHOW_BROWSER": "maybe"}, {"BOT_TEMPORARY_CHAT": "maybe"},
                     {"CLOUDFLARE_API_TOKEN": "cf"},
                     ):

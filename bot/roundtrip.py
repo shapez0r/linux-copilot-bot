@@ -444,7 +444,7 @@ class RoundTrip:
         show_browser = self._cfg.show_browser if show_browser is None else show_browser
         temporary_chat = self._cfg.temporary_chat if temporary_chat is None else temporary_chat
         cmd = [sys.executable, str(self._cfg.engine), "--profile", str(self._cfg.profile), "fix",
-               "--repo", str(repo_dir), "--model", model, "--timeout", str(self._cfg.timeout)]
+               "--repo", str(repo_dir), "--model", model]
         if show_browser:
             cmd.append("--show-browser")
         if not temporary_chat:

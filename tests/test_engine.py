@@ -180,12 +180,23 @@ class CompletionTests(unittest.TestCase):
         self.assertEqual(card.hover.call_count, 2)
 
     def test_heartbeat_reports_running_prompt_or_timeout_countdown(self):
-        self.assertEqual(rt.heartbeat_message(True, 120.4, 0, 900),
+        self.assertEqual(rt.heartbeat_message(True, 120.4, 0, 30),
                          'Prompt still running; 120s elapsed.')
-        self.assertEqual(rt.heartbeat_message(False, 60, 4, 900),
+        self.assertEqual(rt.heartbeat_message(False, 60, 4, 30),
                          'Prompt still running (output changed 4s ago); 60s elapsed.')
-        self.assertEqual(rt.heartbeat_message(False, 200, 45.9, 900),
-                         'No new output for 45s of 900s allowed; 200s elapsed.')
+        self.assertEqual(rt.heartbeat_message(False, 200, 20.9, 30),
+                         'No new output for 20s of 30s allowed; 200s elapsed.')
+
+    def test_prompt_without_stop_control_or_output_fails_after_thirty_seconds(self):
+        self.assertEqual(rt.NOT_RESPONDING_SECONDS, 30)
+        self.assertEqual(rt.NOT_RESPONDING_MESSAGE,
+                         'Copilot failed to provide an answer, the running prompt was not responding for 30s')
+        tree = ast.parse(SCRIPT.read_text())
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'run_roundtrip')
+        source = ast.unparse(fn)
+        self.assertIn('idle_limit = NOT_RESPONDING_SECONDS', source)
+        self.assertIn('raise SystemExit(NOT_RESPONDING_MESSAGE)', source)
+        self.assertNotIn('args.timeout', SCRIPT.read_text())
 
     def test_task_status_message_describes_visible_plan(self):
         tasks = [{'title': 'Add browser games', 'state': 'In progress', 'active': True,

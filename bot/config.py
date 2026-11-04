@@ -25,7 +25,6 @@ class Config:
     state_dir: Path
     profile: Path
     model: str
-    timeout: int
     show_browser: bool
     temporary_chat: bool
     settle_seconds: int
@@ -164,7 +163,6 @@ def load(environ=None, env_file=None) -> Config:
         state_dir=Path(get("STATE_DIR", str(home / ".copilot-telegram-bot"))).expanduser(),
         profile=Path(get("COPILOT_PROFILE", str(home / ".copilot-repo-browser"))).expanduser(),
         model=model,
-        timeout=_integer(get("COPILOT_TIMEOUT", "30"), "COPILOT_TIMEOUT", 1),
         show_browser=_flag(get("BOT_SHOW_BROWSER", "false"), "BOT_SHOW_BROWSER"),
         temporary_chat=_flag(get("BOT_TEMPORARY_CHAT", "true"), "BOT_TEMPORARY_CHAT"),
         settle_seconds=_integer(get("DEPLOY_SETTLE_SECONDS", "10"), "DEPLOY_SETTLE_SECONDS", 1),
@@ -182,7 +180,7 @@ def load(environ=None, env_file=None) -> Config:
 _KNOWN = {
     "TELEGRAM_BOT_TOKEN", "TELEGRAM_ADMIN_IDS", "TELEGRAM_ADMIN_ID", "TELEGRAM_USER_IDS",
     "TELEGRAM_USER_ID", "TELEGRAM_OWNER_ID", "GITHUB_TOKEN", "GITHUB_OWNER", "REPOS_DIR", "STATE_DIR",
-    "COPILOT_PROFILE", "COPILOT_MODEL", "COPILOT_TIMEOUT", "BOT_SHOW_BROWSER", "BOT_TEMPORARY_CHAT",
+    "COPILOT_PROFILE", "COPILOT_MODEL", "BOT_SHOW_BROWSER", "BOT_TEMPORARY_CHAT",
     "DEPLOY_SETTLE_SECONDS", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "CLOUDFLARE_API_TOKEN",
     "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_ZONE_ID",
 }

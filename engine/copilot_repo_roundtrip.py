@@ -1850,6 +1850,11 @@ STOP_APPEAR_GRACE_SECONDS = 3
 STOP_GONE_STABILITY_SECONDS = 1
 # Interval of the "prompt still running" heartbeat while waiting for the response.
 HEARTBEAT_SECONDS = 15
+# A prompt without a visible Stop control (task card or composer) and without new output for this
+# long is treated as not responding.
+NOT_RESPONDING_SECONDS = 30
+NOT_RESPONDING_MESSAGE = (f"Copilot failed to provide an answer, the running prompt was not responding "
+                          f"for {NOT_RESPONDING_SECONDS}s")
 
 
 def download_retry_due(count, last, now):
@@ -2223,9 +2228,10 @@ def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout)
                 reported_url = conversation_url(page.url, args.url) or chat_url
                 emit_chat(reported_url)
             emit_status("waiting", "Waiting for Copilot to generate a downloadable repository...")
-            # A visible Stop control means the prompt is still running; the inactivity countdown runs
-            # only while no Stop control is visible and the output and task cards stay unchanged.
-            idle_limit = args.timeout
+            # A visible Stop control in the task card or near the prompt input means the prompt is still
+            # running; the countdown runs only while no Stop control is visible and the output and task
+            # cards stay unchanged.
+            idle_limit = NOT_RESPONDING_SECONDS
             started = time.monotonic()
             last_activity = started
             last_signature = None
@@ -2318,10 +2324,7 @@ def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout)
                 page.screenshot(path=str(work / "copilot-timeout.png"), full_page=True)
                 (work / "copilot-timeout.html").write_text(page.content(), encoding="utf-8")
                 ctx.close()
-                task_note = " " + task_status_message(last_tasks) if last_tasks else ""
-                raise SystemExit(f"No downloadable result: Copilot showed no new output and no Stop control "
-                                 f"for {args.timeout}s."
-                                 f"{task_note} Temporary diagnostics were removed with the run directory")
+                raise SystemExit(NOT_RESPONDING_MESSAGE)
             # Download discovery starts only after Stop is gone; read the final response layout twice.
             emit_status("waiting", "Copilot response finished; downloadable repository found.")
             tasks = read_task_cards(page)
@@ -2386,9 +2389,6 @@ def main():
     fp.add_argument("--repo", default=".")
     fp.add_argument("--work-dir", default=None, help="Optional parent for automatically deleted temporary round-trip files")
     fp.add_argument("--backup-dir", default=None, help="Deprecated; rollback copies are temporary and automatically deleted")
-    fp.add_argument("--timeout", type=int, default=30,
-                    help="Seconds without a visible Stop control, new on-screen output or a task-card change "
-                         "before giving up (default: 30)")
     fp.add_argument("--model", default="GPT/GPT-6",
                     help="Provider/model pair (default: GPT/GPT-6)")
     fp.add_argument("--show-browser", action="store_true",

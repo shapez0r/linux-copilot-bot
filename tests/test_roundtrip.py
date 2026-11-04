@@ -33,7 +33,7 @@ FAKE_ENGINE = textwrap.dedent('''
             value["tasks"] = tasks
         print("ROUNDTRIP_STATUS:" + json.dumps(value), file=sys.stderr, flush=True)
     status("browser", "Opening")
-    status("task", 'Copilot task "Build app" is in progress; 3 plan items visible. 15s elapsed; no new output for 2s of 900s allowed.',
+    status("task", 'Copilot task "Build app" is in progress; 3 plan items visible. 15s elapsed; no new output for 2s of 30s allowed.',
            [{"title": "Build app", "state": "In progress", "active": True, "steps": [
                {"title": "Inspect repository", "state": "completed"},
                {"title": "Implement changes", "state": "active"},
@@ -260,7 +260,7 @@ class RoundTripTests(unittest.TestCase):
         live = parse_live_event(line)
         self.assertEqual(live["answers"], [
             {"after": 0, "text": "Starting."}, {"after": 1, "text": "Found it."}])
-        rendered = format_prompt_status("900s elapsed; no new output", [], live["blocks"], live["answers"],
+        rendered = format_prompt_status("30s elapsed; no new output", [], live["blocks"], live["answers"],
                                         fixed_timeline())
         self.assertEqual(rendered,
                          f"Currently doing: Comparing behavior\n\nStarting.\n\n"
