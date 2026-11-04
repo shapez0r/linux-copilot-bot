@@ -108,7 +108,7 @@ One job runs at a time. Progress is shown in a single message that is edited as 
 
 ### What a request does
 
-- **Prepare:** the checkout must be on a branch with no uncommitted changes; the bot fast-forwards it to `origin`.
+- **Prepare:** the checkout must be on a branch with no uncommitted changes; the bot fast-forwards it to `origin`. A mode-only change of `bin/git-askpass` in the bot's own checkout is reverted first; any other change still stops the request.
 - **Round-trip:** the engine uploads a ZIP of the committed `HEAD`, asks Copilot for the complete fixed repository, validates the returned ZIP, and replaces the worktree. The bot appends a note asking Copilot to keep a Makefile whose `run` target starts one HTTP server in the foreground and to keep secrets and runtime data outside the repository.
 - **Commit and push:** all changes are committed on the current branch with the first line of the request as the subject, and pushed to `origin`. If Copilot changed nothing, nothing is committed or deployed. A failed push leaves the commit locally and is reported; the next request pushes it.
 - **Redeploy:** the bot uses non-interactive `sudo` to write and enable `/etc/systemd/system/copilot-app-<name>.service`, then asks systemd to restart it. The unit sets the app repository as `WorkingDirectory`, executes `make run`, restarts on failure, removes bot secrets from its environment, and appends output to `<STATE_DIR>/logs/<name>.log`. The redeploy counts as successful only when systemd reports the service active through `DEPLOY_SETTLE_SECONDS`; otherwise the systemd state and log tail are sent. A repository without a usable `run` target is pushed but not started.
@@ -139,7 +139,7 @@ Settings come from `.env` (or the file named by `BOT_ENV_FILE`); real environmen
 | `GITHUB_TOKEN` | required | Used for GitHub API calls and Git over HTTPS through `GIT_ASKPASS` (including private repository clones); it is never written into remote URLs. |
 | `GITHUB_OWNER` | token's account | Owner for bare repository names. |
 | `REPOS_DIR` | `/home/localadmin/repos` | Parent of app checkouts and local app templates; `eurofish` is the default template. |
-| `STATE_DIR` | `~/.copilot-telegram-bot` | App ownership, per-user active repositories, administrators' view choices, shared model, and app logs. |
+| `STATE_DIR` | `~/.copilot-telegram-bot` | App ownership, per-user active repositories, administrators' view choices, shared model, app logs, and the executable copy of the Git credential helper. |
 | `COPILOT_PROFILE` | `~/.copilot-repo-browser` | Browser profile created by `make login`. |
 | `COPILOT_MODEL` | `GPT/GPT-6` | Initial model label; change it later with `/model`. |
 | `COPILOT_TIMEOUT` | `900` | Seconds without a visible Stop control, output change, or task-card change before a run gives up. The run keeps waiting while a Stop control is visible in the current task card (revealed by hovering it) or near the prompt input, even when no output change is detected. Output detection starts after submission and covers the whole page, including open shadow roots and same-origin frames. |
@@ -172,7 +172,7 @@ Without `.env` values or per-request overrides, requests use `nobrowser` and `te
 | `bot/gitops.py`, `bot/repos.py` | Seed, clone, sync, commit, push; repository references. |
 | `bot/roundtrip.py`, `bot/deploy.py` | Engine subprocess runner; sudo-backed systemd system-unit registration, lifecycle control, status, and app logs. |
 | `bot/cloudflare.py` | Cloudflare tunnel ingress and DNS route management. |
-| `bin/git-askpass` | Supplies GitHub credentials to Git from the environment. |
+| `bin/git-askpass` | Supplies GitHub credentials to Git from the environment; Git runs an executable copy in `STATE_DIR`, so checkouts keep their committed file modes. |
 | `deploy/` | Editable systemd system-unit template for the bot. |
 
 ## Tests

@@ -93,14 +93,36 @@ class GitOpsTests(unittest.TestCase):
         git("remote", "set-url", "origin", "git@github.com:org/bot", cwd=self.dest)
         self.assertEqual(self.git.origin_repo(self.dest), ("org", "bot"))
 
-    def test_askpass_is_executable_even_after_permissions_are_lost(self):
+    def test_askpass_runs_from_an_executable_copy_without_changing_the_source(self):
         helper = self.tmp / "git-askpass"
         helper.write_bytes(self.git._cfg.askpass.read_bytes())
         helper.chmod(0o600)
         cfg = make_config(self.tmp, askpass=helper)
         git_client = Git(cfg)
-        self.assertEqual(git_client.run("--version").startswith("git version"), True)
-        self.assertTrue(helper.stat().st_mode & 0o100)
+        self.assertTrue(git_client.run("--version").startswith("git version"))
+        self.assertEqual(helper.stat().st_mode & 0o777, 0o600)
+        copy = cfg.state_dir / "git-askpass"
+        self.assertEqual(git_client._env()["GIT_ASKPASS"], str(copy))
+        self.assertTrue(copy.stat().st_mode & 0o100)
+        self.assertEqual(copy.read_bytes(), helper.read_bytes())
+
+    def test_sync_undoes_a_mode_only_change_of_the_credential_helper(self):
+        self.clone()
+        helper = self.dest / "bin" / "git-askpass"
+        helper.parent.mkdir()
+        helper.write_bytes(self.git._cfg.askpass.read_bytes())
+        helper.chmod(0o644)
+        git("add", "-A", cwd=self.dest)
+        git("-c", "user.name=t", "-c", "user.email=t@e.com", "commit", "-m", "helper", cwd=self.dest)
+        git("push", "origin", "main", cwd=self.dest)
+        git("config", "core.fileMode", "true", cwd=self.dest)
+        helper.chmod(0o755)
+        git_client = Git(make_config(self.tmp, askpass=helper))
+        self.assertEqual(git_client.sync(self.dest), "main")
+        self.assertEqual(git("status", "--porcelain", cwd=self.dest), "")
+        helper.write_text("#!/bin/sh\necho changed\n")
+        with self.assertRaisesRegex(GitError, "uncommitted"):
+            git_client.sync(self.dest)
 
     def test_errors_do_not_leak_the_token(self):
         with self.assertRaises(GitError) as caught:

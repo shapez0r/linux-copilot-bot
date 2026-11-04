@@ -20,19 +20,44 @@ class Git:
         self._cfg = cfg
         self._login = github_login
 
-    def _env(self):
-        # ZIP extraction may discard executable permissions on the credential helper.
-        askpass = self._cfg.askpass
+    def _askpass(self) -> Path:
+        """Return an executable copy of the credential helper outside every checkout.
+
+        Changing the helper's mode in place would leave the bot's own checkout with an uncommitted change.
+        """
+        helper = self._cfg.state_dir / "git-askpass"
         try:
-            if not os.access(askpass, os.X_OK):
-                askpass.chmod(askpass.stat().st_mode | 0o100)
+            content = self._cfg.askpass.read_bytes()
+            if not helper.is_file() or helper.read_bytes() != content:
+                helper.parent.mkdir(parents=True, exist_ok=True)
+                temporary = helper.with_suffix(".tmp")
+                temporary.write_bytes(content)
+                temporary.chmod(0o700)
+                os.replace(temporary, helper)
+            elif not os.access(helper, os.X_OK):
+                helper.chmod(0o700)
         except OSError as exc:
-            raise GitError(f"Cannot make Git credential helper executable: {exc.strerror}") from None
+            raise GitError(f"Cannot prepare the Git credential helper: {exc.strerror or exc}") from None
+        return helper
+
+    def _env(self):
         return dict(
-            os.environ, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS=str(self._cfg.askpass),
+            os.environ, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS=str(self._askpass()),
             BOT_GIT_USER=self._login, BOT_GIT_TOKEN=self._cfg.github_token,
             GIT_AUTHOR_NAME=self._cfg.git_name, GIT_AUTHOR_EMAIL=self._cfg.git_email,
             GIT_COMMITTER_NAME=self._cfg.git_name, GIT_COMMITTER_EMAIL=self._cfg.git_email)
+
+    def _restore_helper_mode(self, dest: Path):
+        """Undo a mode-only change of the credential helper inside dest; content changes are kept."""
+        try:
+            relative = self._cfg.askpass.resolve().relative_to(Path(dest).resolve()).as_posix()
+        except (OSError, ValueError):
+            return
+        if not self.run("diff", "--name-only", "--", relative, cwd=dest):
+            return
+        if self.run("-c", "core.fileMode=false", "diff", "--name-only", "--", relative, cwd=dest):
+            return
+        self.run("checkout", "--", relative, cwd=dest)
 
     def run(self, *args, cwd: Path = None) -> str:
         try:
@@ -101,6 +126,7 @@ class Git:
             branch = self.run("symbolic-ref", "--short", "HEAD", cwd=dest)
         except GitError:
             raise GitError("The checkout is on a detached HEAD; check out a branch first.") from None
+        self._restore_helper_mode(dest)
         if self.run("status", "--porcelain", cwd=dest):
             raise GitError("The checkout has uncommitted changes; commit, stash or discard them first.")
         self.run("fetch", "origin", cwd=dest)
