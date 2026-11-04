@@ -268,8 +268,8 @@ class ServiceTests(unittest.TestCase):
         self.state.set_app_owner("me/theirs", telegram_owner(77))
         self.user_say(42, USER_VIEW)
         self.user_say(42, "/list")
-        self.assertNotIn("folder:", self.tg.sent[-1])
-        self.assertNotIn("port:", self.tg.sent[-1])
+        self.assertNotIn("📁", self.tg.sent[-1])
+        self.assertNotIn("🔌", self.tg.sent[-1])
         self.user_say(42, "/fix theirs change it")
         self.assertIn("only fix apps you created", self.tg.sent[-1])
         self.user_say(42, "/app stop theirs")
@@ -277,7 +277,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.rt.calls, [])
         self.user_say(42, ADMIN_VIEW)
         self.user_say(42, "/list")
-        self.assertIn("folder:", self.tg.sent[-1])
+        self.assertIn("📁", self.tg.sent[-1])
 
     def test_regular_users_cannot_switch_views(self):
         self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}))
@@ -560,8 +560,8 @@ class ServiceTests(unittest.TestCase):
             routes.return_value.app_routes.return_value = []
             self.user_say(77, "/list")
         self.assertIn("member-app", self.tg.sent[-1])
-        self.assertNotIn("folder:", self.tg.sent[-1])
-        self.assertNotIn("port:", self.tg.sent[-1])
+        self.assertNotIn("📁", self.tg.sent[-1])
+        self.assertNotIn("🔌", self.tg.sent[-1])
 
         calls = len(self.rt.calls)
         self.rt.behavior = "append"
@@ -1080,22 +1080,24 @@ class ServiceTests(unittest.TestCase):
         listing = self.tg.sent[-1]
         for name in ("ihatepdf", "eurofish", "stravall", "carcalendar", "eurocat"):
             self.assertIn(name, listing)
-            self.assertIn(f"folder: {self.cfg.repos_dir / name}", listing)
-        self.assertIn("eurofish\nStatus: running", listing)
-        self.assertIn("stravall\nStatus: running", listing)
-        self.assertIn("eurocat\nStatus: stopped", listing)
-        self.assertIn("port: 8084 — url: https://eurocat.kurwalab.fyi", listing)
-        self.assertIn("ihatepdf\nStatus: stopped", listing)
-        self.assertIn("port: not configured — url: not configured", listing)
+            self.assertIn(f"📁 <code>{self.cfg.repos_dir / name}</code>", listing)
+        self.assertIn("🟢 <b>eurofish</b> · running (pid 1)", listing)
+        self.assertIn("🟢 <b>stravall</b> · running (pid 1)", listing)
+        self.assertIn("⚪ <b>eurocat</b> · stopped", listing)
+        self.assertIn("🔌 Port 8084", listing)
+        self.assertIn('<a href="https://eurocat.kurwalab.fyi">https://eurocat.kurwalab.fyi</a>', listing)
+        self.assertIn("⚪ <b>ihatepdf</b> · stopped", listing)
+        self.assertIn("🔌 Port not configured", listing)
+        self.assertIn("🟢 2 running · ⚪ 3 stopped", listing)
 
     def test_list_shows_the_bot_only_to_admins_and_uses_detailed_systemd_status(self):
         self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}))
         (self.cfg.repos_dir / "linux-copilot-bot").mkdir(exist_ok=True)
         self.deployer.statuses["eurofish"] = "failed"
         self.user_say(42, "/list")
-        self.assertIn("eurofish\nStatus: failed", self.tg.sent[-1])
-        self.assertIn("linux-copilot-bot (this bot, copilot-telegram-bot.service)\nStatus: running (pid 7)",
-                      self.tg.sent[-1])
+        self.assertIn("🔴 <b>eurofish</b> · failed", self.tg.sent[-1])
+        self.assertIn("🟢 <b>linux-copilot-bot</b> · running (pid 7)", self.tg.sent[-1])
+        self.assertIn("🤖 this bot · copilot-telegram-bot.service", self.tg.sent[-1])
         self.assertNotIn("copilot-app-linux-copilot-bot", self.tg.sent[-1])
         self.user_say(77, "/list")
         self.assertNotIn("linux-copilot-bot", self.tg.sent[-1])
@@ -1196,13 +1198,14 @@ class ServiceTests(unittest.TestCase):
             self.user_say(77, "/list")
         self.assertEqual(
             self.tg.sent[-1],
-            "Apps:\n<pre>App       Status\n--------  --------------\neurofish  running</pre>\n\neurofish\nurl: https://eurofish.kurwalab.fyi",
+            "📱 <b>Apps</b>\n🟢 1 running\n\n🟢 <b>eurofish</b> · running\n"
+            '<blockquote>🔗 <a href="https://eurofish.kurwalab.fyi">https://eurofish.kurwalab.fyi</a></blockquote>',
         )
 
     def test_list_reports_unavailable_routes_without_cloudflare_configuration(self):
         self.say("/list")
-        self.assertIn("eurofish\nStatus: stopped", self.tg.sent[-1])
-        self.assertIn("port: unavailable — url: unavailable", self.tg.sent[-1])
+        self.assertIn("⚪ <b>eurofish</b> · stopped", self.tg.sent[-1])
+        self.assertIn("🔗 unavailable\n🔌 Port unavailable", self.tg.sent[-1])
         self.say("/list extra")
         self.assertEqual(self.tg.sent[-1], "Usage: /list")
 
@@ -1234,7 +1237,7 @@ class ServiceTests(unittest.TestCase):
         self.bot._list_worker.join(timeout=30)
         self.assertEqual(offsets, [0, 10])
         self.assertEqual(len(self.tg.sent), 1)
-        self.assertTrue(self.tg.sent[0].startswith("Apps:"))
+        self.assertTrue(self.tg.sent[0].startswith("📱 <b>Apps</b>"))
 
     def test_second_job_is_refused_while_one_runs(self):
         release = threading.Event()

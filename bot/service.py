@@ -11,7 +11,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from .app_list import app_list_messages
+from .app_list import AppEntry, app_list_messages
 from .config import Config, redact
 from .cloudflare import CloudflareError, CloudflareRoutes
 from .deploy import BOT_APP, BOT_SERVICE, DeployError, Deployer
@@ -1251,31 +1251,25 @@ class Bot:
             try:
                 status = self.deployer.status(name, folder)
             except DeployError as error:
-                status = f"unavailable ({error})" if self._is_admin(user_id) else "unavailable"
+                status = f"unavailable ({error})" if admin else "unavailable"
             route = routes.get(name.lower())
             if route:
                 port = route["service"].rsplit(":", 1)[-1].rstrip("/")
                 url = f"https://{route['hostname']}"
             else:
                 port = url = "not configured" if routes_available else "unavailable"
-            if self._is_admin(user_id):
-                details = f"{name}\nStatus: {status}\nfolder: {folder}\nport: {port} — url: {url}"
+            if admin:
+                entries.append(AppEntry(name, status, url, port, str(folder)))
             else:
-                status = self._public_status(status)
-                details = f"{name}\nurl: {url}"
-                if status != status.split(" (", 1)[0][:24]:
-                    details += f"\nStatus: {status}"
-            entries.append((name, status, details))
+                entries.append(AppEntry(name, self._public_status(status), url))
         if bot is not None:
             try:
                 status = self.deployer.bot_status()
             except DeployError as error:
                 status = f"unavailable ({error})"
-            details = (f"{bot.name} (this bot, {BOT_SERVICE})\nStatus: {status}\nfolder: {bot}\n"
-                       "port: not applicable — url: not applicable")
-            entries.append((bot.name, status, details))
+            entries.append(AppEntry(bot.name, status, folder=str(bot), note=f"this bot · {BOT_SERVICE}"))
         try:
-            safe_entries = [tuple(redact(value, self.cfg.secrets) for value in entry) for entry in entries]
+            safe_entries = [AppEntry(*(redact(value, self.cfg.secrets) for value in entry)) for entry in entries]
             for message in app_list_messages(safe_entries):
                 self.tg.send_message(chat_id, message, parse_mode="HTML")
         except TelegramError as error:
