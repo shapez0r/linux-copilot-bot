@@ -1305,6 +1305,10 @@ def selectors_from_env():
                           'button:text-is("Stop"), [role="button"]:text-is("Stop")'),
         "temporary_chat": os.getenv("COPILOT_TEMPORARY_CHAT", 'button[aria-label*="temporary" i], [role="button"][aria-label*="temporary" i], '
                                     'button[title*="temporary" i], button[data-testid*="temporary" i]'),
+        "new_chat": os.getenv("COPILOT_NEW_CHAT", 'button[aria-label="New chat" i], a[aria-label="New chat" i], '
+                              '[role="button"][aria-label="New chat" i], button[title="New chat" i], '
+                              'a[title="New chat" i], button[data-testid*="new-chat" i], a[data-testid*="new-chat" i], '
+                              'button:text-is("New chat"), a:text-is("New chat"), [role="button"]:text-is("New chat")'),
         # Optional override for reasoning headers; default detects "Reasoning"/"Reasoned for Ns" toggles.
         "reasoning": os.getenv("COPILOT_REASONING", ""),
     }
@@ -1838,6 +1842,120 @@ def set_temporary_chat(page, sel, enabled, timeout_seconds=30):
     raise SystemExit(f"Temporary chat could not be {state} (Copilot did not show the requested state).")
 
 
+# User messages of an open conversation. Assistant selectors are not used here because a new chat can show
+# a greeting in the same component.
+USER_MESSAGE_SELECTORS = (
+    '[data-message-author-role="user"]',
+    '[data-role="user"]',
+    '[data-testid*="user-message" i]',
+    '[class*="user-message" i]',
+    '[class*="fai-UserMessage" i]',
+    '[data-content="user-message"]',
+)
+# Every prompt sent by this engine contains this sentence, so its presence marks an earlier turn.
+PROMPT_MARKER = "The attached .txt file contains ZIP bytes."
+# Finds the marker in the conversation area; chat-history entries in navigation, links and the composer
+# are ignored because their titles can repeat the start of an earlier prompt.
+PROMPT_MARKER_SCRIPT = r"""
+(marker) => {
+  const skip = 'nav, aside, header, a, [role="navigation"], [role="complementary"], [role="link"], ' +
+    '[role="listitem"], [role="treeitem"], [role="option"], form, textarea, [contenteditable="true"]';
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const el = node.parentElement;
+    if (!el || !node.nodeValue.includes(marker) || el.closest(skip)) continue;
+    if (el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden') return true;
+  }
+  return false;
+}
+"""
+NEW_CHAT_NAME = re.compile(r"^\s*(start (a )?)?new (chat|conversation)\s*$", re.I)
+# Seconds a clicked New chat control has to show an empty conversation before navigation is retried.
+NEW_CHAT_SECONDS = 15
+NEW_CHAT_RETRY_SECONDS = 5
+
+
+def chat_has_history(page, base_url):
+    """True while the page shows an existing conversation: its own URL, a user message or an earlier prompt."""
+    if conversation_url(page.url, base_url):
+        return True
+    try:
+        if page.evaluate(PROMPT_MARKER_SCRIPT, PROMPT_MARKER):
+            return True
+    except Exception:
+        pass
+    for nodes in (page.locator(selector) for selector in USER_MESSAGE_SELECTORS):
+        try:
+            for i in range(nodes.count()):
+                if nodes.nth(i).is_visible():
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+def new_chat_controls(page, sel):
+    """Visible New chat controls; split-button menus (aria-haspopup) are skipped because they only open a menu."""
+    found = []
+    candidates = [page.locator(sel["new_chat"])] if sel.get("new_chat") else []
+    candidates += [page.get_by_role(role, name=NEW_CHAT_NAME) for role in ("button", "link")]
+    for locator in candidates:
+        try:
+            count = locator.count()
+        except Exception:
+            continue
+        for i in range(count):
+            node = locator.nth(i)
+            try:
+                if node.is_visible() and not node.get_attribute("aria-haspopup", timeout=1000):
+                    found.append(node)
+            except Exception:
+                continue
+    return found
+
+
+def click_new_chat(page, sel):
+    """Click the first usable New chat control; return whether one was clicked."""
+    for node in new_chat_controls(page, sel):
+        try:
+            node.click(timeout=3000)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def open_new_chat(page, sel, base_url, timeout_seconds=NEW_CHAT_SECONDS):
+    """Start every prompt in a new, empty conversation, so no earlier turns add to Copilot's context.
+
+    Copilot can reopen the last conversation of the browser profile, so the New chat control is clicked
+    whenever it is shown, and the empty state is verified. The start page is reloaded once before failing.
+    """
+    for attempt in range(2):
+        if attempt:
+            emit_status("browser", "Reloading Copilot Chat to leave the earlier conversation...")
+            page.goto(base_url, wait_until="domcontentloaded", timeout=120000)
+            wait_for_ui(page)
+        clicked = click_new_chat(page, sel)
+        last_click = time.monotonic()
+        deadline = last_click + timeout_seconds
+        while True:
+            raise_if_quit()
+            if clicked:
+                pause(page, 1000)
+            if not chat_has_history(page, base_url):
+                return clicked
+            now = time.monotonic()
+            if now >= deadline:
+                break
+            pause(page, 500)
+            if now - last_click >= NEW_CHAT_RETRY_SECONDS:
+                clicked = click_new_chat(page, sel) or clicked
+                last_click = now
+    raise SystemExit("A new Copilot chat could not be opened: the page still shows an earlier conversation. "
+                     "Override COPILOT_NEW_CHAT if the New chat control changed.")
+
+
 # Accept descriptive ZIP links and file chips, excluding uploaded .zip.txt archives.
 ZIP_LINK_SELECTOR = ('a[href*=".zip" i], a:has-text(".zip"), [role="link"]:has-text(".zip"), '
                      'button:has-text(".zip"), a:has-text("ZIP"), [role="link"]:has-text("ZIP"), '
@@ -2186,6 +2304,9 @@ def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout)
                 emit_status("browser", "Opening Copilot Chat...")
                 page.goto(args.url, wait_until="domcontentloaded", timeout=120000)
                 wait_for_ui(page)
+                emit_status("browser", "Starting a new Copilot chat...")
+                open_new_chat(page, sel, args.url)
+                emit_status("browser", "New Copilot chat opened.")
             # New chats explicitly adopt the configured state; saved follow-ups retain their state.
             if not continuing:
                 action = "Enabling" if args.temporary_chat else "Disabling"

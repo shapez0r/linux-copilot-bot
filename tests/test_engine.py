@@ -99,6 +99,27 @@ class CompletionTests(unittest.TestCase):
             rt.set_temporary_chat(page, rt.selectors_from_env(), False)
         page.locator.assert_not_called()
 
+    def test_every_new_run_opens_a_new_chat_before_setting_the_chat_type(self):
+        source = SCRIPT.read_text()
+        start = source.index('page.goto(args.url, wait_until="domcontentloaded", timeout=120000)',
+                             source.index('def run_roundtrip'))
+        opened = source.index('open_new_chat(page, sel, args.url)', start)
+        self.assertLess(opened, source.index('set_temporary_chat(page, sel, args.temporary_chat)', start))
+        self.assertLess(opened, source.index('attach_file(page, sel, source_txt)', start))
+
+    def test_new_chat_failure_reloads_once_and_is_reported(self):
+        page = Mock()
+        with patch.object(rt, 'chat_has_history', return_value=True), \
+                patch.object(rt, 'click_new_chat', return_value=False), \
+                patch.object(rt, 'wait_for_ui'), \
+                self.assertRaisesRegex(SystemExit, 'A new Copilot chat could not be opened'):
+            rt.open_new_chat(page, rt.selectors_from_env(), 'https://chat.test/chat/', timeout_seconds=0)
+        page.goto.assert_called_once()
+
+    def test_conversation_url_counts_as_history(self):
+        page = Mock(url='https://chat.test/chat/conversation/123')
+        self.assertTrue(rt.chat_has_history(page, 'https://chat.test/chat/'))
+
     def test_visible_browser_falls_back_to_hidden_without_a_display(self):
         self.assertTrue(rt.browser_is_headless(True, {}))
         self.assertFalse(rt.browser_is_headless(True, {'DISPLAY': ':0'}))
@@ -752,6 +773,30 @@ secret_two()</code>
             rt.set_temporary_chat(self.page, self.sel, True, timeout_seconds=5)
         self.assertTrue(rt.temporary_chat_active(self.page, self.sel))
         self.assertTrue(self.page.locator('#menu').is_hidden())
+
+    def test_new_chat_control_replaces_the_reopened_conversation(self):
+        self.page.set_content('''<nav><a href="#">Here is my repository archive. The attached .txt file contains ZIP bytes.</a>
+            <button id="menu" aria-label="New chat" aria-haspopup="menu" onclick="this.dataset.opened = 1"></button>
+            <button id="new" aria-label="New chat" onclick="document.querySelector('main').innerHTML = ''"></button>
+            </nav><main><div data-message-author-role="user">Here is my repository archive.
+              The attached .txt file contains ZIP bytes. Rename it to .zip</div>
+            <div data-message-author-role="assistant">Done.</div></main>''')
+        self.assertTrue(rt.chat_has_history(self.page, 'https://chat.test/chat/'))
+        self.assertTrue(rt.open_new_chat(self.page, self.sel, 'https://chat.test/chat/', timeout_seconds=5))
+        self.assertFalse(rt.chat_has_history(self.page, 'https://chat.test/chat/'))
+        self.assertIsNone(self.page.locator('#menu').get_attribute('data-opened'))
+
+    def test_earlier_prompt_without_message_markup_counts_as_history(self):
+        self.page.set_content('''<main><div><p>Here is my repository archive.
+            The attached .txt file contains ZIP bytes.</p></div><p>Copilot uses AI.</p></main>''')
+        self.assertTrue(rt.chat_has_history(self.page, 'https://chat.test/chat/'))
+
+    def test_empty_chat_with_history_sidebar_and_greeting_is_new(self):
+        self.page.set_content('''<nav><a href="#">Here is my repository archive. The attached .txt file contains
+            ZIP bytes.</a></nav><main><div class="fai-CopilotMessage">Hi, how can I help?</div>
+            <form><textarea></textarea></form></main>''')
+        self.assertFalse(rt.chat_has_history(self.page, 'https://chat.test/chat/'))
+        self.assertFalse(rt.open_new_chat(self.page, self.sel, 'https://chat.test/chat/', timeout_seconds=1))
 
     def test_descriptive_zip_link_with_opaque_target(self):
         self.page.set_content('<a href="/artifact/123">Download the complete fixed repository ZIP</a>')
