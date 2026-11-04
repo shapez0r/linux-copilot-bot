@@ -141,7 +141,7 @@ class Git:
     def commit_and_push(self, dest: Path, prompt: str, output: str = ""):
         """Commit all changes and push the branch; returns (short sha, branch) or None without changes.
 
-        The message holds the request and Copilot's complete final output, so later round-trips can read
+        The message holds the request and Copilot's final answer, so later fix round-trips can read
         what each change did from the Git history.
         """
         self.run("add", "-A", cwd=dest)

@@ -86,6 +86,8 @@ class RoundTripTests(unittest.TestCase):
         attached = RoundTrip(self.cfg).command(self.tmp, "x", "A/B", attachments=[self.tmp / "a.png", self.tmp / "b.pdf"])
         self.assertEqual(attached[-6:], ["--attach", str(self.tmp / "a.png"), "--attach", str(self.tmp / "b.pdf"),
                                          "--", "x"])
+        self.assertIn("--no-history", RoundTrip(self.cfg).command(self.tmp, "x", "A/B", history=False))
+        self.assertNotIn("--no-history", RoundTrip(self.cfg).command(self.tmp, "x", "A/B"))
         overridden = RoundTrip(cfg).command(self.tmp, "x", "A/B", False, True)
         self.assertNotIn("--show-browser", overridden)
         self.assertNotIn("--no-temporary-chat", overridden)

@@ -440,7 +440,7 @@ class RoundTrip:
         self._cfg = cfg
 
     def command(self, repo_dir, request: str, model: str, show_browser=None, temporary_chat=None,
-                attachments=()):
+                attachments=(), history=True):
         show_browser = self._cfg.show_browser if show_browser is None else show_browser
         temporary_chat = self._cfg.temporary_chat if temporary_chat is None else temporary_chat
         cmd = [sys.executable, str(self._cfg.engine), "--profile", str(self._cfg.profile), "fix",
@@ -449,15 +449,17 @@ class RoundTrip:
             cmd.append("--show-browser")
         if not temporary_chat:
             cmd.append("--no-temporary-chat")
+        if not history:
+            cmd.append("--no-history")
         for path in attachments or ():
             cmd.extend(["--attach", str(path)])
         return cmd + ["--", request]
 
     def run(self, repo_dir, request: str, model: str, on_status, cancel: threading.Event,
-            show_browser=None, temporary_chat=None, attachments=()) -> dict:
+            show_browser=None, temporary_chat=None, attachments=(), history=True) -> dict:
         """Run one round-trip with optional extra files attached to the prompt; returns the engine's
-        JSON result. `cancel` requests a graceful stop."""
-        command = self.command(repo_dir, request, model, show_browser, temporary_chat, attachments)
+        JSON result. `cancel` requests a graceful stop; history=False uploads no Git history."""
+        command = self.command(repo_dir, request, model, show_browser, temporary_chat, attachments, history)
         proc = subprocess.Popen(command, stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
                                 env={k: v for k, v in os.environ.items() if k not in SECRET_NAMES})

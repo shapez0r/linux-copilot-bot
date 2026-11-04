@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Archive committed Git files and history, request Copilot changes, and safely replace the worktree."""
+"""Archive committed Git files (and history for fixes), request Copilot changes, and safely replace the worktree."""
 from __future__ import annotations
 import argparse, atexit, base64, hashlib, json, os, re, shutil, subprocess, sys, tempfile, threading, time, zipfile
 from pathlib import Path, PurePosixPath
@@ -25,6 +25,17 @@ FOLLOWUP_PROMPT = (
     "Rename it to .zip and extract it. It includes the .git directory: read the Git history (for example "
     "with git log), whose commit messages hold earlier requests and Copilot outputs, to understand previous "
     "changes, but do not create commits. Make only the requested fixes, preserve all other files, "
+    "then return the complete fixed repository as a downloadable ZIP file. "
+    "Do not include a .git directory in the returned ZIP. Read and follow AGENTS.md and "
+    ".github/copilot-instructions.md when present. After changes, review README files and "
+    "comments in all repository files: keep README content logically correct and aligned "
+    "with the repository state, and comments concise, with no historical references. "
+    "To fix: {request}"
+)
+# New apps start fresh: their archive carries no Git history.
+FRESH_PROMPT = (
+    "Here is my repository archive. The attached .txt file contains ZIP bytes. "
+    "Rename it to .zip and extract it. Make only the requested fixes, preserve all other files, "
     "then return the complete fixed repository as a downloadable ZIP file. "
     "Do not include a .git directory in the returned ZIP. Read and follow AGENTS.md and "
     ".github/copilot-instructions.md when present. After changes, review README files and "
@@ -1170,19 +1181,22 @@ def add_history(root: Path, zip_path: Path):
     return count
 
 
-def make_archive(root: Path, out_txt: Path):
-    """Archive the committed HEAD plus its Git history; returns (sha256, worktree entries, .git files)."""
+def make_archive(root: Path, out_txt: Path, history: bool = True):
+    """Archive the committed HEAD, plus its Git history unless history is False; returns
+    (sha256, worktree entries, .git files)."""
     zip_path = out_txt.with_suffix(".zip")
     run(["git", "archive", "--format=zip", f"--output={zip_path}", "HEAD"], cwd=root)
     with zipfile.ZipFile(zip_path) as z:
         names = z.namelist()
         if not names or any(n == ".git" or n.startswith(".git/") for n in names):
             raise SystemExit("Invalid source archive")
-    history = add_history(root, zip_path)
-    if not history:
-        raise SystemExit("Invalid source archive: no Git history")
+    git_files = 0
+    if history:
+        git_files = add_history(root, zip_path)
+        if not git_files:
+            raise SystemExit("Invalid source archive: no Git history")
     zip_path.replace(out_txt)
-    return hashlib.sha256(out_txt.read_bytes()).hexdigest(), len(names), history
+    return hashlib.sha256(out_txt.read_bytes()).hexdigest(), len(names), git_files
 
 
 def safe_members(z: zipfile.ZipFile):
@@ -2058,8 +2072,27 @@ def cmd_models(args):
     print(json.dumps({"models": models}))
 
 
+# Text of an assistant message without code blocks, editors or monospace preformatted output.
+PROSE_SCRIPT = r"""
+(el) => {
+  const clone = el.cloneNode(true);
+  clone.querySelectorAll('pre, [role="code"], [class*="code-block" i], [class*="codeblock" i], ' +
+      '[class*="code_block" i], [class*="monaco" i], [class*="cm-editor" i], [class*="hljs" i], ' +
+      'script, style, button, [aria-hidden="true"]').forEach(node => node.remove());
+  clone.querySelectorAll('code').forEach(node => { if (/\n/.test(node.textContent || '')) node.remove(); });
+  const host = document.createElement('div');
+  host.style.cssText = 'position:absolute;left:-99999px;top:0;width:800px';
+  host.appendChild(clone);
+  document.body.appendChild(host);
+  const text = clone.innerText || clone.textContent || '';
+  host.remove();
+  return text;
+}
+"""
+
+
 def read_chat_response(page):
-    """Read the latest assistant message, excluding the user's prompt."""
+    """Read the latest assistant message without code, excluding the user's prompt."""
     for selector in ASSISTANT_SELECTORS:
         try:
             nodes = page.locator(selector)
@@ -2068,12 +2101,20 @@ def read_chat_response(page):
                 if is_prior(node):
                     continue  # earlier turn of a continued chat
                 if node.is_visible():
-                    text = node.inner_text(timeout=3000).strip()
+                    text = re.sub(r"\n{3,}", "\n\n", node.evaluate(PROSE_SCRIPT) or "").strip()
                     if text:
                         return text
         except Exception:
             continue
     return ""
+
+
+def final_answer(answers, fallback=""):
+    """The answer after the last activity section; interim answers and code are not part of it."""
+    answers = [a for a in answers or [] if str(a.get("text") or "").strip()]
+    if answers:
+        return strip_speaker_label(max(answers, key=lambda a: a.get("after", 0))["text"])
+    return strip_speaker_label(fallback)
 
 
 def cmd_fix(args):
@@ -2102,13 +2143,16 @@ def cmd_fix(args):
 def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout):
     source_txt = work / f"{root.name}-{time.strftime('%Y%m%d-%H%M%S')}.zip.txt"
     emit_status("archiving", "Creating committed repository archive...")
-    source_hash, count, history = make_archive(root, source_txt)
-    emit_status("archiving", f"Archive ready ({count} entries and {history} Git history files).")
+    with_history = not getattr(args, "no_history", False)
+    source_hash, count, history = make_archive(root, source_txt, with_history)
+    emit_status("archiving", f"Archive ready ({count} entries and {history} Git history files)." if with_history
+                else f"Archive ready ({count} entries, without Git history).")
     chat_url = getattr(args, "chat_url", None)
     continuing = bool(chat_url)
     # A saved chat is only created when Temporary chat is off; its URL is reported for follow-ups.
     track_chat = continuing or not args.temporary_chat
-    prompt = (FOLLOWUP_PROMPT if continuing else BASE_PROMPT).format(request=args.request.strip())
+    template = FOLLOWUP_PROMPT if continuing else BASE_PROMPT if with_history else FRESH_PROMPT
+    prompt = template.format(request=args.request.strip())
     attachments = getattr(args, "attachments", None) or []
     if attachments:
         prompt += ATTACHMENTS_NOTE.format(names=", ".join(a.name for a in attachments))
@@ -2297,10 +2341,7 @@ def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout)
                 if current_url and current_url != reported_url:
                     reported_url = current_url
                     emit_chat(current_url)
-            chat_response = strip_speaker_label(read_chat_response(page))
-            live_text = "\n\n".join(a["text"] for a in live_answers)
-            if len(chat_response) < len(live_text):
-                chat_response = live_text
+            chat_response = final_answer(live_answers, read_chat_response(page))
             ctx.close()
         except QuitRequested:
             if submitted:
@@ -2361,6 +2402,8 @@ def main():
     fp.add_argument("--chat-url", default=None, metavar="URL",
                     help="Continue the saved Copilot chat at this URL (from a previous run's chat_url); "
                          "implies --no-temporary-chat. The current repository archive is attached again.")
+    fp.add_argument("--no-history", action="store_true",
+                    help="Upload the repository without its .git history (used for new apps)")
     fp.add_argument("--attach", action="append", default=[], metavar="PATH",
                     help="Additional file (e.g. a picture) to attach to the prompt; repeat for several files")
     fp.set_defaults(fn=cmd_fix)

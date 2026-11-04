@@ -88,7 +88,7 @@ class FakeRoundTrip:
     """Edits the checkout the way an applied Copilot result would."""
 
     def __init__(self, behavior="change"):
-        self.behavior, self.calls, self.attachments = behavior, [], []
+        self.behavior, self.calls, self.attachments, self.histories = behavior, [], [], []
         self.models, self.model_error, self.model_checks = ["Claude/Opus 9", "GPT/GPT-9 Pro"], None, 0
 
     def list_models(self, on_status, cancel):
@@ -98,7 +98,8 @@ class FakeRoundTrip:
         return list(self.models)
 
     def run(self, repo_dir, request, model, on_status, cancel, show_browser=None, temporary_chat=None,
-            attachments=()):
+            attachments=(), history=True):
+        self.histories.append(history)
         self.calls.append((Path(repo_dir), request, model, show_browser, temporary_chat))
         self.attachments.append([(Path(path).name, Path(path).read_bytes()) for path in attachments])
         on_status("browser", "Opening Copilot")
@@ -534,6 +535,7 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("Copilot output:\nAdded it.", report)
         self.assertIn("Deploy: Systemd service copilot-app-fresh-app.service", report)
         self.assertIn("Tunnel: https://fresh-app.kurwalab.fyi -> http://127.0.0.1:8081.", report)
+        self.assertEqual(self.rt.histories, [False])
 
     def test_regular_user_creation_records_ownership_and_allows_only_owner_fixes(self):
         self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77, 88}),
@@ -919,6 +921,7 @@ class ServiceTests(unittest.TestCase):
     def test_request_runs_commits_pushes_and_redeploys(self):
         self.say("/repo app")
         self.say("add a Makefile")
+        self.assertEqual(self.rt.histories, [True])
         self.assertEqual(self.rt.calls[0][1], "add a Makefile" + DEPLOY_NOTE)
         self.assertEqual(self.rt.calls[0][2], "GPT/GPT-6")
         self.assertEqual(self.deployer.calls, [("app", self.dest)])

@@ -27,6 +27,19 @@ class CompletionTests(unittest.TestCase):
                 self.assertIn('Do not include a .git directory in the returned ZIP', prompt)
                 self.assertTrue(prompt.endswith('To fix: Update the tests'))
 
+    def test_fresh_prompt_omits_git_history_instructions(self):
+        prompt = rt.FRESH_PROMPT.format(request='Build it')
+        self.assertNotIn('git log', prompt)
+        self.assertIn('Do not include a .git directory in the returned ZIP', prompt)
+        self.assertIn('AGENTS.md', prompt)
+        self.assertTrue(prompt.endswith('To fix: Build it'))
+
+    def test_final_answer_is_the_last_segment_only(self):
+        answers = [{'after': 0, 'text': 'Starting.'}, {'after': 2, 'text': 'Copilot said: Done.'},
+                   {'after': 1, 'text': 'Interim.'}]
+        self.assertEqual(rt.final_answer(answers, 'code()\nDone.'), 'Done.')
+        self.assertEqual(rt.final_answer([], 'Copilot said: Fallback.'), 'Fallback.')
+
     def test_final_merge_clears_active_flags_and_preserves_steps(self):
         block = {'title': 'Coding and executing', 'active': True,
                  'steps': [{'title': 'Coding and executing', 'kind': 'coding'}]}
@@ -267,6 +280,26 @@ class ArchiveTests(unittest.TestCase):
             # Returned archives must still not carry Git metadata.
             with zipfile.ZipFile(out) as z, self.assertRaisesRegex(SystemExit, 'contains .git'):
                 rt.safe_members(z)
+
+
+class FreshArchiveTests(unittest.TestCase):
+    def test_archive_without_history_has_no_git_metadata(self):
+        import subprocess
+        import zipfile
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'repo'
+            root.mkdir()
+            run = lambda *args: subprocess.run(['git', *args], cwd=root, check=True,
+                                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            run('init', '-b', 'main')
+            (root / 'app.txt').write_text('v\n')
+            run('add', '-A')
+            run('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-m', 'Initial commit')
+            out = Path(temporary) / 'repo.zip.txt'
+            _, count, history = rt.make_archive(root, out, history=False)
+            self.assertEqual((count, history), (1, 0))
+            with zipfile.ZipFile(out) as z:
+                self.assertEqual(z.namelist(), ['app.txt'])
 
 
 class DownloadFlowTests(unittest.TestCase):
@@ -848,6 +881,16 @@ secret_two()</code>
           <details open><summary>Old task <span>Completed</span></summary><p>Old step</p></details>
           </article></main>''')
         self.assertEqual(rt.read_task_cards(self.page), [])
+
+    def test_chat_response_omits_code_blocks(self):
+        self.page.set_content('''<main><article data-message-author-role="assistant">
+          <p>Created the app.</p><pre><code>secret_code()
+more()</code></pre><div class="code-block">secret_block()</div>
+          <p>Use <code>make run</code>.</p></article></main>''')
+        text = rt.read_chat_response(self.page)
+        self.assertIn('Created the app.', text)
+        self.assertIn('make run', text)
+        self.assertNotIn('secret_', text)
 
     def test_task_plan_is_not_flattened_into_live_answer_text(self):
         self.page.set_content('''<main><article data-message-author-role="assistant">

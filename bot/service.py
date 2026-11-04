@@ -1628,7 +1628,7 @@ class Bot:
                 result = self.roundtrip.run(
                     dest, prompt, model or self.state.model,
                     lambda stage, msg: progress.update(self._repo_progress(full, msg), stage), self._cancel,
-                    temporary_chat=temporary_chat, attachments=files)
+                    temporary_chat=temporary_chat, attachments=files, history=False)
             except Cancelled:
                 progress.flush()
                 self._warn_dirty(chat_id, dest, full, admin)
