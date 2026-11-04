@@ -1114,10 +1114,10 @@ def heartbeat_message(running, elapsed, idle, limit):
     """Describe whether the prompt is still running for the periodic progress heartbeat."""
     elapsed = f"{int(elapsed)}s elapsed"
     if running:
-        return f"Prompt still running (Stop control visible); {elapsed}."
+        return f"Prompt still running; {elapsed}."
     if idle < HEARTBEAT_SECONDS:
         return f"Prompt still running (output changed {int(idle)}s ago); {elapsed}."
-    return f"No Stop control or new output for {int(idle)}s of {int(limit)}s allowed; {elapsed}."
+    return f"No new output for {int(idle)}s of {int(limit)}s allowed; {elapsed}."
 
 
 def run(cmd, cwd=None, capture=True):
@@ -2233,9 +2233,9 @@ def main():
     fp.add_argument("--repo", default=".")
     fp.add_argument("--work-dir", default=None, help="Optional parent for automatically deleted temporary round-trip files")
     fp.add_argument("--backup-dir", default=None, help="Deprecated; rollback copies are temporary and automatically deleted")
-    fp.add_argument("--timeout", type=int, default=900,
+    fp.add_argument("--timeout", type=int, default=30,
                     help="Seconds without a visible Stop control, new on-screen output or a task-card change "
-                         "before giving up (default: 900)")
+                         "before giving up (default: 30)")
     fp.add_argument("--model", default="GPT/GPT-6",
                     help="Provider/model pair (default: GPT/GPT-6)")
     fp.add_argument("--show-browser", action="store_true",

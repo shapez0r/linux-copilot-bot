@@ -116,8 +116,8 @@ class RoundTripTests(unittest.TestCase):
                     value["tasks"] = tasks
                 print("ROUNDTRIP_STATUS:" + json.dumps(value), file=sys.stderr, flush=True)
             status("waiting", "Waiting for Copilot")
-            status("heartbeat", "Prompt still running (Stop control visible); 15s elapsed.")
-            status("heartbeat", "Prompt still running (Stop control visible); 30s elapsed.")
+            status("heartbeat", "Prompt still running; 15s elapsed.")
+            status("heartbeat", "Prompt still running; 30s elapsed.")
             status("task", "Copilot task", [{"title": "Build app", "state": "In progress", "steps": []}])
             status("waiting", "Copilot response finished; downloadable repository found.")
             print(json.dumps({"chat_response": "done"}))
@@ -132,10 +132,8 @@ class RoundTripTests(unittest.TestCase):
         first, second = self.statuses[1][1], self.statuses[2][1]
         self.assertEqual(first, "Currently doing: Waiting for Copilot\n\n"
                                 "[16:21:10] Waiting for Copilot\n\n"
-                                "[16:21:11] \u23f3 Prompt still running "
-                                "(Stop control visible); 15s elapsed.")
-        self.assertTrue(second.endswith("[16:21:12] \u23f3 Prompt still running "
-                                        "(Stop control visible); 30s elapsed."))
+                                "[16:21:11] \u23f3 Prompt still running; 15s elapsed.")
+        self.assertTrue(second.endswith("[16:21:12] \u23f3 Prompt still running; 30s elapsed."))
         self.assertNotIn("15s elapsed", second)
         self.assertIn("Build app", self.statuses[3][1])
         self.assertIn("30s elapsed", self.statuses[3][1])

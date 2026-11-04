@@ -158,11 +158,11 @@ class CompletionTests(unittest.TestCase):
 
     def test_heartbeat_reports_running_prompt_or_timeout_countdown(self):
         self.assertEqual(rt.heartbeat_message(True, 120.4, 0, 900),
-                         'Prompt still running (Stop control visible); 120s elapsed.')
+                         'Prompt still running; 120s elapsed.')
         self.assertEqual(rt.heartbeat_message(False, 60, 4, 900),
                          'Prompt still running (output changed 4s ago); 60s elapsed.')
         self.assertEqual(rt.heartbeat_message(False, 200, 45.9, 900),
-                         'No Stop control or new output for 45s of 900s allowed; 200s elapsed.')
+                         'No new output for 45s of 900s allowed; 200s elapsed.')
 
     def test_task_status_message_describes_visible_plan(self):
         tasks = [{'title': 'Add browser games', 'state': 'In progress', 'active': True,
