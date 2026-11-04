@@ -448,14 +448,16 @@ class Bot:
         return True
 
     def _app_choices(self, user_id=None, include_active: bool = False, include_bot: bool = False):
-        """Return app repositories for pickers; only admins can be offered the bot repository."""
+        """Return recorded app repositories that have a local folder, matching /list; only admins
+        can be offered the bot repository."""
         self._register_running_apps()
         owner = ADMIN_OWNER if self._is_admin(user_id) else telegram_owner(user_id)
         choices = list(self.state.app_owners) if self._is_admin(user_id) else self.state.repos_for_owner(owner)
         active = self.state.get_active_repo(user_id, self._is_admin(user_id))
         if include_active and active:
             choices.insert(0, active)
-        choices = [repo for repo in choices if not self._is_bot_app(repo.rsplit("/", 1)[-1])]
+        choices = [repo for repo in choices if not self._is_bot_app(repo.rsplit("/", 1)[-1])
+                   and self._has_app_folder(repo.rsplit("/", 1)[-1])]
         if include_bot and self._is_admin(user_id) and self._bot_folder() is not None:
             choices.append(self._bot_repo())
         return list(dict.fromkeys(choices))
@@ -466,6 +468,10 @@ class Bot:
              if path.is_dir() and not self.deployer.is_bot_repo(path)),
             key=lambda path: path.name.lower(),
         )
+
+    def _has_app_folder(self, name: str) -> bool:
+        folder = self.cfg.repos_dir / name
+        return folder.is_dir() and not folder.is_symlink()
 
     def _is_bot_app(self, name: str) -> bool:
         return self.deployer.is_bot_repo(self.cfg.repos_dir / name.lower())

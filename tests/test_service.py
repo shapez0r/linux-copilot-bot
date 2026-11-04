@@ -283,11 +283,23 @@ class ServiceTests(unittest.TestCase):
         self.state.set_app_owner("me/mine", telegram_owner(77))
         self.state.set_app_owner("me/theirs", telegram_owner(88))
         self.state.set_app_owner("me/admin-app", ADMIN_OWNER)
+        for name in ("mine", "theirs", "admin-app"):
+            (self.cfg.repos_dir / name).mkdir(exist_ok=True)
         self.user_say(77, FIX_APP)
         labels = {button["text"] for row in self.tg.markups[-1]["keyboard"] for button in row}
         self.assertIn("me/mine", labels)
         self.assertNotIn("me/theirs", labels)
         self.assertNotIn("me/admin-app", labels)
+
+    def test_fix_picker_omits_recorded_apps_without_a_local_folder(self):
+        self.state.set_app_owner("me/stale-app", ADMIN_OWNER)
+        self.state.set_active_repo(1, "me/stale-app", True)
+        (self.cfg.repos_dir / "listed-app").mkdir()
+        self.state.set_app_owner("me/listed-app", ADMIN_OWNER)
+        self.say(FIX_APP)
+        labels = {button["text"] for row in self.tg.markups[-1]["keyboard"] for button in row}
+        self.assertIn("me/listed-app", labels)
+        self.assertNotIn("me/stale-app", labels)
 
     def test_create_app_menu_guides_name_model_template_prompt_and_returns_link(self):
         self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
@@ -408,6 +420,7 @@ class ServiceTests(unittest.TestCase):
     def test_regular_user_fix_app_menu_skips_the_chat_type(self):
         self.bot.cfg = make_config(self.tmp, user_ids=frozenset({77}))
         self.state.set_app_owner("me/app", telegram_owner(77))
+        git("clone", str(self.origin), str(self.dest))
         self.user_say(77, FIX_APP)
         self.user_say(77, "me/app")
         self.user_say(77, "GPT/GPT-9 Pro")
