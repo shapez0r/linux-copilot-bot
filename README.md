@@ -132,7 +132,7 @@ The bot's own checkout, `<REPOS_DIR>/linux-copilot-bot`, can be changed only by 
 - fast-forwards the live checkout, then runs the round-trip in a separate temporary clone, so the live checkout's ignored `.env` and `.venv` are not replaced;
 - asks Copilot to keep the `run` target that starts the bot service and to keep secrets outside the repository;
 - commits and pushes the result, then fast-forwards the live checkout;
-- reports the commit, then queues a non-blocking restart of `copilot-telegram-bot.service` through non-interactive `sudo` so the bot comes back with the new code. When the bot was not started by systemd, it is not restarted and the report asks for a manual restart.
+- reports the commit, then queues a non-blocking restart of `copilot-telegram-bot.service` through non-interactive `sudo` so the bot comes back with the new code; systemd may terminate the `sudo` call as part of that restart, which is not treated as a failure. When the bot was not started by systemd, it is not restarted and the report asks for a manual restart.
 
 ## Configuration
 

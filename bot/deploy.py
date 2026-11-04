@@ -7,6 +7,7 @@ import pwd
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -185,8 +186,15 @@ class Deployer:
         return bool((os.environ if environ is None else environ).get("INVOCATION_ID"))
 
     def restart_bot(self):
-        """Queue a bot service restart without waiting, so the current job can finish reporting first."""
-        self._systemctl(["restart", "--no-block", BOT_SERVICE])
+        """Queue a bot service restart without waiting, so the current job can finish reporting first.
+
+        The restart stops this process's own control group, so systemd may terminate the sudo child
+        before it returns. A SIGTERM exit therefore means the restart is under way, not that it failed.
+        """
+        done = self._systemctl(["restart", "--no-block", BOT_SERVICE], check=False)
+        if done.returncode not in (0, -signal.SIGTERM):
+            detail = done.stderr.strip() or done.stdout.strip() or f"exit code {done.returncode}"
+            raise DeployError(f"cannot restart {BOT_SERVICE}: {detail[-600:]}")
 
     def running_apps(self) -> list[tuple[str, int]]:
         """Return local apps whose systemd services are active."""

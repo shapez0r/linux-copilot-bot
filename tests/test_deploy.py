@@ -1,4 +1,5 @@
 import shutil
+import signal
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,7 +7,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from support import make_config
-from bot.deploy import BOT_SERVICE, Deployer, ServiceState, app_env
+from bot.deploy import BOT_SERVICE, DeployError, Deployer, ServiceState, app_env
 
 
 class FakeSystemdDeployer(Deployer):
@@ -169,6 +170,18 @@ class DeployTests(unittest.TestCase):
         self.assertIn(("restart", "--no-block", BOT_SERVICE), self.deployer.calls)
         self.assertTrue(Deployer.bot_runs_as_service({"INVOCATION_ID": "abc"}))
         self.assertFalse(Deployer.bot_runs_as_service({}))
+
+    def test_bot_restart_treats_termination_by_the_restart_as_success(self):
+        deployer = Deployer(make_config(self.tmp), self.bot_repo)
+        for returncode in (0, -signal.SIGTERM):
+            with self.subTest(returncode=returncode), mock.patch.object(
+                    deployer, "_sudo", return_value=SimpleNamespace(returncode=returncode, stdout="", stderr="")) as sudo:
+                deployer.restart_bot()
+            self.assertEqual(sudo.call_args.args[0], ["systemctl", "restart", "--no-block", BOT_SERVICE])
+        failed = SimpleNamespace(returncode=1, stdout="", stderr="Access denied")
+        with mock.patch.object(deployer, "_sudo", return_value=failed), self.assertRaisesRegex(
+                DeployError, "Access denied"):
+            deployer.restart_bot()
 
     def test_registration_removes_only_the_matching_reboot_entry(self):
         self.makefile()
