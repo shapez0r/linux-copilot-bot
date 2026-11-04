@@ -5,12 +5,14 @@ import html
 import logging
 import re
 import shutil
+import tempfile
 import threading
 import time
+from pathlib import Path
 
 from .config import Config, redact
 from .cloudflare import CloudflareError, CloudflareRoutes
-from .deploy import DeployError, Deployer
+from .deploy import BOT_APP, BOT_SERVICE, DeployError, Deployer
 from .github_api import GitHub, GitHubError
 from .gitops import Git, GitError
 from .repos import RepoError, local_path, parse_repo_ref
@@ -25,6 +27,11 @@ log = logging.getLogger("bot")
 DEPLOY_NOTE = (
     "\n\nThis app is deployed by running `make run` from the repository root. Keep a Makefile whose `run` "
     "target starts one HTTP server in the foreground, and keep secrets and runtime data outside the repository."
+)
+# The bot's own repository runs as the Telegram bot service instead of an HTTP app.
+BOT_DEPLOY_NOTE = (
+    "\n\nThis repository is the Telegram bot that manages the apps. It runs with `make run` from the repository "
+    "root as a systemd service. Keep that run target, and keep secrets and runtime data outside the repository."
 )
 NEW_REPO_TEMPLATE = "eurofish"
 NEW_APP_PROMPT = (
@@ -123,9 +130,9 @@ HELP = f"""Use the buttons below to create and manage apps. You can also send a 
 /delete <name|owner/name> - permanently delete an app service, GitHub repository, local checkout and tunnel route
 /repo [public|private] <name|owner/name> - select a repository; a missing one is created from the eurofish reference app
 /repo - show the active repository
-/fix <repo> <request> - select a repository and run a request in one message
+/fix <repo> <request> - select a repository and run a request in one message; linux-copilot-bot changes this bot and restarts it
 /fix [browser|nobrowser] [tempchat|notempchat] <request> - run against the active repository with per-request browser/chat options
-/list - list every local app with systemd status and tunnel details
+/list - list every local app and this bot with systemd status and tunnel details
 /app start|stop <name> - start or stop an app service
 /register [all|<name>] - register and enable systemd services for existing local apps
 /cloudflare <subdomain> <port> - route <subdomain>.kurwalab.fyi to http://127.0.0.1:<port>
@@ -379,7 +386,7 @@ class Bot:
         elif label == FIX_APP:
             if self._job_blocks_dialog(chat_id):
                 return
-            choices = self._app_choices(user_id, include_active=True)
+            choices = self._app_choices(user_id, include_active=True, include_bot=True)
             if not choices and not self._is_admin(user_id):
                 self.say(chat_id, "You do not have any apps to fix. Create an app first.")
                 return
@@ -440,13 +447,17 @@ class Bot:
         self.say(chat_id, "A job is already running. Wait for it or use Cancel / stop.")
         return True
 
-    def _app_choices(self, user_id=None, include_active: bool = False):
+    def _app_choices(self, user_id=None, include_active: bool = False, include_bot: bool = False):
+        """Return app repositories for pickers; only admins can be offered the bot repository."""
         self._register_running_apps()
         owner = ADMIN_OWNER if self._is_admin(user_id) else telegram_owner(user_id)
         choices = list(self.state.app_owners) if self._is_admin(user_id) else self.state.repos_for_owner(owner)
         active = self.state.get_active_repo(user_id, self._is_admin(user_id))
         if include_active and active:
             choices.insert(0, active)
+        choices = [repo for repo in choices if not self._is_bot_app(repo.rsplit("/", 1)[-1])]
+        if include_bot and self._is_admin(user_id) and self._bot_folder() is not None:
+            choices.append(self._bot_repo())
         return list(dict.fromkeys(choices))
 
     def _app_directories(self):
@@ -455,6 +466,26 @@ class Bot:
              if path.is_dir() and not self.deployer.is_bot_repo(path)),
             key=lambda path: path.name.lower(),
         )
+
+    def _is_bot_app(self, name: str) -> bool:
+        return self.deployer.is_bot_repo(self.cfg.repos_dir / name.lower())
+
+    def _bot_folder(self):
+        folder = self.cfg.repos_dir / BOT_APP
+        return folder if folder.is_dir() else None
+
+    def _bot_repo(self) -> str:
+        """Return the bot checkout's GitHub repository, falling back to the default owner."""
+        origin = self.git.origin_repo(self.cfg.repos_dir / BOT_APP)
+        owner, name = origin if origin else (self._owner_default(), BOT_APP)
+        return f"{owner}/{name}"
+
+    def _resolve_ref(self, ref: str):
+        """Parse a repository reference; a bare bot app name resolves to the bot checkout's origin."""
+        owner, name = parse_repo_ref(ref, self._owner_default())
+        if "/" not in ref.strip().strip("/") and self._is_bot_app(name):
+            owner, name = self._bot_repo().split("/", 1)
+        return owner, name
 
     def _tracked_repo_for_app(self, app: str):
         matches = [repo for repo in self.state.app_owners
@@ -682,7 +713,7 @@ class Bot:
             return
         templates = list(dict.fromkeys(
             route["app"] for route in route_apps
-            if (self.cfg.repos_dir / route["app"]).is_dir()
+            if (self.cfg.repos_dir / route["app"]).is_dir() and not self._is_bot_app(route["app"])
         ))
         if not templates:
             self.show_menu(
@@ -706,7 +737,7 @@ class Bot:
     def _handle_fix_dialog(self, chat_id: int, dialog: dict, text: str, user_id=None):
         if dialog["step"] == "repo":
             try:
-                owner, name = parse_repo_ref(text, self._owner_default())
+                owner, name = self._resolve_ref(text)
             except RepoError as error:
                 self.say(chat_id, str(error))
                 return
@@ -905,7 +936,11 @@ class Bot:
         return True
 
     def _can_fix(self, user_id, repo: str) -> bool:
-        return self._is_admin(user_id) or self.state.app_owner(repo) == telegram_owner(user_id)
+        if self._is_admin(user_id):
+            return True
+        if self._is_bot_app(repo.rsplit("/", 1)[-1]):
+            return False
+        return self.state.app_owner(repo) == telegram_owner(user_id)
 
     def cmd_model(self, chat_id: int, arg: str):
         if not arg:
@@ -924,7 +959,8 @@ class Bot:
         if active:
             name = active.split("/", 1)[1]
             try:
-                status = self.deployer.status(name, local_path(self.cfg.repos_dir, name))
+                status = (self.deployer.bot_status() if self._is_bot_app(name)
+                          else self.deployer.status(name, local_path(self.cfg.repos_dir, name)))
             except DeployError as error:
                 status = f"unavailable ({error})"
             lines.append(f"App: {status}")
@@ -1023,12 +1059,14 @@ class Bot:
             self.say(chat_id, f"\u274c Internal error: {e.__class__.__name__}. See the bot log.")
 
     def _app_list(self, chat_id: int, user_id=None):
+        admin = self._is_admin(user_id)
         try:
             apps = self._app_directories()
         except OSError as error:
             self.say(chat_id, f"Could not read the apps folder: {error}")
             return
-        if not apps:
+        bot = self._bot_folder() if admin else None
+        if not apps and bot is None:
             self.say(chat_id, "No apps are available.")
             return
 
@@ -1060,6 +1098,13 @@ class Bot:
                 )
             else:
                 lines.append(f"- name: {name} — status: {self._public_status(status)} — url: {url}")
+        if bot is not None:
+            try:
+                status = self.deployer.bot_status()
+            except DeployError as error:
+                status = f"unavailable ({error})"
+            lines.append(f"- name: {bot.name} (this bot, {BOT_SERVICE}) — status: {status} — folder: {bot} "
+                         "— port: not applicable — url: not applicable")
         self.say(chat_id, "\n".join(lines))
 
     def cmd_cancel(self, chat_id: int, user_id=None):
@@ -1263,7 +1308,7 @@ class Bot:
             return
         selected = ref or active
         try:
-            owner, name = parse_repo_ref(selected, self._owner_default())
+            owner, name = self._resolve_ref(selected)
         except RepoError as error:
             self.say(chat_id, str(error))
             return
@@ -1342,6 +1387,10 @@ class Bot:
         if new_only and repo is not None:
             raise RepoError(f"{owner}/{name} already exists. Use /repo to select it.")
         created = repo is None
+        if self._is_bot_app(name):
+            if created:
+                raise RepoError(f"{owner}/{name} was not found on GitHub; the bot repository is never created.")
+            managed_owner = ""
         if created:
             progress.update(f"Creating {'private' if private else 'public'} repository {owner}/{name}...")
             repo = self.gh.create_repo(owner, name, private=private)
@@ -1363,12 +1412,13 @@ class Bot:
 
     def _select_repo(self, chat_id: int, arg: str, new_only: bool = False, private: bool = True,
                      user_id=None):
-        owner, name = parse_repo_ref(arg, self._owner_default())
+        owner, name = self._resolve_ref(arg)
         progress = Progress(self.tg, chat_id, self.cfg)
         dest, branch, how = self._prepare(owner, name, progress, new_only=new_only, private=private,
                                           managed_owner=ADMIN_OWNER)
         full = f"{owner}/{name}"
-        self.state.set_app_owner(full, ADMIN_OWNER)
+        if not self._is_bot_app(name):
+            self.state.set_app_owner(full, ADMIN_OWNER)
         self.state.set_active_repo(user_id, full, self._is_admin(user_id))
         self.state.save()
         progress.flush()
@@ -1384,7 +1434,9 @@ class Bot:
             raise RepoError("The new app name must differ from its template app name.")
         full = f"{owner}/{name}"
         progress = Progress(self.tg, chat_id, self.cfg)
-        if not (self.cfg.repos_dir / template).is_dir():
+        if self._is_bot_app(name):
+            raise RepoError(f"{full} already exists. Choose another app name.")
+        if self._is_bot_app(template) or not (self.cfg.repos_dir / template).is_dir():
             raise RepoError(f"Template app is not available locally: {template}")
         admin = self._is_admin(user_id)
         creator = ADMIN_OWNER if admin else telegram_owner(user_id)
@@ -1535,10 +1587,13 @@ class Bot:
 
     def _request(self, chat_id: int, ref: str, request: str,
                  show_browser=None, temporary_chat=None, user_id=None, model=None):
-        owner, name = parse_repo_ref(ref, self._owner_default())
+        owner, name = self._resolve_ref(ref)
         full = f"{owner}/{name}"
         if not self._can_fix(user_id, full):
             raise RepoError("You can only fix apps you created.")
+        if self._is_bot_app(name):
+            self._bot_request(chat_id, owner, name, request, show_browser, temporary_chat, user_id, model)
+            return
         progress = Progress(self.tg, chat_id, self.cfg)
         admin = self._is_admin(user_id)
         managed_owner = self.state.app_owner(full) or ADMIN_OWNER
@@ -1569,6 +1624,51 @@ class Bot:
         progress.flush()
         self.say(chat_id, self._report(full, sha, pushed_branch, result, deploy,
                                        url="" if admin else self._app_url(name)))
+
+    def _bot_request(self, chat_id: int, owner: str, name: str, request: str,
+                     show_browser=None, temporary_chat=None, user_id=None, model=None):
+        """Change the bot's own repository from a separate clone, then update and restart the bot.
+
+        The live checkout keeps its ignored files (.env, .venv), which a full worktree replacement would remove.
+        """
+        full = f"{owner}/{name}"
+        progress = Progress(self.tg, chat_id, self.cfg)
+        live, branch, _ = self._prepare(owner, name, progress)
+        self.state.set_active_repo(user_id, full, True)
+        self.state.save()
+        if self._cancel.is_set():
+            raise Cancelled()
+        self.cfg.state_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="bot-fix-", dir=self.cfg.state_dir) as work:
+            dest = Path(work) / name
+            progress.update(f"{full}: cloning a separate working copy...")
+            self.git.run("clone", "--branch", branch, self.gh.get_repo(owner, name)["clone_url"], str(dest))
+            progress.update(f"{full}: sending the repository to Copilot...")
+            result = self.roundtrip.run(dest, request + BOT_DEPLOY_NOTE, model or self.state.model,
+                                        lambda stage, msg: progress.update(self._repo_progress(full, msg), stage),
+                                        self._cancel, show_browser, temporary_chat)
+            progress.update(f"{full}: committing and pushing...")
+            pushed = self.git.commit_and_push(dest, request)
+        if pushed is None:
+            progress.flush()
+            self.say(chat_id, f"Copilot returned no changes to commit for {full}; nothing was deployed.")
+            return
+        sha, pushed_branch = pushed
+        progress.update(f"{full}: updating {live}...")
+        self.git.sync(live)
+        progress.flush()
+        restart = self.deployer.bot_runs_as_service()
+        lines = [f"\u2705 {full}: commit {sha} pushed to {pushed_branch}."]
+        diff_lines = [line for line in (result.get("diff_stat") or "").splitlines() if line.strip()]
+        if diff_lines:
+            lines.append(f"Changes: {diff_lines[-1].strip()}")
+        lines.append(f"Local checkout: {live} updated.")
+        lines.append(f"Restart: {BOT_SERVICE} is restarting to apply the changes; the bot is back shortly."
+                     if restart else "Restart: the bot is not running as its systemd service; restart it to "
+                                     "apply the changes.")
+        self.say(chat_id, "\n".join(lines))
+        if restart:
+            self.deployer.restart_bot()
 
     def _warn_dirty(self, chat_id: int, dest, full: str, admin: bool):
         if not self.git.is_dirty(dest):

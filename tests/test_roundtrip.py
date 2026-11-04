@@ -14,7 +14,7 @@ from bot.roundtrip import (TASK_STATUS_LIMIT, Cancelled, RoundTrip, RoundTripErr
                            format_stage_status, format_timestamp, parse_activity_event,
                            parse_live_event, parse_status, parse_status_event, StatusTimeline)
 
-STAMP = "2026-11-01 16:21:21 UTC+00:00"
+STAMP = "16:21:21"
 
 
 def quote(text):
@@ -120,7 +120,7 @@ class RoundTripTests(unittest.TestCase):
             print(json.dumps({"chat_response": "done"}))
         '''))
         cfg = make_config(self.tmp, engine=engine)
-        stamps = iter(f"2026-11-01 16:21:{second:02d} UTC+00:00" for second in range(10, 60))
+        stamps = iter(f"16:21:{second:02d}" for second in range(10, 60))
         with mock.patch("bot.roundtrip.format_timestamp", side_effect=lambda *args: next(stamps)):
             RoundTrip(cfg).run(self.tmp, "x", "GPT/GPT-6",
                                lambda s, m: self.statuses.append((s, m)), threading.Event())
@@ -128,10 +128,10 @@ class RoundTripTests(unittest.TestCase):
         self.assertEqual(stages, ["waiting", "heartbeat", "heartbeat", "task", "waiting"])
         first, second = self.statuses[1][1], self.statuses[2][1]
         self.assertEqual(first, "Currently doing: Waiting for Copilot\n\n"
-                                "[2026-11-01 16:21:10 UTC+00:00] Waiting for Copilot\n\n"
-                                "[2026-11-01 16:21:11 UTC+00:00] \u23f3 Prompt still running "
+                                "[16:21:10] Waiting for Copilot\n\n"
+                                "[16:21:11] \u23f3 Prompt still running "
                                 "(Stop control visible); 15s elapsed.")
-        self.assertTrue(second.endswith("[2026-11-01 16:21:12 UTC+00:00] \u23f3 Prompt still running "
+        self.assertTrue(second.endswith("[16:21:12] \u23f3 Prompt still running "
                                         "(Stop control visible); 30s elapsed."))
         self.assertNotIn("15s elapsed", second)
         self.assertIn("Build app", self.statuses[3][1])
@@ -319,12 +319,12 @@ class RoundTripTests(unittest.TestCase):
         ], fixed_timeline()), f"Currently doing: Waiting for Copilot...\n\n"
                               f"[{STAMP}] Waiting for Copilot...\n\nI am checking the repository.")
 
-    def test_timestamp_has_seconds_zone_name_and_offset(self):
+    def test_timestamp_shows_only_hours_minutes_and_seconds(self):
         moment = datetime(2026, 11, 1, 17, 21, 9, tzinfo=timezone(timedelta(hours=1), "CET"))
-        self.assertEqual(format_timestamp(moment), "2026-11-01 17:21:09 CET+01:00")
+        self.assertEqual(format_timestamp(moment), "17:21:09")
 
     def test_timeline_keeps_stage_times_and_updates_the_current_step(self):
-        stamps = iter(("2026-11-01 16:21:21 UTC+00:00", "2026-11-01 16:21:22 UTC+00:00"))
+        stamps = iter(("16:21:21", "16:21:22"))
         timeline = StatusTimeline(lambda: next(stamps))
         first = format_prompt_status("", [], [{"index": 0, "title": "Reasoning", "active": True,
                                                 "layout": "working", "steps": [
@@ -334,9 +334,9 @@ class RoundTripTests(unittest.TestCase):
                                                  "layout": "working", "steps": [
                                                      {"title": "Coding and executing", "kind": "coding"}]}],
                                       timeline=timeline)
-        self.assertIn("[2026-11-01 16:21:21 UTC+00:00]", first)
+        self.assertIn("[16:21:21]", first)
         self.assertIn("Currently doing: Coding and executing", second)
-        self.assertIn("[2026-11-01 16:21:22 UTC+00:00]", second)
+        self.assertIn("[16:21:22]", second)
 
     def test_active_reasoning_uses_its_last_paragraph_for_current_activity(self):
         line = "ROUNDTRIP_REASONING:" + json.dumps({"blocks": [{

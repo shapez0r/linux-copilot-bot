@@ -18,6 +18,7 @@ from .config import ROOT, SECRET_NAMES, Config
 SYSTEMD_TIMEOUT_SECONDS = 30
 APP_SERVICE_PREFIX = "copilot-app-"
 BOT_SERVICE = "copilot-telegram-bot.service"
+BOT_APP = "linux-copilot-bot"
 _APP_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 
 
@@ -91,7 +92,7 @@ class Deployer:
 
     def is_bot_repo(self, path: Path) -> bool:
         try:
-            return path.resolve() == self._bot_repo_dir or path.name == "linux-copilot-bot"
+            return path.resolve() == self._bot_repo_dir or path.name == BOT_APP
         except OSError:
             return False
 
@@ -174,6 +175,18 @@ class Deployer:
     def status(self, app: str, repo_dir: Path) -> str:
         self._validate_repo(app, repo_dir)
         return self.service_state(app).display()
+
+    def bot_status(self) -> str:
+        return self._state(BOT_SERVICE).display()
+
+    @staticmethod
+    def bot_runs_as_service(environ=None) -> bool:
+        """Return whether this bot process was started by systemd and can be restarted through it."""
+        return bool((os.environ if environ is None else environ).get("INVOCATION_ID"))
+
+    def restart_bot(self):
+        """Queue a bot service restart without waiting, so the current job can finish reporting first."""
+        self._systemctl(["restart", "--no-block", BOT_SERVICE])
 
     def running_apps(self) -> list[tuple[str, int]]:
         """Return local apps whose systemd services are active."""

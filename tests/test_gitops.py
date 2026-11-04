@@ -84,6 +84,15 @@ class GitOpsTests(unittest.TestCase):
         self.assertFalse(self.git.ensure_clone("unused", self.dest, "me", "app"))
         self.git.require_checkout(self.dest, "me", "app")
 
+    def test_origin_repo_reads_github_remotes_only(self):
+        self.assertIsNone(self.git.origin_repo(self.dest))
+        self.clone()
+        self.assertIsNone(self.git.origin_repo(self.dest))
+        git("remote", "set-url", "origin", "https://github.com/me/linux-copilot-bot.git", cwd=self.dest)
+        self.assertEqual(self.git.origin_repo(self.dest), ("me", "linux-copilot-bot"))
+        git("remote", "set-url", "origin", "git@github.com:org/bot", cwd=self.dest)
+        self.assertEqual(self.git.origin_repo(self.dest), ("org", "bot"))
+
     def test_askpass_is_executable_even_after_permissions_are_lost(self):
         helper = self.tmp / "git-askpass"
         helper.write_bytes(self.git._cfg.askpass.read_bytes())

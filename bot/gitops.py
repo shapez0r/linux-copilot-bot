@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -60,6 +61,17 @@ class Git:
         origin = self.run("remote", "get-url", "origin", cwd=dest)
         if not same_remote(origin, owner, name):
             raise GitError(f"{dest} is a checkout of a different repository ({redact(origin, self._cfg.secrets)}).")
+
+    def origin_repo(self, dest: Path):
+        """Return (owner, name) of a checkout's github.com origin, or None when it cannot be read."""
+        if not dest.is_dir():
+            return None
+        try:
+            origin = self.run("remote", "get-url", "origin", cwd=dest)
+        except GitError:
+            return None
+        match = re.search(r"github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", origin, re.I)
+        return (match.group(1), match.group(2)) if match else None
 
     def seed_from_template(self, url: str, dest: Path, template: Path, branch: str = "main") -> str:
         """Create and push a repository whose first commit copies template without Git metadata."""

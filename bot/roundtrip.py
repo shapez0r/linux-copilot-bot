@@ -45,14 +45,9 @@ class Cancelled(Exception):
 
 
 def format_timestamp(moment=None) -> str:
-    """Return a local timestamp with second precision, zone name and UTC offset."""
+    """Return the local time as hours:minutes:seconds."""
     moment = moment or datetime.now().astimezone()
-    if moment.tzinfo is None:
-        moment = moment.astimezone()
-    offset = moment.strftime("%z")
-    if len(offset) == 5:
-        offset = offset[:3] + ":" + offset[3:]
-    return f"{moment:%Y-%m-%d %H:%M:%S} {moment.tzname() or 'UTC'}{offset}"
+    return f"{moment:%H:%M:%S}"
 
 
 class _Reasoning(str):

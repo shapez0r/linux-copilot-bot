@@ -11,7 +11,7 @@ from bot.deploy import DeployResult
 from bot.github_api import GitHubError
 from bot.gitops import Git, GitError
 from bot.roundtrip import Cancelled, RoundTripError
-from bot.service import (ADMIN_USER_VIEW_KEYBOARD, ADMIN_VIEW, ADMIN_VIEW_HINT, CHAT_MODE_KEYBOARD,
+from bot.service import (ADMIN_USER_VIEW_KEYBOARD, ADMIN_VIEW, ADMIN_VIEW_HINT, BOT_DEPLOY_NOTE, CHAT_MODE_KEYBOARD,
                          CONFIRM_DELETE, CREATE_APP, CUSTOM_MODEL, DELETE_APP, USER_VIEW,
                          DEPLOY_NOTE, FIX_APP, HELP, KNOWN_MODELS, LIST_APPS, MAIN_KEYBOARD, MODEL_KEYBOARD,
                          NEW_APP_PROMPT, PRIVATE_REPO, PUBLIC_REPO, VISIBILITY_KEYBOARD,
@@ -107,6 +107,7 @@ class FakeDeployer:
         self.ok, self.calls, self.registered, self.running = ok, [], [], []
         self.starts, self.stops, self.unregistered, self.stop_result = [], [], [], False
         self.statuses = {}
+        self.as_service, self.bot_restarts = True, 0
 
     def redeploy(self, app, repo_dir):
         self.calls.append((app, Path(repo_dir)))
@@ -136,6 +137,15 @@ class FakeDeployer:
     def unregister(self, app, repo_dir):
         self.unregistered.append((app, Path(repo_dir)))
         return f"Service: disabled and removed copilot-app-{app}.service."
+
+    def bot_status(self):
+        return "running (pid 7)"
+
+    def bot_runs_as_service(self):
+        return self.as_service
+
+    def restart_bot(self):
+        self.bot_restarts += 1
 
     @staticmethod
     def service_name(app):
@@ -437,19 +447,19 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.gh.deleted, ["me/app"])
         self.assertEqual(self.tg.markups[-1], MAIN_KEYBOARD)
 
-    def test_progress_stages_have_a_current_header_and_zoned_timestamp(self):
-        with patch("bot.roundtrip.format_timestamp", return_value="2026-11-01 16:21:21 UTC+00:00"):
+    def test_progress_stages_have_a_current_header_and_timestamp(self):
+        with patch("bot.roundtrip.format_timestamp", return_value="16:21:21"):
             progress = Progress(self.tg, 1, self.cfg)
             progress.update("Preparing repository...")
         self.assertEqual(self.tg.sent[-1],
                          "Currently doing: Preparing repository...\n\n"
-                         "[2026-11-01 16:21:21 UTC+00:00] Preparing repository...")
+                         "[16:21:21] Preparing repository...")
 
     def test_repository_context_does_not_displace_the_current_header(self):
-        message = "Currently doing: Testing\n\n[2026-11-01 16:21:21 UTC+00:00] ▶ Testing"
+        message = "Currently doing: Testing\n\n[16:21:21] ▶ Testing"
         self.assertEqual(self.bot._repo_progress("me/app", message),
                          "Currently doing: Testing\nRepository: https://github.com/me/app\n\n"
-                         "[2026-11-01 16:21:21 UTC+00:00] ▶ Testing")
+                         "[16:21:21] ▶ Testing")
 
     def test_request_without_repository_asks_to_select_one(self):
         self.say("add a login page")
@@ -1056,12 +1066,100 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("name: ihatepdf — status: stopped", listing)
         self.assertIn("port: not configured — url: not configured", listing)
 
-    def test_list_excludes_the_bot_and_uses_detailed_systemd_status(self):
+    def test_list_shows_the_bot_only_to_admins_and_uses_detailed_systemd_status(self):
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}))
         (self.cfg.repos_dir / "linux-copilot-bot").mkdir(exist_ok=True)
         self.deployer.statuses["eurofish"] = "failed"
-        self.say("/list")
+        self.user_say(42, "/list")
         self.assertIn("name: eurofish — status: failed", self.tg.sent[-1])
+        self.assertIn("name: linux-copilot-bot (this bot, copilot-telegram-bot.service) — status: running (pid 7)",
+                      self.tg.sent[-1])
+        self.assertNotIn("copilot-app-linux-copilot-bot", self.tg.sent[-1])
+        self.user_say(77, "/list")
         self.assertNotIn("linux-copilot-bot", self.tg.sent[-1])
+        self.user_say(42, USER_VIEW)
+        self.user_say(42, "/list")
+        self.assertNotIn("linux-copilot-bot", self.tg.sent[-1])
+
+    def make_bot_checkout(self):
+        """A bot checkout with an ignored .env, cloned from a local origin standing in for GitHub."""
+        origin = make_origin(self.tmp, "bot.git")
+        seed = self.tmp / "bot-seed"
+        git("clone", str(origin), str(seed))
+        (seed / ".gitignore").write_text(".env\n")
+        git("add", "-A", cwd=seed)
+        git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-m", "ignore", cwd=seed)
+        git("push", "origin", "main", cwd=seed)
+        live = self.cfg.repos_dir / "linux-copilot-bot"
+        git("clone", str(origin), str(live))
+        (live / ".env").write_text("TELEGRAM_BOT_TOKEN=secret\n")
+        self.gh.repos["me/linux-copilot-bot"] = {"clone_url": str(origin), "default_branch": "main"}
+        return origin, live
+
+    def test_admin_fixes_the_bot_from_a_separate_clone_and_restarts_it(self):
+        origin, live = self.make_bot_checkout()
+        self.say(FIX_APP)
+        labels = {button["text"] for row in self.tg.markups[-1]["keyboard"] for button in row}
+        self.assertIn("me/linux-copilot-bot", labels)
+        self.say("linux-copilot-bot")
+        self.say("GPT/GPT-9 Pro")
+        self.say(TEMPORARY_CHAT)
+        self.say("Improve the help text")
+        self.assertEqual(len(self.rt.calls), 1)
+        self.assertNotEqual(self.rt.calls[0][0], live)
+        self.assertEqual(self.rt.calls[0][1], "Improve the help text" + BOT_DEPLOY_NOTE)
+        self.assertEqual(git("log", "-1", "--format=%s", cwd=origin), "Copilot: Improve the help text")
+        self.assertTrue((live / "Makefile").is_file())
+        self.assertEqual((live / ".env").read_text(), "TELEGRAM_BOT_TOKEN=secret\n")
+        self.assertEqual(self.deployer.calls, [])
+        self.assertEqual(self.deployer.bot_restarts, 1)
+        self.assertIn("copilot-telegram-bot.service is restarting", self.tg.sent[-2])
+        self.assertEqual(self.gh.created, [])
+        self.assertEqual(self.state.app_owner("me/linux-copilot-bot"), "")
+        self.assertEqual(self.state.repo, "me/linux-copilot-bot")
+
+    def test_bot_fix_outside_systemd_is_not_restarted(self):
+        _, live = self.make_bot_checkout()
+        self.deployer.as_service = False
+        self.say("/fix linux-copilot-bot tidy it")
+        self.assertEqual(self.deployer.bot_restarts, 0)
+        self.assertIn("not running as its systemd service", self.tg.sent[-1])
+        self.assertTrue((live / "Makefile").is_file())
+
+    def test_regular_users_never_see_or_change_the_bot(self):
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}),
+                                   cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        self.make_bot_checkout()
+        self.state.set_active_repo(None, "me/linux-copilot-bot")
+        self.state.set_app_owner("me/linux-copilot-bot", ADMIN_OWNER)
+        for label in (FIX_APP, START_APP):
+            self.user_say(77, label)
+            self.assertNotIn("linux-copilot-bot", str(self.tg.sent[-1]) + str(self.tg.markups[-1]))
+        self.bot._dialogs.clear()
+        self.user_say(77, "/fix linux-copilot-bot change it")
+        self.assertIn("only fix apps you created", self.tg.sent[-1])
+        self.user_say(77, "/app stop linux-copilot-bot")
+        self.assertEqual(self.tg.sent[-1], "App not found: linux-copilot-bot")
+        self.user_say(77, "/new template=linux-copilot-bot copy-app build it")
+        self.assertIn("Template app is not available locally", self.tg.sent[-1])
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.app_routes.return_value = [
+                {"app": "linux-copilot-bot", "hostname": "linux-copilot-bot.kurwalab.fyi",
+                 "service": "http://127.0.0.1:9000"},
+                {"app": "eurofish", "hostname": "eurofish.kurwalab.fyi", "service": "http://127.0.0.1:8080"},
+            ]
+            self.user_say(77, "/list")
+            self.assertNotIn("linux-copilot-bot", self.tg.sent[-1])
+            self.user_say(77, CREATE_APP)
+            self.user_say(77, "member-app")
+            self.user_say(77, "Claude/Opus 9")
+        labels = {button["text"] for row in self.tg.markups[-1]["keyboard"] for button in row}
+        self.assertIn("eurofish", labels)
+        self.assertNotIn("linux-copilot-bot", labels)
+        self.assertEqual(self.rt.calls, [])
+        self.assertEqual(self.gh.created, [])
+        self.assertEqual(self.deployer.bot_restarts, 0)
 
     def test_regular_list_omits_admin_only_folder_and_port(self):
         self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}),

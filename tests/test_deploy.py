@@ -162,6 +162,14 @@ class DeployTests(unittest.TestCase):
         self.assertTrue(self.deployer.is_bot_repo(self.bot_repo))
         self.assertEqual(self.deployer.running_apps(), [("app", 5)])
 
+    def test_bot_status_and_restart_use_the_bot_service(self):
+        self.deployer.states[BOT_SERVICE] = ServiceState("loaded", "active", "running", 9)
+        self.assertEqual(self.deployer.bot_status(), "running (pid 9)")
+        self.deployer.restart_bot()
+        self.assertIn(("restart", "--no-block", BOT_SERVICE), self.deployer.calls)
+        self.assertTrue(Deployer.bot_runs_as_service({"INVOCATION_ID": "abc"}))
+        self.assertFalse(Deployer.bot_runs_as_service({}))
+
     def test_registration_removes_only_the_matching_reboot_entry(self):
         self.makefile()
         line = f"@reboot cd {self.repo} && git pull && make run"
