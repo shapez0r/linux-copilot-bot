@@ -11,10 +11,11 @@ from bot.deploy import DeployResult
 from bot.github_api import GitHubError
 from bot.gitops import Git, GitError
 from bot.roundtrip import Cancelled, RoundTripError
-from bot.service import (CONFIRM_DELETE, CREATE_APP, CUSTOM_MODEL, DELETE_APP, DEPLOY_NOTE,
-                         FIX_APP, HELP, KNOWN_MODELS, LIST_APPS, MAIN_KEYBOARD, MODEL_KEYBOARD,
+from bot.service import (CHAT_MODE_KEYBOARD, CONFIRM_DELETE, CREATE_APP, CUSTOM_MODEL, DELETE_APP,
+                         DEPLOY_NOTE, FIX_APP, HELP, KNOWN_MODELS, LIST_APPS, MAIN_KEYBOARD, MODEL_KEYBOARD,
                          NEW_APP_PROMPT, PRIVATE_REPO, PUBLIC_REPO, VISIBILITY_KEYBOARD,
-                         USER_HELP, USER_KEYBOARD, REGISTER_SERVICES, START_APP, STOP_APP, Bot, Progress)
+                         REGULAR_CHAT, TEMPORARY_CHAT, USER_HELP, USER_KEYBOARD, REGISTER_SERVICES,
+                         START_APP, STOP_APP, Bot, Progress)
 from bot.state import ADMIN_OWNER, State, telegram_owner
 
 
@@ -254,6 +255,11 @@ class ServiceTests(unittest.TestCase):
             self.say("eurofish")
             self.assertIn("Choose a private or public repository", self.tg.sent[-1])
             self.say(PRIVATE_REPO)
+            self.assertIn("Choose the Copilot chat type", self.tg.sent[-1])
+            self.assertEqual(self.tg.markups[-1], CHAT_MODE_KEYBOARD)
+            self.say("eurofish")
+            self.assertIn("Choose a temporary or regular chat", self.tg.sent[-1])
+            self.say(REGULAR_CHAT)
             self.assertIn("styling, architecture and stack", self.tg.sent[-1])
             self.say("Build a task board with a different color palette")
         self.assertEqual(self.gh.created, [("me/menu-app", True)])
@@ -261,6 +267,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.rt.calls[0][1],
                          NEW_APP_PROMPT.format(port=8081) +
                          "Build a task board with a different color palette" + DEPLOY_NOTE)
+        self.assertEqual(self.rt.calls[0][4], False)
         self.assertTrue(any("App: https://menu-app.kurwalab.fyi" in message for message in self.tg.sent))
         self.assertEqual(self.tg.markups[-1], MAIN_KEYBOARD)
 
@@ -284,8 +291,10 @@ class ServiceTests(unittest.TestCase):
             self.say("Other/Model 1")
             self.say("eurofish")
             self.say(PUBLIC_REPO)
+            self.say(TEMPORARY_CHAT)
             self.say("Build it")
         self.assertEqual(self.gh.created, [("me/custom-model-app", False)])
+        self.assertEqual(self.rt.calls[0][4], True)
         self.assertEqual(self.rt.calls[0][2], "Other/Model 1")
 
     def test_regular_user_create_app_menu_skips_visibility_and_creates_a_public_repository(self):
@@ -306,6 +315,8 @@ class ServiceTests(unittest.TestCase):
             self.assertIn("styling, architecture and stack", self.tg.sent[-1])
             self.user_say(77, "Build it")
         self.assertEqual(self.gh.created, [("me/member-menu-app", False)])
+        self.assertIsNone(self.rt.calls[0][4])
+        self.assertFalse(any("chat type" in message for message in self.tg.sent))
 
     def test_fix_app_menu_selects_an_app_accepts_a_prompt_and_restores_the_menu(self):
         self.state.repo = "me/app"
@@ -314,12 +325,35 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.rt.model_checks, 1)
         self.assertIn("will fix the app", self.tg.sent[-1])
         self.say("GPT/GPT-9 Pro")
+        self.assertEqual(self.tg.markups[-1], CHAT_MODE_KEYBOARD)
+        self.say(TEMPORARY_CHAT)
+        self.assertIn("Describe what should be fixed", self.tg.sent[-1])
         self.say("Improve the empty state")
+        self.assertEqual(self.rt.calls[0][4], True)
         self.assertEqual(self.rt.calls[0][0], self.dest)
         self.assertEqual(self.rt.calls[0][1], "Improve the empty state" + DEPLOY_NOTE)
         self.assertEqual(self.rt.calls[0][2], "GPT/GPT-9 Pro")
         self.assertEqual(self.state.model, "GPT/GPT-6")
         self.assertEqual(self.tg.markups[-1], MAIN_KEYBOARD)
+
+    def test_fix_app_menu_offers_a_regular_chat_to_admins(self):
+        self.say(FIX_APP)
+        self.say("me/app")
+        self.say("GPT/GPT-9 Pro")
+        self.say(REGULAR_CHAT)
+        self.say("Keep this chat")
+        self.assertEqual(self.rt.calls[0][3:], (None, False))
+
+    def test_regular_user_fix_app_menu_skips_the_chat_type(self):
+        self.bot.cfg = make_config(self.tmp, user_ids=frozenset({77}))
+        self.state.set_app_owner("me/app", telegram_owner(77))
+        self.user_say(77, FIX_APP)
+        self.user_say(77, "me/app")
+        self.user_say(77, "GPT/GPT-9 Pro")
+        self.assertIn("Describe what should be fixed", self.tg.sent[-1])
+        self.assertNotEqual(self.tg.markups[-1], CHAT_MODE_KEYBOARD)
+        self.user_say(77, "Improve it")
+        self.assertIsNone(self.rt.calls[0][4])
 
     def test_cancel_during_the_model_check_stops_it_and_closes_the_dialog(self):
         started, release = threading.Event(), threading.Event()
@@ -517,7 +551,7 @@ class ServiceTests(unittest.TestCase):
         for options in ('name="fresh-app" public', "private name='fresh-app'",
                         'template=eurofish name=fresh-app model=GPT/GPT-6'):
             with self.subTest(options=options):
-                remaining, private, model, template, name, prompt, error = Bot._new_options(
+                remaining, private, temporary_chat, model, template, name, prompt, error = Bot._new_options(
                     options + ' build "a page" with name="Title"')
                 self.assertEqual(name, "fresh-app")
                 self.assertEqual(remaining, 'build "a page" with name="Title"')
@@ -529,8 +563,30 @@ class ServiceTests(unittest.TestCase):
                 "name=fresh-app prompt='" + request + "' public template=eurofish",
                 "prompt='" + request + "' model=GPT/GPT-6 name=fresh-app"):
             with self.subTest(options=options):
-                remaining, private, model, template, name, prompt, error = Bot._new_options(options)
+                remaining, private, temporary_chat, model, template, name, prompt, error = Bot._new_options(options)
                 self.assertEqual((remaining, name, prompt, error), ("", "fresh-app", request, ""))
+
+    def test_new_chat_type_option_is_parsed_in_any_order(self):
+        for options, expected in (("tempchat name=fresh-app", True),
+                                  ("name=fresh-app public notempchat", False),
+                                  ("name=fresh-app", None)):
+            with self.subTest(options=options):
+                remaining, private, temporary_chat, model, template, name, prompt, error = Bot._new_options(
+                    options + " build it")
+                self.assertEqual((remaining, temporary_chat, name, error), ("build it", expected, "fresh-app", ""))
+
+    def test_new_chat_type_option_is_passed_for_admins_and_refused_for_regular_users(self):
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}), user_ids=frozenset({77}),
+                                   cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
+                                   cloudflare_zone_id="b" * 32)
+        self.user_say(77, "/new notempchat member-app build it")
+        self.assertIn("Only kurwalab.fyi admins can choose the Copilot chat type", self.tg.sent[-1])
+        self.assertEqual(self.gh.created, [])
+        with patch("bot.service.CloudflareRoutes") as routes:
+            routes.return_value.next_port.return_value = 8084
+            routes.return_value.prepare.return_value = "Tunnel configured."
+            self.say("/new notempchat saved-app build it")
+        self.assertEqual(self.rt.calls[0][4], False)
 
     def test_new_options_accept_smart_quotes_and_a_final_unquoted_prompt(self):
         for options in (
@@ -541,7 +597,7 @@ class ServiceTests(unittest.TestCase):
                 'model=“Claude/Opus 5.5” template=“simple-arkanoid” '
                 'name=“seabattle-game” prompt=Simple sea battle game'):
             with self.subTest(options=options):
-                remaining, private, model, template, name, prompt, error = Bot._new_options(options)
+                remaining, private, temporary_chat, model, template, name, prompt, error = Bot._new_options(options)
                 self.assertEqual(remaining, "")
                 self.assertIsNone(private)
                 self.assertEqual(model, "Claude/Opus 5.5")

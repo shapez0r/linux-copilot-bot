@@ -59,6 +59,8 @@ PRIVATE_REPO = "🔒 Private repository"
 PUBLIC_REPO = "🌐 Public repository"
 CONFIRM_DELETE = "✅ Yes, delete it"
 KEEP_APP = "↩️ No, keep it"
+TEMPORARY_CHAT = "🕶 Temporary chat"
+REGULAR_CHAT = "💾 Regular chat"
 
 
 def _keyboard(rows):
@@ -97,16 +99,17 @@ ROUTES_KEYBOARD = _keyboard([
 ])
 CANCEL_KEYBOARD = _keyboard([[CANCEL_ACTION], [BACK_TO_MENU]])
 VISIBILITY_KEYBOARD = _keyboard([[PRIVATE_REPO, PUBLIC_REPO], [CANCEL_ACTION], [BACK_TO_MENU]])
+CHAT_MODE_KEYBOARD = _keyboard([[TEMPORARY_CHAT, REGULAR_CHAT], [CANCEL_ACTION], [BACK_TO_MENU]])
 
 NEW_USAGE = (
-    "Usage: /new [public|private] [model=<provider/model>] [template=<app>] "
+    "Usage: /new [public|private] [tempchat|notempchat] [model=<provider/model>] [template=<app>] "
     'name="<name|owner/name>" prompt="<request>"'
 )
 
 HELP = """Use the buttons below to create and manage apps. You can also send a request as plain text to change the active repository, commit, push and redeploy it with `make run`.
 
 /menu - show the app-management menu
-/new [public|private] [model=<provider/model>] [template=<app>] name="<name|owner/name>" prompt="<request>" - create, build, deploy and publish a new app (private by default)
+/new [public|private] [tempchat|notempchat] [model=<provider/model>] [template=<app>] name="<name|owner/name>" prompt="<request>" - create, build, deploy and publish a new app (private by default)
 /delete <name|owner/name> - permanently delete an app service, GitHub repository, local checkout and tunnel route
 /repo [public|private] <name|owner/name> - select a repository; a missing one is created from the eurofish reference app
 /repo - show the active repository
@@ -515,7 +518,11 @@ class Bot:
                 self.say_keyboard(chat_id, "Choose a private or public repository.", VISIBILITY_KEYBOARD)
                 return
             data["private"] = text == PRIVATE_REPO
-            self._ask_create_prompt(chat_id, dialog)
+            self._ask_chat_mode(chat_id, dialog)
+            return
+        if step == "chat-mode":
+            if self._handle_chat_mode(chat_id, dialog, text):
+                self._ask_create_prompt(chat_id, dialog)
             return
         if step == "prompt":
             request = text.strip()
@@ -526,7 +533,8 @@ class Bot:
             started = self._spawn(
                 chat_id,
                 lambda: self._new_app(chat_id, data["ref"], request, data["private"],
-                                      data["model"], data["template"], dialog.get("user_id")),
+                                      data["model"], data["template"], dialog.get("user_id"),
+                                      data.get("temporary_chat")),
                 after=lambda: self.show_menu(chat_id, "App creation finished. Choose the next action.",
                                              dialog.get("user_id")),
                 user_id=dialog.get("user_id"),
@@ -543,6 +551,26 @@ class Bot:
             "include any changes you want in this prompt.",
             CANCEL_KEYBOARD,
         )
+
+    def _ask_chat_mode(self, chat_id: int, dialog: dict):
+        """Let an administrator choose whether the Copilot chat is kept in the Copilot UI."""
+        dialog["step"] = "chat-mode"
+        default = TEMPORARY_CHAT if self.cfg.temporary_chat else REGULAR_CHAT
+        self.say_keyboard(chat_id, "Choose the Copilot chat type. A temporary chat is not saved in Copilot; "
+                                   f"a regular chat stays in your Copilot chat history. Default: {default}.",
+                          CHAT_MODE_KEYBOARD)
+
+    def _handle_chat_mode(self, chat_id: int, dialog: dict, text: str) -> bool:
+        """Store the chosen chat type; returns False while the dialog still needs a valid choice."""
+        if text not in (TEMPORARY_CHAT, REGULAR_CHAT):
+            self.say_keyboard(chat_id, "Choose a temporary or regular chat.", CHAT_MODE_KEYBOARD)
+            return False
+        dialog["data"]["temporary_chat"] = text == TEMPORARY_CHAT
+        return True
+
+    def _ask_fix_prompt(self, chat_id: int, dialog: dict):
+        dialog["step"] = "prompt"
+        self.say_keyboard(chat_id, "Describe what should be fixed or changed in this app.", CANCEL_KEYBOARD)
 
     def _begin_model_selection(self, chat_id: int, dialog: dict):
         """Check Copilot's Claude and GPT submenus before offering a model for this dialog."""
@@ -650,9 +678,14 @@ class Bot:
             return
         if dialog["step"] in ("model", "custom-model"):
             if self._handle_model_choice(chat_id, dialog, text):
-                dialog["step"] = "prompt"
-                self.say_keyboard(chat_id, "Describe what should be fixed or changed in this app.",
-                                  CANCEL_KEYBOARD)
+                if self._is_admin(user_id):
+                    self._ask_chat_mode(chat_id, dialog)
+                else:
+                    self._ask_fix_prompt(chat_id, dialog)
+            return
+        if dialog["step"] == "chat-mode":
+            if self._handle_chat_mode(chat_id, dialog, text):
+                self._ask_fix_prompt(chat_id, dialog)
             return
         if dialog["step"] != "prompt":
             return
@@ -661,9 +694,10 @@ class Bot:
             self.say(chat_id, "Enter a nonempty fix request.")
             return
         repo, model = dialog["data"]["repo"], dialog["data"]["model"]
+        temporary_chat = dialog["data"].get("temporary_chat")
         self._dialogs.pop(chat_id, None)
         started = self._spawn(chat_id, lambda: self._request(chat_id, repo, request, user_id=user_id,
-                                                             model=model),
+                                                             model=model, temporary_chat=temporary_chat),
                               after=lambda: self.show_menu(chat_id, "Fix finished. Choose the next action.",
                                                            user_id),
                               user_id=user_id)
@@ -1043,12 +1077,13 @@ class Bot:
 
     @staticmethod
     def _new_options(arg: str):
-        """Read leading visibility, name, model, template and prompt options in any order.
+        """Read leading visibility, chat type, name, model, template and prompt options in any order.
 
-        Visibility is None when neither public nor private is given.
+        Visibility is None when neither public nor private is given; the chat type is None when neither
+        tempchat nor notempchat is given.
         """
         remaining = arg.lstrip()
-        private, model, template, name, prompt = None, None, None, None, None
+        private, temporary_chat, model, template, name, prompt = None, None, None, None, None, None
         while remaining:
             parts = remaining.split(None, 1)
             option = parts[0].lower()
@@ -1056,30 +1091,34 @@ class Bot:
                 private = option == "private"
                 remaining = parts[1].lstrip() if len(parts) > 1 else ""
                 continue
+            if option in ("tempchat", "notempchat"):
+                temporary_chat = option == "tempchat"
+                remaining = parts[1].lstrip() if len(parts) > 1 else ""
+                continue
             match = re.match(
                 r'''name=(?:"([^"]*)"|'([^']*)'|“([^”]*)”|‘([^’]*)’|([^\s'"“”‘’]+))(?=\s|$)''',
                 remaining, flags=re.IGNORECASE)
             if match:
                 if name is not None:
-                    return remaining, private, None, None, None, None, "Specify name only once."
+                    return remaining, private, None, None, None, None, None, "Specify name only once."
                 name = next(value for value in match.groups() if value is not None).strip()
                 if not name or len(name.split()) != 1:
-                    return remaining, private, None, None, None, None, 'Use name="<name|owner/name>" without spaces.'
+                    return remaining, private, None, None, None, None, None, 'Use name="<name|owner/name>" without spaces.'
                 remaining = remaining[match.end():].lstrip()
                 continue
             if option.startswith("name="):
-                return remaining, private, None, None, None, None, 'Use name="<name|owner/name>".'
+                return remaining, private, None, None, None, None, None, 'Use name="<name|owner/name>".'
             match = re.match(
                 r'''model=(?:"([^"]*)"|'([^']*)'|“([^”]*)”|‘([^’]*)’|([^\s'"“”‘’]+))(?=\s|$)''',
                 remaining, flags=re.IGNORECASE)
             if match:
                 if model is not None:
-                    return remaining, private, None, None, None, None, "Specify model only once."
+                    return remaining, private, None, None, None, None, None, "Specify model only once."
                 model = next(value for value in match.groups() if value is not None).strip()
                 remaining = remaining[match.end():].lstrip()
                 continue
             if option.startswith("model="):
-                return remaining, private, None, None, None, None, (
+                return remaining, private, None, None, None, None, None, (
                     'Use model=<provider/model>; quote names containing spaces, such as '
                     'model="Claude/Opus 5.5".'
                 )
@@ -1088,37 +1127,40 @@ class Bot:
                 remaining, flags=re.IGNORECASE)
             if match:
                 if template is not None:
-                    return remaining, private, None, None, None, None, "Specify template only once."
+                    return remaining, private, None, None, None, None, None, "Specify template only once."
                 template = next(value for value in match.groups() if value is not None).strip()
                 remaining = remaining[match.end():].lstrip()
                 continue
             if option.startswith("template="):
-                return remaining, private, None, None, None, None, "Use template=<app>, such as template=eurofish."
+                return remaining, private, None, None, None, None, None, "Use template=<app>, such as template=eurofish."
             match = re.match(
                 r'''prompt=(?:"([^"]*)"|'([^']*)'|“([^”]*)”|‘([^’]*)’|([^\s'"“”‘’]+))(?=\s|$)''',
                 remaining, flags=re.IGNORECASE)
             if match:
                 if prompt is not None:
-                    return remaining, private, None, None, None, None, "Specify prompt only once."
+                    return remaining, private, None, None, None, None, None, "Specify prompt only once."
                 prompt = next(value for value in match.groups() if value is not None).strip()
                 if not prompt:
-                    return remaining, private, None, None, None, None, 'Use prompt="<request>" with a nonempty request.'
+                    return remaining, private, None, None, None, None, None, 'Use prompt="<request>" with a nonempty request.'
                 remaining = remaining[match.end():].lstrip()
                 if match.group(5) is not None and remaining:
                     if re.search(r"(?:^|\s)prompt=", remaining, flags=re.IGNORECASE):
-                        return remaining, private, None, None, None, None, "Specify prompt only once."
+                        return remaining, private, None, None, None, None, None, "Specify prompt only once."
                     prompt = f"{prompt} {remaining}"
                     remaining = ""
                 continue
             if option.startswith("prompt="):
-                return remaining, private, None, None, None, None, 'Use prompt="<request>" with a nonempty request.'
+                return remaining, private, None, None, None, None, None, 'Use prompt="<request>" with a nonempty request.'
             break
-        return remaining, private, model, template, name, prompt, ""
+        return remaining, private, temporary_chat, model, template, name, prompt, ""
 
     def cmd_new(self, chat_id: int, arg: str, user_id=None):
-        arg, private, model, template, name, prompt, error = self._new_options(arg)
+        arg, private, temporary_chat, model, template, name, prompt, error = self._new_options(arg)
         if error:
             self.say(chat_id, error)
+            return
+        if temporary_chat is not None and not self._is_admin(user_id):
+            self.say(chat_id, "Only kurwalab.fyi admins can choose the Copilot chat type; omit tempchat and notempchat.")
             return
         if model is not None and not self._valid_model(model):
             self.say(chat_id, "Use a provider/model pair such as GPT/GPT-6.")
@@ -1150,7 +1192,7 @@ class Bot:
             return
         ref, request = parts[0], parts[1].strip()
         self._spawn(chat_id, lambda: self._new_app(
-            chat_id, ref, request, private, model, template or NEW_REPO_TEMPLATE, user_id),
+            chat_id, ref, request, private, model, template or NEW_REPO_TEMPLATE, user_id, temporary_chat),
             user_id=user_id)
 
     def cmd_delete(self, chat_id: int, arg: str):
@@ -1291,7 +1333,7 @@ class Bot:
                  + (" Send your next message describing what to build." if new_only else ""))
 
     def _new_app(self, chat_id: int, ref: str, request: str, private: bool, model=None,
-                  template: str = NEW_REPO_TEMPLATE, user_id=None):
+                  template: str = NEW_REPO_TEMPLATE, user_id=None, temporary_chat=None):
         owner, name = parse_repo_ref(ref, self._owner_default())
         if not self._valid_route(name):
             raise RepoError("App names must be lowercase DNS labels containing only letters, digits and hyphens.")
@@ -1319,7 +1361,8 @@ class Bot:
         try:
             result = self.roundtrip.run(
                 dest, prompt, model or self.state.model,
-                lambda stage, msg: progress.update(self._repo_progress(full, msg), stage), self._cancel)
+                lambda stage, msg: progress.update(self._repo_progress(full, msg), stage), self._cancel,
+                temporary_chat=temporary_chat)
         except Cancelled:
             progress.flush()
             self._warn_dirty(chat_id, dest, full, admin)
