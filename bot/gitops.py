@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from .config import Config, redact
@@ -137,14 +138,28 @@ class Git:
     def is_dirty(self, dest: Path) -> bool:
         return bool(self.run("status", "--porcelain", cwd=dest))
 
-    def commit_and_push(self, dest: Path, prompt: str):
-        """Commit all changes and push the branch; returns (short sha, branch) or None without changes."""
+    def commit_and_push(self, dest: Path, prompt: str, output: str = ""):
+        """Commit all changes and push the branch; returns (short sha, branch) or None without changes.
+
+        The message holds the request and Copilot's complete final output, so later round-trips can read
+        what each change did from the Git history.
+        """
         self.run("add", "-A", cwd=dest)
         if not self.run("status", "--porcelain", cwd=dest):
             return None
         first = " ".join(prompt.split())
         subject = "Copilot: " + (first if len(first) <= 60 else first[:59].rstrip() + "\u2026")
-        self.run("commit", "-m", subject, "-m", prompt.strip()[:2000], cwd=dest)
+        message = f"{subject}\n\n{prompt.strip()[:2000]}"
+        output = redact((output or "").strip(), self._cfg.secrets)
+        if output:
+            message += f"\n\nCopilot output:\n{output}"
+        # A message file avoids command-line length limits for long outputs.
+        self._cfg.state_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self._cfg.state_dir,
+                                         prefix="commit-message-", suffix=".txt") as file:
+            file.write(message + "\n")
+            file.flush()
+            self.run("commit", "--cleanup=whitespace", "-F", file.name, cwd=dest)
         branch = self.run("symbolic-ref", "--short", "HEAD", cwd=dest)
         self.run("push", "origin", branch, cwd=dest)
         return self.run("rev-parse", "--short", "HEAD", cwd=dest), branch

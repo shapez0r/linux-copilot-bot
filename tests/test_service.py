@@ -923,6 +923,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.rt.calls[0][2], "GPT/GPT-6")
         self.assertEqual(self.deployer.calls, [("app", self.dest)])
         self.assertEqual(git("log", "-1", "--format=%s", cwd=self.origin), "Copilot: add a Makefile")
+        self.assertTrue(git("log", "-1", "--format=%b", cwd=self.origin).endswith("Copilot output:\nAdded it."))
         report = self.tg.sent[-1]
         self.assertIn("pushed to main", report)
         self.assertIn("1 file changed", report)

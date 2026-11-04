@@ -28,6 +28,18 @@ class GitOpsTests(unittest.TestCase):
         self.assertEqual(git("rev-parse", "--short", "main", cwd=self.origin), sha)
         self.assertEqual(git("log", "-1", "--format=%an|%s", cwd=self.origin), "Bot|Copilot: Add the app with details")
 
+    def test_commit_message_holds_the_request_and_complete_copilot_output(self):
+        self.clone()
+        (self.dest / "app.py").write_text("print(1)\n")
+        output = "# Summary\n" + "Changed app.py with gh-secret. " * 6000
+        self.git.commit_and_push(self.dest, "Add the app", output)
+        body = git("log", "-1", "--format=%B", cwd=self.origin)
+        self.assertTrue(body.startswith("Copilot: Add the app\n\nAdd the app\n\nCopilot output:\n# Summary\n"))
+        self.assertIn("Changed app.py with ***.", body)
+        self.assertNotIn("gh-secret", body)
+        self.assertEqual(body.count("Changed app.py"), 6000)
+        self.assertEqual(list(self.git._cfg.state_dir.glob("commit-message-*")), [])
+
     def test_seed_from_template_creates_one_initial_commit_without_source_git_metadata(self):
         template = self.tmp / "eurofish"
         (template / "src").mkdir(parents=True)

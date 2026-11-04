@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Archive committed Git files, request Copilot changes, and safely replace the worktree."""
+"""Archive committed Git files and history, request Copilot changes, and safely replace the worktree."""
 from __future__ import annotations
 import argparse, atexit, base64, hashlib, json, os, re, shutil, subprocess, sys, tempfile, threading, time, zipfile
 from pathlib import Path, PurePosixPath
@@ -7,9 +7,11 @@ from pathlib import Path, PurePosixPath
 DEFAULT_URL = "https://m365.cloud.microsoft/chat/"
 BASE_PROMPT = (
     "Here is my repository archive. The attached .txt file contains ZIP bytes. "
-    "Rename it to .zip and extract it. Make only the requested fixes, preserve all other files, "
+    "Rename it to .zip and extract it. It includes the .git directory: read the Git history (for example "
+    "with git log), whose commit messages hold earlier requests and Copilot outputs, to understand previous "
+    "changes, but do not create commits. Make only the requested fixes, preserve all other files, "
     "then return the complete fixed repository as a downloadable ZIP file. "
-    "Do not include a .git directory. Read and follow AGENTS.md and "
+    "Do not include a .git directory in the returned ZIP. Read and follow AGENTS.md and "
     ".github/copilot-instructions.md when present. After changes, review README files and "
     "comments in all repository files: keep README content logically correct and aligned "
     "with the repository state, and comments concise, with no historical references. "
@@ -20,9 +22,11 @@ FOLLOWUP_PROMPT = (
     "Here is the current state of my repository archive for this follow-up request. It supersedes any "
     "earlier archive in this chat (your sandbox was reset, so earlier files are no longer available). "
     "The attached .txt file contains ZIP bytes. "
-    "Rename it to .zip and extract it. Make only the requested fixes, preserve all other files, "
+    "Rename it to .zip and extract it. It includes the .git directory: read the Git history (for example "
+    "with git log), whose commit messages hold earlier requests and Copilot outputs, to understand previous "
+    "changes, but do not create commits. Make only the requested fixes, preserve all other files, "
     "then return the complete fixed repository as a downloadable ZIP file. "
-    "Do not include a .git directory. Read and follow AGENTS.md and "
+    "Do not include a .git directory in the returned ZIP. Read and follow AGENTS.md and "
     ".github/copilot-instructions.md when present. After changes, review README files and "
     "comments in all repository files: keep README content logically correct and aligned "
     "with the repository state, and comments concise, with no historical references. "
@@ -1142,15 +1146,43 @@ def ensure_clean(root: Path, allow_dirty: bool):
         raise SystemExit("Worktree is dirty. Commit/stash first, or explicitly use --allow-dirty.\n" + dirty)
 
 
+# Git metadata that is not history (sample hooks) or that records local paths (reflogs) is not uploaded.
+HISTORY_SKIP = {"hooks", "logs"}
+
+
+def add_history(root: Path, zip_path: Path):
+    """Append a .git directory holding the checked-out branch's history, without remotes or local hooks."""
+    with tempfile.TemporaryDirectory(prefix="copilot-history-") as temporary:
+        clone = Path(temporary) / "repo"
+        run(["git", "clone", "--quiet", "--no-local", "--no-checkout", str(root), str(clone)])
+        run(["git", "remote", "remove", "origin"], cwd=clone)
+        # Index the committed tree so git status in the extracted archive matches HEAD.
+        run(["git", "read-tree", "HEAD"], cwd=clone)
+        git_dir = clone / ".git"
+        count = 0
+        with zipfile.ZipFile(zip_path, "a", zipfile.ZIP_DEFLATED) as z:
+            for path in sorted(git_dir.rglob("*")):
+                relative = path.relative_to(git_dir)
+                if relative.parts[0] in HISTORY_SKIP or path.is_symlink() or not path.is_file():
+                    continue
+                z.write(path, ".git/" + relative.as_posix())
+                count += 1
+    return count
+
+
 def make_archive(root: Path, out_txt: Path):
+    """Archive the committed HEAD plus its Git history; returns (sha256, worktree entries, .git files)."""
     zip_path = out_txt.with_suffix(".zip")
     run(["git", "archive", "--format=zip", f"--output={zip_path}", "HEAD"], cwd=root)
-    zip_path.replace(out_txt)
-    with zipfile.ZipFile(out_txt) as z:
+    with zipfile.ZipFile(zip_path) as z:
         names = z.namelist()
         if not names or any(n == ".git" or n.startswith(".git/") for n in names):
             raise SystemExit("Invalid source archive")
-    return hashlib.sha256(out_txt.read_bytes()).hexdigest(), len(names)
+    history = add_history(root, zip_path)
+    if not history:
+        raise SystemExit("Invalid source archive: no Git history")
+    zip_path.replace(out_txt)
+    return hashlib.sha256(out_txt.read_bytes()).hexdigest(), len(names), history
 
 
 def safe_members(z: zipfile.ZipFile):
@@ -2070,8 +2102,8 @@ def cmd_fix(args):
 def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout):
     source_txt = work / f"{root.name}-{time.strftime('%Y%m%d-%H%M%S')}.zip.txt"
     emit_status("archiving", "Creating committed repository archive...")
-    source_hash, count = make_archive(root, source_txt)
-    emit_status("archiving", f"Archive ready ({count} entries).")
+    source_hash, count, history = make_archive(root, source_txt)
+    emit_status("archiving", f"Archive ready ({count} entries and {history} Git history files).")
     chat_url = getattr(args, "chat_url", None)
     continuing = bool(chat_url)
     # A saved chat is only created when Temporary chat is off; its URL is reported for follow-ups.

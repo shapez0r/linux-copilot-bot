@@ -1634,7 +1634,7 @@ class Bot:
                 self._warn_dirty(chat_id, dest, full, admin)
                 raise
             progress.update(f"{full}: committing and pushing...")
-            pushed = self.git.commit_and_push(dest, request)
+            pushed = self.git.commit_and_push(dest, request, result.get("chat_response") or "")
             if pushed is None:
                 progress.flush()
                 output = (result.get("chat_response") or "(no final text returned)").strip()
@@ -1786,7 +1786,7 @@ class Bot:
             self._warn_dirty(chat_id, dest, full, admin)
             raise
         progress.update(f"{full}: committing and pushing...")
-        pushed = self.git.commit_and_push(dest, request)
+        pushed = self.git.commit_and_push(dest, request, result.get("chat_response") or "")
         if pushed is None:
             progress.flush()
             self.say(chat_id, f"Copilot returned no changes to commit for {full}; nothing was deployed.")
@@ -1823,7 +1823,7 @@ class Bot:
                                             self._cancel, show_browser, temporary_chat,
                                             attachments=files)
             progress.update(f"{full}: committing and pushing...")
-            pushed = self.git.commit_and_push(dest, request)
+            pushed = self.git.commit_and_push(dest, request, result.get("chat_response") or "")
         if pushed is None:
             progress.flush()
             self.say(chat_id, f"Copilot returned no changes to commit for {full}; nothing was deployed.")

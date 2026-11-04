@@ -23,6 +23,8 @@ class CompletionTests(unittest.TestCase):
                 self.assertIn('README', prompt)
                 self.assertIn('comments in all repository files', prompt)
                 self.assertIn('no historical references', prompt)
+                self.assertIn('git log', prompt)
+                self.assertIn('Do not include a .git directory in the returned ZIP', prompt)
                 self.assertTrue(prompt.endswith('To fix: Update the tests'))
 
     def test_final_merge_clears_active_flags_and_preserves_steps(self):
@@ -228,6 +230,43 @@ class CompletionTests(unittest.TestCase):
         self.assertNotIn('read_screen(page, sel, prompt)', source[filled:submit])
         self.assertLess(submit, initialize)
         self.assertLess(initialize, first_snapshot)
+
+
+class ArchiveTests(unittest.TestCase):
+    def test_archive_includes_history_without_remotes_hooks_or_reflogs(self):
+        import subprocess
+        import zipfile
+
+        def git(*args, cwd):
+            return subprocess.run(['git', *args], cwd=cwd, check=True, text=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.strip()
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'repo'
+            root.mkdir()
+            git('init', '-b', 'main', cwd=root)
+            git('remote', 'add', 'origin', 'https://github.com/me/app.git', cwd=root)
+            for index in range(2):
+                (root / 'app.txt').write_text(f'version {index}\n')
+                git('add', '-A', cwd=root)
+                git('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-m',
+                    f'Copilot: change {index}\n\nCopilot output:\nDone {index}.', cwd=root)
+            out = Path(temporary) / 'repo.zip.txt'
+            _, count, history = rt.make_archive(root, out)
+            self.assertEqual(count, 1)
+            self.assertGreater(history, 0)
+            extracted = Path(temporary) / 'extracted'
+            with zipfile.ZipFile(out) as z:
+                names = z.namelist()
+                z.extractall(extracted)
+            self.assertIn('app.txt', names)
+            self.assertFalse(any(n.startswith(('.git/hooks/', '.git/logs/')) for n in names))
+            self.assertEqual(git('log', '--format=%B', cwd=extracted).count('Copilot output:'), 2)
+            self.assertEqual(git('remote', cwd=extracted), '')
+            self.assertEqual(git('status', '--porcelain', cwd=extracted), '')
+            # Returned archives must still not carry Git metadata.
+            with zipfile.ZipFile(out) as z, self.assertRaisesRegex(SystemExit, 'contains .git'):
+                rt.safe_members(z)
 
 
 class DownloadFlowTests(unittest.TestCase):
