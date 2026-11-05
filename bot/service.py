@@ -669,6 +669,13 @@ class Bot:
             self._handle_dialog(chat_id, text, user_id)
             return
         if not text.startswith("/"):
+            name = self._bare_app_name(text, user_id)
+            if name:
+                self.show_menu(chat_id, f"{name} is an app name, not a change request, so nothing was started. "
+                                        "The guided step that asked for it is no longer open, for example "
+                                        f"because the bot restarted. To fix this app, choose {FIX_APP} again.",
+                               user_id)
+                return
             self.start_request(chat_id, "", text, user_id=user_id)
             return
         parts = re.split(r"\s+", text, maxsplit=1)
@@ -799,6 +806,30 @@ class Bot:
             self._dialogs[chat_id] = {"flow": "route-delete", "step": "name", "data": {},
                                       "user_id": user_id}
             self.say_keyboard(chat_id, "Enter the lowercase subdomain of the route to delete.", CANCEL_KEYBOARD)
+
+    def _bare_app_name(self, text: str, user_id=None) -> str:
+        """Return the app named by text that holds only an app name or repository the sender can see.
+
+        Such text answers a guided-flow question whose dialog is gone; it is never run as a request.
+        """
+        value = text.strip().lower()
+        if not value or any(char.isspace() for char in value):
+            return ""
+        admin = self._is_admin(user_id)
+        repos = list(self.state.app_owners) if admin else self.state.repos_for_owner(telegram_owner(user_id))
+        repos.append(self.state.get_active_repo(user_id, admin))
+        names = {}
+        for repo in filter(None, repos):
+            short = repo.rsplit("/", 1)[-1]
+            if admin or not self._is_bot_app(short):
+                names[repo.lower()] = names[short.lower()] = short
+        try:
+            names.update({path.name.lower(): path.name for path in self._app_directories()})
+        except OSError:
+            pass
+        if admin:
+            names[BOT_APP] = BOT_APP
+        return names.get(value, "")
 
     def _job_blocks_dialog(self, chat_id: int, user_id=None) -> bool:
         """Refuse to open a guided flow while the user's own session still runs."""

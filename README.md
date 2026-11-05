@@ -42,7 +42,7 @@ A VM usually has no display. Either run `make login` over `ssh -X` (or a VNC ses
 
 ### Running as a service
 
-The first foreground `make run` uses non-interactive `sudo` to install and enable `/etc/systemd/system/copilot-telegram-bot.service` unless the bot is already running under systemd. It does not start a duplicate process. Configure the bot account for passwordless access to the required `install`, `rm`, and `systemctl` commands so registration and later app management can run without a terminal. Stop the foreground run, then start the registered service:
+The first foreground `make run` uses non-interactive `sudo` to install and enable `/etc/systemd/system/copilot-telegram-bot.service` unless the bot is already running under systemd. It does not start a duplicate process. Only one bot process runs per `STATE_DIR`: each process holds an exclusive lock on `<STATE_DIR>/bot.lock`, and a second `make run` (for example a foreground run while the service is active) exits with an error instead of polling Telegram alongside the first, which would split messages between the two processes and break guided flows. Configure the bot account for passwordless access to the required `install`, `rm`, and `systemctl` commands so registration and later app management can run without a terminal. Stop the foreground run, then start the registered service:
 
 ```bash
 sudo systemctl start copilot-telegram-bot
@@ -96,7 +96,7 @@ Apps created by regular users are public GitHub repositories. Apps created by ad
 | `/delete <name>` or `/delete <owner/name>` | **Admin only.** Independently attempt to stop and unregister the app service, remove its Cloudflare tunnel route and matching CNAME, GitHub repository, verified local checkout at `<REPOS_DIR>/<name>`, ownership record, and active selections. Missing resources are successful no-ops; failures and skipped cleanup are reported without blocking other deletion attempts. Cloudflare credentials are needed only for route cleanup, and deleting an existing GitHub repository requires repository-delete permission. |
 | `/repo <name>` or `/repo <owner/name>` | **Admin only.** Select the administrator's active repository. A missing repository is created and seeded from `<REPOS_DIR>/eurofish`; an existing one is cloned or fast-forwarded. A GitHub URL is also accepted. An untracked repository selected this way is assigned to `kurwalab.fyi admins`. |
 | `/repo` | **Admin only.** Show the administrator's active repository. |
-| plain text | Run the text as a request against the sender's active repository. Regular users are restricted to apps they created. |
+| plain text | Run the text as a request against the sender's active repository. Regular users are restricted to apps they created. Text that is only the name or `owner/name` of an app the sender can see is not run: it answers a guided step that is no longer open (for example after a bot restart), so the bot shows the menu instead. |
 | files, screenshots, or photos | Attach them to the sender's next create or fix request; a caption runs as that request. See [Attaching files](#attaching-files). |
 | `/fix <repo> <request>` | Select a repository and run a request in one message. Administrators can use `linux-copilot-bot` to change the bot itself. Regular users are restricted to apps they created. |
 | `/fix [browser\|nobrowser] [tempchat\|notempchat] <request>` | Run a request against the sender's active repository with one or both per-request options. Options may be supplied in either order. Regular users are restricted to apps they created. |
@@ -167,7 +167,7 @@ Settings come from `.env` (or the file named by `BOT_ENV_FILE`); real environmen
 | `GITHUB_TOKEN` | required | Used for GitHub API calls and Git over HTTPS through `GIT_ASKPASS` (including private repository clones); it is never written into remote URLs. |
 | `GITHUB_OWNER` | token's account | Owner for bare repository names. |
 | `REPOS_DIR` | `/home/localadmin/repos` | Parent of app checkouts and local app templates; `eurofish` is the default template. |
-| `STATE_DIR` | `~/.copilot-telegram-bot` | Approved users, pending access requests, app ownership, per-user active repositories, administrators' view choices, shared model, app logs, the executable copy of the Git credential helper, and temporary browser-profile copies of parallel sessions. |
+| `STATE_DIR` | `~/.copilot-telegram-bot` | Approved users, pending access requests, app ownership, per-user active repositories, administrators' view choices, shared model, app logs, the single-instance lock file, the executable copy of the Git credential helper, and temporary browser-profile copies of parallel sessions. |
 | `COPILOT_PROFILE` | `~/.copilot-repo-browser` | Browser profile created by `make login`. |
 | `COPILOT_MODEL` | `GPT/GPT-6` | Initial model label; change it later with `/model`. |
 | `BOT_SHOW_BROWSER` | `false` | Default browser visibility. `browser` or `nobrowser` on `/fix` overrides it for that request. Without `DISPLAY` or `WAYLAND_DISPLAY`, a visible request runs hidden; use VNC or X forwarding to see it. |

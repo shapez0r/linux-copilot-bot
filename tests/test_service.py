@@ -1102,6 +1102,30 @@ class ServiceTests(unittest.TestCase):
         self.say("/fix tempchat nobrowser update docs")
         self.assertEqual(self.rt.calls[2][3:], (False, True))
 
+    def test_app_name_without_an_open_dialog_is_not_run_as_a_request(self):
+        self.make_bot_checkout()
+        self.state.set_active_repo(1, "me/linux-copilot-bot", True)
+        (self.cfg.repos_dir / "video-album").mkdir()
+        self.state.set_app_owner("me/video-album", ADMIN_OWNER)
+        self.say(FIX_APP)
+        self.bot._dialogs.clear()  # The answer reaches a bot that no longer holds the dialog.
+        for name in ("video-album", "linux-copilot-bot", "me/video-album"):
+            with self.subTest(name=name):
+                self.say(name)
+                self.assertIn("is an app name, not a change request", self.tg.sent[-1])
+                self.assertEqual(self.tg.markups[-1], MAIN_KEYBOARD)
+        self.assertEqual(self.rt.calls, [])
+        self.say("make the header blue")
+        self.assertEqual(self.rt.calls[0][1], "make the header blue" + BOT_DEPLOY_NOTE)
+
+    def test_regular_users_get_no_app_name_hint_for_the_bot(self):
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}))
+        self.make_bot_checkout()
+        self.user_say(77, "linux-copilot-bot")
+        self.assertNotIn("linux-copilot-bot is an app name", self.tg.sent[-1])
+        self.assertEqual(self.rt.calls, [])
+
     def test_fix_option_requires_request_and_active_repo(self):
         self.say("/fix browser")
         self.assertIn("Usage", self.tg.sent[-1])

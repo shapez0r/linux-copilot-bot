@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import logging
 import os
 import shutil
@@ -25,6 +26,21 @@ log = logging.getLogger("bot")
 def login(cfg: config.Config) -> int:
     """Open a visible browser to sign in; the profile is shared with the bot's hidden runs."""
     return subprocess.call([sys.executable, str(cfg.engine), "--profile", str(cfg.profile), "login"])
+
+
+def acquire_instance_lock(state_dir):
+    """Return an open lock file held for this process's lifetime, or None when another bot holds it.
+
+    Two bots polling the same token would split Telegram updates between them, so a guided flow
+    started in one process would lose its answers to the other.
+    """
+    handle = open(state_dir / "bot.lock", "a")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
 
 
 def main(argv=None) -> int:
@@ -56,6 +72,11 @@ def main(argv=None) -> int:
         return 2
     cfg.repos_dir.mkdir(parents=True, exist_ok=True)
     cfg.state_dir.mkdir(parents=True, exist_ok=True)
+    instance_lock = acquire_instance_lock(cfg.state_dir)
+    if instance_lock is None:
+        print(f"Another bot instance is already running with {cfg.state_dir}; stop it first "
+              "(for example: sudo systemctl stop copilot-telegram-bot).", file=sys.stderr)
+        return 2
 
     deployer = Deployer(cfg)
     if os.environ.get("INVOCATION_ID"):
