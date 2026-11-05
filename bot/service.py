@@ -140,7 +140,7 @@ ATTACH_HELP = (
     "create or fix request; a file caption is used as the request text. Cancel / stop discards attached files."
 )
 
-HELP = f"""Use the buttons below to create and manage apps. You can also send a request as plain text to change the active repository, commit, push and redeploy it with `make run`. Each user runs one session (a create, fix or other job) at a time, in parallel with other users. Use {USER_VIEW} in the main menu to use the bot as a regular user.
+HELP = f"""Use the buttons below to create and manage apps. Every action starts from these buttons or a command; text outside a guided step only shows the menu. Each user runs one session (a create, fix or other job) at a time, in parallel with other users. Use {USER_VIEW} in the main menu to use the bot as a regular user.
 
 {ATTACH_HELP}
 
@@ -193,6 +193,8 @@ GUEST_WELCOME = (f"This bot creates and manages apps for approved users. Tap {RE
                  "kurwalab.fyi admin for access; you will be notified when it is approved.")
 GUEST_PENDING = "Your access request is waiting for admin approval. You will be notified when it is approved."
 GUEST_NO_ACCESS = f"You do not have access to this bot yet. Send /start and tap {REQUEST_ACCESS}."
+FREE_TEXT_MESSAGE = ("Nothing was started. Choose an action below; requests are accepted only within a "
+                     "guided flow or as a command such as /fix or /new.")
 RESTART_PENDING_MESSAGE = ("The bot restarts to apply an update as soon as the running sessions finish. "
                            "Try again after the restart.")
 
@@ -332,7 +334,7 @@ class Bot:
         elif text:
             self.handle_text(chat["id"], text, sender)
         else:
-            self.say(chat["id"], "Send the request as text, or send files to attach to it.")
+            self.show_menu(chat["id"], FREE_TEXT_MESSAGE, sender)
 
     # ---- Attachments ---------------------------------------------------
 
@@ -669,14 +671,8 @@ class Bot:
             self._handle_dialog(chat_id, text, user_id)
             return
         if not text.startswith("/"):
-            name = self._bare_app_name(text, user_id)
-            if name:
-                self.show_menu(chat_id, f"{name} is an app name, not a change request, so nothing was started. "
-                                        "The guided step that asked for it is no longer open, for example "
-                                        f"because the bot restarted. To fix this app, choose {FIX_APP} again.",
-                               user_id)
-                return
-            self.start_request(chat_id, "", text, user_id=user_id)
+            # Free text outside a guided flow never starts a job; every action begins from the menu.
+            self.show_menu(chat_id, FREE_TEXT_MESSAGE, user_id)
             return
         parts = re.split(r"\s+", text, maxsplit=1)
         command = parts[0][1:].split("@")[0].lower()
@@ -725,7 +721,7 @@ class Bot:
         elif command == "cancel":
             self.cmd_cancel(chat_id, user_id)
         else:
-            self.say(chat_id, "Unknown command. Send /help for the list.")
+            self.show_menu(chat_id, "Unknown command. Choose an action below or send /help for the list.", user_id)
 
     def _handle_menu_button(self, chat_id: int, label: str, user_id=None):
         """Start a guided action selected from a reply-keyboard button."""
@@ -806,30 +802,6 @@ class Bot:
             self._dialogs[chat_id] = {"flow": "route-delete", "step": "name", "data": {},
                                       "user_id": user_id}
             self.say_keyboard(chat_id, "Enter the lowercase subdomain of the route to delete.", CANCEL_KEYBOARD)
-
-    def _bare_app_name(self, text: str, user_id=None) -> str:
-        """Return the app named by text that holds only an app name or repository the sender can see.
-
-        Such text answers a guided-flow question whose dialog is gone; it is never run as a request.
-        """
-        value = text.strip().lower()
-        if not value or any(char.isspace() for char in value):
-            return ""
-        admin = self._is_admin(user_id)
-        repos = list(self.state.app_owners) if admin else self.state.repos_for_owner(telegram_owner(user_id))
-        repos.append(self.state.get_active_repo(user_id, admin))
-        names = {}
-        for repo in filter(None, repos):
-            short = repo.rsplit("/", 1)[-1]
-            if admin or not self._is_bot_app(short):
-                names[repo.lower()] = names[short.lower()] = short
-        try:
-            names.update({path.name.lower(): path.name for path in self._app_directories()})
-        except OSError:
-            pass
-        if admin:
-            names[BOT_APP] = BOT_APP
-        return names.get(value, "")
 
     def _job_blocks_dialog(self, chat_id: int, user_id=None) -> bool:
         """Refuse to open a guided flow while the user's own session still runs."""

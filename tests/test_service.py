@@ -18,7 +18,7 @@ from bot.service import (ACCESS_REQUESTS, APPROVE_ACCESS, DECISION_KEYBOARD, GUE
                          DEPLOY_NOTE, FIX_APP, HELP, KNOWN_MODELS, LIST_APPS, MAIN_KEYBOARD, MODEL_KEYBOARD,
                          NEW_APP_PROMPT, PRIVATE_REPO, PUBLIC_REPO, VISIBILITY_KEYBOARD,
                          REGULAR_CHAT, TEMPORARY_CHAT, USER_HELP, USER_KEYBOARD, REGISTER_SERVICES,
-                         START_APP, STOP_APP, Bot, Progress, Session)
+                         START_APP, STOP_APP, FREE_TEXT_MESSAGE, Bot, Progress, Session)
 from bot.state import ADMIN_OWNER, State, telegram_owner
 from bot.telegram_api import TelegramError
 
@@ -631,8 +631,8 @@ class ServiceTests(unittest.TestCase):
                          "Currently doing: Testing\nRepository: https://github.com/me/app\n\n"
                          "[16:21:21] ▶ Testing")
 
-    def test_request_without_repository_asks_to_select_one(self):
-        self.say("add a login page")
+    def test_fix_without_repository_asks_to_select_one(self):
+        self.say("/fix nobrowser add a login page")
         self.assertIn("Select a repository first", self.tg.sent[-1])
         self.assertEqual(self.rt.calls, [])
 
@@ -1071,7 +1071,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_request_runs_commits_pushes_and_redeploys(self):
         self.say("/repo app")
-        self.say("add a Makefile")
+        self.say("/fix app add a Makefile")
         self.assertEqual(self.rt.histories, [True])
         self.assertEqual(self.rt.calls[0][1], "add a Makefile" + DEPLOY_NOTE)
         self.assertEqual(self.rt.calls[0][2], "GPT/GPT-6")
@@ -1102,28 +1102,40 @@ class ServiceTests(unittest.TestCase):
         self.say("/fix tempchat nobrowser update docs")
         self.assertEqual(self.rt.calls[2][3:], (False, True))
 
-    def test_app_name_without_an_open_dialog_is_not_run_as_a_request(self):
+    def test_free_text_outside_a_dialog_always_shows_the_menu(self):
         self.make_bot_checkout()
-        self.state.set_active_repo(1, "me/linux-copilot-bot", True)
-        (self.cfg.repos_dir / "video-album").mkdir()
-        self.state.set_app_owner("me/video-album", ADMIN_OWNER)
+        self.state.set_active_repo(1, "me/app", True)
         self.say(FIX_APP)
         self.bot._dialogs.clear()  # The answer reaches a bot that no longer holds the dialog.
-        for name in ("video-album", "linux-copilot-bot", "me/video-album"):
-            with self.subTest(name=name):
-                self.say(name)
-                self.assertIn("is an app name, not a change request", self.tg.sent[-1])
+        for text in ("?", "app", "linux-copilot-bot", "make the header blue"):
+            with self.subTest(text=text):
+                self.say(text)
+                self.assertEqual(self.tg.sent[-1], FREE_TEXT_MESSAGE)
                 self.assertEqual(self.tg.markups[-1], MAIN_KEYBOARD)
         self.assertEqual(self.rt.calls, [])
-        self.say("make the header blue")
-        self.assertEqual(self.rt.calls[0][1], "make the header blue" + BOT_DEPLOY_NOTE)
+        self.assertEqual(self.rt.model_checks, 0)
 
-    def test_regular_users_get_no_app_name_hint_for_the_bot(self):
+    def test_fresh_chat_free_text_shows_the_role_menu_or_access_request(self):
         self.approve(77)
         self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}))
-        self.make_bot_checkout()
-        self.user_say(77, "linux-copilot-bot")
-        self.assertNotIn("linux-copilot-bot is an app name", self.tg.sent[-1])
+        self.state.set_app_owner("me/app", telegram_owner(77))
+        self.state.set_active_repo(77, "me/app")
+        self.guest_say(77, "?")
+        self.assertEqual((self.tg.sent[-1], self.tg.markups[-1]), (FREE_TEXT_MESSAGE, USER_KEYBOARD))
+        self.guest_say(500, "?")
+        self.assertEqual((self.tg.sent[-1], self.tg.markups[-1]), (GUEST_NO_ACCESS, GUEST_KEYBOARD))
+        self.bot.handle_update({"message": {"from": {"id": 77}, "chat": {"id": 77, "type": "private"},
+                                            "location": {"latitude": 1, "longitude": 2}}})
+        self.assertEqual((self.tg.sent[-1], self.tg.markups[-1]), (FREE_TEXT_MESSAGE, USER_KEYBOARD))
+        self.user_say(77, "/unknown")
+        self.assertEqual(self.tg.markups[-1], USER_KEYBOARD)
+        self.assertEqual(self.rt.calls, [])
+
+    def test_caption_outside_a_dialog_keeps_the_files_and_shows_the_menu(self):
+        self.state.set_active_repo(42, "me/app", True)
+        self.send_file(42, caption="match this", photo=[{"file_id": "shot"}])
+        self.assertEqual((self.tg.sent[-1], self.tg.markups[-1]), (FREE_TEXT_MESSAGE, MAIN_KEYBOARD))
+        self.assertEqual(len(self.bot._pending_files[42]), 1)
         self.assertEqual(self.rt.calls, [])
 
     def test_fix_option_requires_request_and_active_repo(self):
@@ -1664,7 +1676,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_album_caption_runs_once_with_every_file(self):
         self.state.set_active_repo(42, "me/app", True)
-        self.bot.handle_update(self.file_update(42, caption="match these photos", group="g",
+        self.bot.handle_update(self.file_update(42, caption="/fix app match these photos", group="g",
                                                 photo=[{"file_id": "one"}]))
         self.bot.handle_update(self.file_update(42, group="g", photo=[{"file_id": "two"}]))
         self.assertEqual(self.rt.calls, [])
@@ -1687,7 +1699,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_failed_download_is_reported_without_running_copilot(self):
         self.state.set_active_repo(42, "me/app", True)
-        self.send_file(42, caption="use this", document={"file_id": "broken", "file_name": "x.txt"})
+        self.send_file(42, caption="/fix app use this", document={"file_id": "broken", "file_name": "x.txt"})
         self.assertIn("Could not download the attached file x.txt", self.tg.sent[-1])
         self.assertEqual(self.rt.calls, [])
         self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
