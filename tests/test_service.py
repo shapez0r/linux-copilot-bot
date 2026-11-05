@@ -356,27 +356,20 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.tg.sent[-1], ADMIN_WELCOME)
         self.assertEqual(self.tg.markups[-1], MAIN_KEYBOARD)
 
-    def test_welcome_describes_only_the_senders_available_actions(self):
+    def test_welcome_is_short_and_points_to_the_role_menu(self):
         self.approve(77)
         self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}))
         self.user_say(77, "/start")
         self.assertEqual((self.tg.sent[-1], self.tg.markups[-1]), (USER_WELCOME, USER_KEYBOARD))
-        user_labels = {button["text"] for row in USER_KEYBOARD["keyboard"] for button in row}
-        admin_labels = {button["text"] for row in MAIN_KEYBOARD["keyboard"] for button in row}
-        for label in user_labels:
-            self.assertIn(label, USER_WELCOME)
-        for label in admin_labels - user_labels:
-            self.assertIn(label, ADMIN_WELCOME)
+        self.assertEqual(USER_WELCOME, ADMIN_WELCOME)
+        self.assertTrue(USER_WELCOME.endswith("Use the buttons below."))
+        self.assertIn("Copilot", USER_WELCOME)
+        self.assertNotIn("365", USER_WELCOME)
+        self.assertNotRegex(USER_WELCOME, r"(^|\s)/[a-z]")
+        labels = {button["text"] for row in MAIN_KEYBOARD["keyboard"] for button in row}
+        for label in labels:
             self.assertNotIn(label, USER_WELCOME)
-        for welcome in (USER_WELCOME, ADMIN_WELCOME):
-            # The only slash text is the /cli button's own label.
-            self.assertNotRegex(welcome.replace(SHOW_COMMANDS, ""), r"(^|\s)/[a-z]")
-            self.assertNotIn("365", welcome)
-            self.assertIn("Copilot", welcome)
         self.assertEqual(self.bot.welcome_text(77), USER_WELCOME)
-        for hidden in ("admin", "tempchat", "browser", "public|private", "/delete", "/repo", "/register",
-                       "/cloudflare", "/model ", "/status", "/requests", "/sessions", "port", "folder"):
-            self.assertNotIn(hidden, USER_WELCOME)
         self.user_say(77, "/nonsense")
         self.assertEqual(self.tg.sent[-1], "Unknown command: /nonsense.\n\n" + USER_WELCOME)
         self.user_say(42, USER_VIEW)

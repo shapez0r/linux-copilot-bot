@@ -200,34 +200,8 @@ GUEST_WELCOME = (f"This bot creates and manages apps for approved users. Tap {RE
                  "kurwalab.fyi admin for access; you will be notified when it is approved.")
 GUEST_PENDING = "Your access request is waiting for admin approval. You will be notified when it is approved."
 GUEST_NO_ACCESS = f"You do not have access to this bot yet. Send /start and tap {REQUEST_ACCESS}."
-# Welcome texts describe only the buttons available in each role's menu; commands are listed by SHOW_COMMANDS.
-USER_WELCOME = f"""\U0001f44b Welcome! This bot builds, deploys and runs web apps with Copilot.
-
-Use the buttons below:
-{CREATE_APP} - enter a name, choose a model and a template, then describe the app.
-{LIST_APPS} - see every app with its status and link.
-{FIX_APP} - choose one of your apps and a model, then describe the change.
-{START_APP} / {STOP_APP} - start or stop one of your apps.
-{SHOW_COMMANDS} - see the commands available to you.
-
-To attach files, screenshots or photos, send them before the request text or add the request as a caption."""
-ADMIN_WELCOME = f"""\U0001f44b Welcome! This bot builds, deploys and runs web apps with Copilot.
-
-Use the buttons below:
-{CREATE_APP} - enter a name, choose a model, a template, the repository visibility and the chat type, then describe the app.
-{LIST_APPS} - see every app and this bot with status, folder, port and link.
-{FIX_APP} - choose an app or this bot, a model and the chat type, then describe the change.
-{START_APP} / {STOP_APP} - start or stop any app.
-{DELETE_APP} - delete an app after confirmation.
-{REGISTER_SERVICES} - register services for existing app folders.
-{ACCESS_REQUESTS} - approve or reject access requests.
-{TUNNEL_ROUTES} - list, add or delete Cloudflare routes.
-{RUNNING_SESSIONS} - see and stop every user's running session.
-{CANCEL_ACTION} - stop your running request.
-{SHOW_COMMANDS} - see the commands available to you.
-{USER_VIEW} - use the bot as a regular user.
-
-To attach files, screenshots or photos, send them before the request text or add the request as a caption."""
+# The welcome text points to the role's menu; each menu shows only the buttons that role can use.
+USER_WELCOME = ADMIN_WELCOME = "\U0001f44b Welcome! This bot builds, deploys and runs web apps with Copilot.\n\nUse the buttons below."
 NOTHING_STARTED = "That message did not start anything."
 RESTART_PENDING_MESSAGE = ("The bot restarts to apply an update as soon as the running sessions finish. "
                            "Try again after the restart.")
@@ -544,7 +518,7 @@ class Bot:
         self.say_keyboard(chat_id, text, self._main_keyboard(user_id))
 
     def welcome_text(self, user_id=None, lead: str = "") -> str:
-        """Return the role's usage guide; regular users see only the actions they can use."""
+        """Return the welcome text; administrators in user view also get the hint for switching back."""
         if self._is_admin(user_id):
             text = ADMIN_WELCOME
         elif self._is_configured_admin(user_id):
