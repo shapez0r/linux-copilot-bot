@@ -135,6 +135,16 @@ NEW_USAGE = (
     'name="<name|owner/name>" prompt="<request>"'
 )
 
+ADMIN_FIX_USAGE = (
+    "Usage: /fix [model=<provider/model>] [tempchat|notempchat] [browser|nobrowser] "
+    'app="<name|owner/name>" prompt="<request>", /fix <name|owner/name> <request>, '
+    "or /fix [options] <request> for the active repository"
+)
+USER_FIX_USAGE = (
+    'Usage: /fix [model=<provider/model>] app="<name>" prompt="<request>", /fix <name> <request>, '
+    "or /fix [model=<provider/model>] <request> for your active app"
+)
+
 ATTACH_HELP = (
     f"Send files, screenshots or photos (up to {MAX_ATTACHMENTS}, each at most 20 MB) to attach them to your next "
     "create or fix request; a file caption is used as the request text. Cancel / stop discards attached files."
@@ -149,8 +159,9 @@ HELP = f"""Use the buttons below to create and manage apps. Every action starts 
 /delete <name|owner/name> - permanently delete an app service, GitHub repository, local checkout and tunnel route
 /repo [public|private] <name|owner/name> - select a repository; a missing one is created from the eurofish reference app
 /repo - show the active repository
-/fix <repo> <request> - select a repository and run a request in one message; linux-copilot-bot changes this bot and restarts it
-/fix [browser|nobrowser] [tempchat|notempchat] <request> - run against the active repository with per-request browser/chat options
+/fix [model=<provider/model>] [tempchat|notempchat] [browser|nobrowser] app="<name|owner/name>" prompt="<request>" - fix an app with the same choices as Fix an app; linux-copilot-bot changes this bot and restarts it
+/fix <name|owner/name> <request> - fix an app with the shared model
+/fix [model=<provider/model>] [tempchat|notempchat] [browser|nobrowser] <request> - fix the active repository
 /list - list every local app and this bot with systemd status and tunnel details
 /app start|stop <name> - start or stop an app service
 /register [all|<name>] - register and enable systemd services for existing local apps
@@ -174,8 +185,9 @@ USER_HELP = f"""Use the buttons below to create and list apps, and to fix, start
 
 /menu - show the app menu
 /new [model=<provider/model>] [template=<app>] name="<name|owner/name>" prompt="<request>" - create, build, deploy and publish a new app in a public repository
-/fix <repo> <request> - fix an app you created
-/fix [browser|nobrowser] [tempchat|notempchat] <request> - fix your active app
+/fix [model=<provider/model>] app="<name>" prompt="<request>" - fix an app you created with the same choices as Fix an app
+/fix <name> <request> - fix an app you created
+/fix [model=<provider/model>] <request> - fix your active app
 /list - list every local app with its status and public URL
 /app start|stop <name> - start or stop one of your app services
 /cancel - stop your running session and discard attached files
@@ -193,8 +205,46 @@ GUEST_WELCOME = (f"This bot creates and manages apps for approved users. Tap {RE
                  "kurwalab.fyi admin for access; you will be notified when it is approved.")
 GUEST_PENDING = "Your access request is waiting for admin approval. You will be notified when it is approved."
 GUEST_NO_ACCESS = f"You do not have access to this bot yet. Send /start and tap {REQUEST_ACCESS}."
-FREE_TEXT_MESSAGE = ("Nothing was started. Choose an action below; requests are accepted only within a "
-                     "guided flow or as a command such as /fix or /new.")
+# Welcome texts list only the actions available in each role's menu and commands.
+USER_WELCOME = f"""\U0001f44b Welcome! This bot builds, deploys and runs web apps with Microsoft 365 Copilot.
+
+Use the buttons below:
+{CREATE_APP} - enter a name, choose a model and a template, then describe the app.
+{LIST_APPS} - see every app with its status and link.
+{FIX_APP} - choose one of your apps and a model, then describe the change.
+{START_APP} / {STOP_APP} - start or stop one of your apps.
+
+Or type a command with the same choices:
+/new [model=<provider/model>] [template=<app>] name="<name>" prompt="<description>"
+/fix [model=<provider/model>] app="<name>" prompt="<change>"
+/list - list the apps
+/app start|stop <name> - start or stop one of your apps
+/cancel - stop your running request
+/help - every command and option
+
+To attach files, screenshots or photos, send them before the request text or add the request as a caption."""
+ADMIN_WELCOME = f"""\U0001f44b Welcome! This bot builds, deploys and runs web apps with Microsoft 365 Copilot.
+
+Use the buttons below:
+{CREATE_APP} - enter a name, choose a model, a template, the repository visibility and the chat type, then describe the app.
+{LIST_APPS} - see every app and this bot with status, folder, port and link.
+{FIX_APP} - choose an app or this bot, a model and the chat type, then describe the change.
+{START_APP} / {STOP_APP} - start or stop any app.
+{DELETE_APP} - delete an app after confirmation.
+{REGISTER_SERVICES} - register services for existing app folders.
+{ACCESS_REQUESTS} - approve or reject access requests.
+{TUNNEL_ROUTES} - list, add or delete Cloudflare routes.
+{RUNNING_SESSIONS} - see and stop every user's running session.
+{USER_VIEW} - use the bot as a regular user.
+
+Or type a command with the same choices:
+/new [public|private] [tempchat|notempchat] [model=<provider/model>] [template=<app>] name="<name>" prompt="<description>"
+/fix [model=<provider/model>] [tempchat|notempchat] app="<name>" prompt="<change>"
+/cancel - stop your running request
+/help - every command and option
+
+To attach files, screenshots or photos, send them before the request text or add the request as a caption."""
+NOTHING_STARTED = "That message did not start anything."
 RESTART_PENDING_MESSAGE = ("The bot restarts to apply an update as soon as the running sessions finish. "
                            "Try again after the restart.")
 
@@ -334,7 +384,7 @@ class Bot:
         elif text:
             self.handle_text(chat["id"], text, sender)
         else:
-            self.show_menu(chat["id"], FREE_TEXT_MESSAGE, sender)
+            self.show_welcome(chat["id"], sender, NOTHING_STARTED)
 
     # ---- Attachments ---------------------------------------------------
 
@@ -509,6 +559,19 @@ class Bot:
         self._dialogs.pop(chat_id, None)
         self.say_keyboard(chat_id, text, self._main_keyboard(user_id))
 
+    def welcome_text(self, user_id=None, lead: str = "") -> str:
+        """Return the role's usage guide; regular users see only the actions they can use."""
+        if self._is_admin(user_id):
+            text = ADMIN_WELCOME
+        elif self._is_configured_admin(user_id):
+            text = f"{USER_WELCOME}\n\n{ADMIN_VIEW_HINT}"
+        else:
+            text = USER_WELCOME
+        return f"{lead}\n\n{text}" if lead else text
+
+    def show_welcome(self, chat_id: int, user_id=None, lead: str = ""):
+        self.show_menu(chat_id, self.welcome_text(user_id, lead), user_id)
+
     # ---- Access requests -----------------------------------------------
 
     @staticmethod
@@ -672,7 +735,7 @@ class Bot:
             return
         if not text.startswith("/"):
             # Free text outside a guided flow never starts a job; every action begins from the menu.
-            self.show_menu(chat_id, FREE_TEXT_MESSAGE, user_id)
+            self.show_welcome(chat_id, user_id, NOTHING_STARTED)
             return
         parts = re.split(r"\s+", text, maxsplit=1)
         command = parts[0][1:].split("@")[0].lower()
@@ -681,7 +744,7 @@ class Bot:
             self._admin_only(chat_id, user_id)
             return
         if command == "start":
-            self.show_menu(chat_id, "Welcome. Create and manage apps with the buttons below.", user_id)
+            self.show_welcome(chat_id, user_id)
         elif command == "help":
             if self._is_admin(user_id):
                 help_text = HELP
@@ -721,7 +784,7 @@ class Bot:
         elif command == "cancel":
             self.cmd_cancel(chat_id, user_id)
         else:
-            self.show_menu(chat_id, "Unknown command. Choose an action below or send /help for the list.", user_id)
+            self.show_welcome(chat_id, user_id, f"Unknown command: /{command}.")
 
     def _handle_menu_button(self, chat_id: int, label: str, user_id=None):
         """Start a guided action selected from a reply-keyboard button."""
@@ -1604,31 +1667,98 @@ class Bot:
             self.say(chat_id, f"\u274c {error}")
 
     def cmd_fix(self, chat_id: int, arg: str, user_id=None):
-        """Run a request with optional browser and Temporary chat overrides."""
-        words = arg.split()
-        show_browser = temporary_chat = None
-        used_option = False
-        while words:
-            option = words[0].lower()
-            if option in ("browser", "nobrowser"):
-                show_browser = option == "browser"
-            elif option in ("tempchat", "notempchat"):
-                temporary_chat = option == "tempchat"
-            else:
-                break
-            used_option = True
-            words.pop(0)
-        if used_option:
-            if not words:
-                self.say(chat_id, "Usage: /fix [browser|nobrowser] [tempchat|notempchat] <request>")
-                return
-            self.start_request(chat_id, "", " ".join(words), show_browser, temporary_chat, user_id)
+        """Run a fix request with the guided flow's choices: app, model, chat type (admins) and request."""
+        admin = self._is_admin(user_id)
+        usage = ADMIN_FIX_USAGE if admin else USER_FIX_USAGE
+        arg, options, error = self._fix_options(arg)
+        if error:
+            self.say(chat_id, error)
             return
-        ref, _, request = arg.partition(" ")
-        if not ref or not request.strip():
-            self.say(chat_id, "Usage: /fix <repo> <request>")
+        if not admin and options["temporary_chat"] is not None:
+            self.say(chat_id, "Only kurwalab.fyi admins can choose the Copilot chat type; omit tempchat and notempchat.")
+            return
+        if not admin and options["show_browser"] is not None:
+            self.say(chat_id, "Only kurwalab.fyi admins can choose the browser visibility; omit browser and nobrowser.")
+            return
+        if options["model"] is not None and not self._valid_model(options["model"]):
+            self.say(chat_id, "Use a provider/model pair such as GPT/GPT-6.")
+            return
+        ref, prompt = options["app"], options["prompt"]
+        if ref is not None:
+            if prompt is not None and arg:
+                self.say(chat_id, usage)
+                return
+            request = prompt if prompt is not None else arg
+        elif prompt is not None:
+            # Like /new, a single positional word before or after prompt= names the app.
+            if len(arg.split()) > 1:
+                self.say(chat_id, usage)
+                return
+            ref, request = arg, prompt
+        elif options["used"]:
+            # Options followed by plain text run the text against the active app.
+            ref, request = "", arg
         else:
-            self.start_request(chat_id, ref, request.strip(), user_id=user_id)
+            ref, _, request = arg.partition(" ")
+            if not ref:
+                self.say(chat_id, usage)
+                return
+        if not request.strip():
+            self.say(chat_id, usage)
+            return
+        self.start_request(chat_id, ref, request.strip(), options["show_browser"], options["temporary_chat"],
+                           user_id, options["model"])
+
+    @staticmethod
+    def _option_value(key: str, text: str):
+        """Match key=value at the start of text; the value may use straight or typographic quotes."""
+        return re.match(
+            key + r'''=(?:"([^"]*)"|'([^']*)'|“([^”]*)”|‘([^’]*)’|([^\s'"“”‘’]+))(?=\s|$)''',
+            text, flags=re.IGNORECASE)
+
+    @classmethod
+    def _fix_options(cls, arg: str):
+        """Read leading /fix options in any order; returns (remaining text, options, error).
+
+        app= (or name=) selects the app, model= the model for this request, prompt= the request;
+        tempchat, notempchat, browser and nobrowser override the chat type and browser visibility.
+        An unquoted final prompt= consumes the rest of the message.
+        """
+        remaining = arg.strip()
+        options = {"app": None, "model": None, "prompt": None, "temporary_chat": None, "show_browser": None,
+                   "used": False}
+        while remaining:
+            parts = remaining.split(None, 1)
+            word = parts[0].lower()
+            rest = parts[1].lstrip() if len(parts) > 1 else ""
+            if word in ("tempchat", "notempchat"):
+                options["temporary_chat"] = word == "tempchat"
+            elif word in ("browser", "nobrowser"):
+                options["show_browser"] = word == "browser"
+            else:
+                for key, field in (("app", "app"), ("name", "app"), ("model", "model"), ("prompt", "prompt")):
+                    match = cls._option_value(key, remaining)
+                    if match:
+                        break
+                else:
+                    if re.match(r"(?:app|name|model|prompt)=", word):
+                        key = word.split("=", 1)[0]
+                        return remaining, options, f'Use {key}="<value>" with a nonempty value.'
+                    break
+                if options[field] is not None:
+                    return remaining, options, f"Specify {field} only once."
+                value = next(group for group in match.groups() if group is not None).strip()
+                if not value or (field == "app" and len(value.split()) != 1):
+                    return remaining, options, f'Use {key}="<value>" with a nonempty value{" without spaces" if field == "app" else ""}.'
+                rest = remaining[match.end():].lstrip()
+                if field == "prompt" and match.group(5) is not None and rest:
+                    if re.search(r"(?:^|\s)prompt=", rest, flags=re.IGNORECASE):
+                        return remaining, options, "Specify prompt only once."
+                    value, rest = f"{value} {rest}", ""
+                options[field] = value
+            options["used"] = True
+            remaining = rest
+        return remaining, options, ""
 
     @staticmethod
     def _creation_options(arg: str):
@@ -1780,7 +1910,7 @@ class Bot:
                     user_id=user_id, label=f"Select {arg}", app=self._app_key(arg))
 
     def start_request(self, chat_id: int, ref: str, request: str,
-                      show_browser=None, temporary_chat=None, user_id=None):
+                      show_browser=None, temporary_chat=None, user_id=None, model=None):
         active = self.state.get_active_repo(user_id, self._is_admin(user_id))
         if not ref and not active:
             if self._is_admin(user_id):
@@ -1799,7 +1929,7 @@ class Bot:
             self.say(chat_id, "You can only fix apps you created.")
             return
         self._spawn_request(chat_id, lambda files: self._request(
-            chat_id, full, request, show_browser, temporary_chat, user_id, attachments=files),
+            chat_id, full, request, show_browser, temporary_chat, user_id, model=model, attachments=files),
             user_id=user_id, label=f"Fix {full}", app=name)
 
     # ---- Job execution -------------------------------------------------

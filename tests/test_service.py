@@ -18,7 +18,8 @@ from bot.service import (ACCESS_REQUESTS, APPROVE_ACCESS, DECISION_KEYBOARD, GUE
                          DEPLOY_NOTE, FIX_APP, HELP, KNOWN_MODELS, LIST_APPS, MAIN_KEYBOARD, MODEL_KEYBOARD,
                          NEW_APP_PROMPT, PRIVATE_REPO, PUBLIC_REPO, VISIBILITY_KEYBOARD,
                          REGULAR_CHAT, TEMPORARY_CHAT, USER_HELP, USER_KEYBOARD, REGISTER_SERVICES,
-                         START_APP, STOP_APP, FREE_TEXT_MESSAGE, Bot, Progress, Session)
+                         START_APP, STOP_APP, ADMIN_WELCOME, USER_WELCOME, NOTHING_STARTED, Bot, Progress,
+                         Session)
 from bot.state import ADMIN_OWNER, State, telegram_owner
 from bot.telegram_api import TelegramError
 
@@ -352,8 +353,31 @@ class ServiceTests(unittest.TestCase):
 
     def test_start_shows_the_app_management_menu(self):
         self.say("/start")
-        self.assertIn("Create and manage apps", self.tg.sent[-1])
+        self.assertEqual(self.tg.sent[-1], ADMIN_WELCOME)
         self.assertEqual(self.tg.markups[-1], MAIN_KEYBOARD)
+
+    def test_welcome_describes_only_the_senders_available_actions(self):
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}))
+        self.user_say(77, "/start")
+        self.assertEqual((self.tg.sent[-1], self.tg.markups[-1]), (USER_WELCOME, USER_KEYBOARD))
+        user_labels = {button["text"] for row in USER_KEYBOARD["keyboard"] for button in row}
+        admin_labels = {button["text"] for row in MAIN_KEYBOARD["keyboard"] for button in row}
+        for label in user_labels:
+            self.assertIn(label, USER_WELCOME)
+        for label in admin_labels - user_labels - {"❌ Cancel / stop"}:
+            self.assertIn(label, ADMIN_WELCOME)
+            self.assertNotIn(label, USER_WELCOME)
+        self.assertEqual(self.bot.welcome_text(77), USER_WELCOME)
+        for hidden in ("admin", "tempchat", "browser", "public|private", "/delete", "/repo", "/register",
+                       "/cloudflare", "/model ", "/status", "/requests", "/sessions", "port", "folder"):
+            self.assertNotIn(hidden, USER_WELCOME)
+        self.user_say(77, "/nonsense")
+        self.assertEqual(self.tg.sent[-1], "Unknown command: /nonsense.\n\n" + USER_WELCOME)
+        self.user_say(42, USER_VIEW)
+        self.user_say(42, "/start")
+        self.assertTrue(self.tg.sent[-1].startswith(USER_WELCOME))
+        self.assertIn(ADMIN_VIEW, self.tg.sent[-1])
 
     def test_regular_users_see_create_list_fix_and_own_app_controls(self):
         self.approve(77)
@@ -1110,7 +1134,7 @@ class ServiceTests(unittest.TestCase):
         for text in ("?", "app", "linux-copilot-bot", "make the header blue"):
             with self.subTest(text=text):
                 self.say(text)
-                self.assertEqual(self.tg.sent[-1], FREE_TEXT_MESSAGE)
+                self.assertEqual(self.tg.sent[-1], NOTHING_STARTED + "\n\n" + ADMIN_WELCOME)
                 self.assertEqual(self.tg.markups[-1], MAIN_KEYBOARD)
         self.assertEqual(self.rt.calls, [])
         self.assertEqual(self.rt.model_checks, 0)
@@ -1121,22 +1145,65 @@ class ServiceTests(unittest.TestCase):
         self.state.set_app_owner("me/app", telegram_owner(77))
         self.state.set_active_repo(77, "me/app")
         self.guest_say(77, "?")
-        self.assertEqual((self.tg.sent[-1], self.tg.markups[-1]), (FREE_TEXT_MESSAGE, USER_KEYBOARD))
+        self.assertEqual((self.tg.sent[-1], self.tg.markups[-1]), (NOTHING_STARTED + "\n\n" + USER_WELCOME, USER_KEYBOARD))
         self.guest_say(500, "?")
         self.assertEqual((self.tg.sent[-1], self.tg.markups[-1]), (GUEST_NO_ACCESS, GUEST_KEYBOARD))
         self.bot.handle_update({"message": {"from": {"id": 77}, "chat": {"id": 77, "type": "private"},
                                             "location": {"latitude": 1, "longitude": 2}}})
-        self.assertEqual((self.tg.sent[-1], self.tg.markups[-1]), (FREE_TEXT_MESSAGE, USER_KEYBOARD))
+        self.assertEqual((self.tg.sent[-1], self.tg.markups[-1]), (NOTHING_STARTED + "\n\n" + USER_WELCOME, USER_KEYBOARD))
         self.user_say(77, "/unknown")
-        self.assertEqual(self.tg.markups[-1], USER_KEYBOARD)
+        self.assertEqual((self.tg.sent[-1], self.tg.markups[-1]),
+                         ("Unknown command: /unknown.\n\n" + USER_WELCOME, USER_KEYBOARD))
         self.assertEqual(self.rt.calls, [])
 
     def test_caption_outside_a_dialog_keeps_the_files_and_shows_the_menu(self):
         self.state.set_active_repo(42, "me/app", True)
         self.send_file(42, caption="match this", photo=[{"file_id": "shot"}])
-        self.assertEqual((self.tg.sent[-1], self.tg.markups[-1]), (FREE_TEXT_MESSAGE, MAIN_KEYBOARD))
+        self.assertEqual((self.tg.sent[-1], self.tg.markups[-1]), (NOTHING_STARTED + "\n\n" + ADMIN_WELCOME, MAIN_KEYBOARD))
         self.assertEqual(len(self.bot._pending_files[42]), 1)
         self.assertEqual(self.rt.calls, [])
+
+    def test_fix_command_matches_the_guided_fix_choices(self):
+        self.say('/fix model="Claude/Opus 5.5" notempchat app="app" prompt="Improve the empty state"')
+        self.assertEqual(self.rt.calls[0][0], self.dest)
+        self.assertEqual(self.rt.calls[0][1], "Improve the empty state" + DEPLOY_NOTE)
+        self.assertEqual(self.rt.calls[0][2:], ("Claude/Opus 5.5", None, False))
+        self.assertEqual(self.state.model, "GPT/GPT-6")
+        self.say("/fix prompt=Add tests now tempchat app=app")
+        self.assertEqual(self.rt.calls[1][1:], ("Add tests now tempchat app=app" + DEPLOY_NOTE, "GPT/GPT-6",
+                                                None, None))
+        self.say('/fix tempchat prompt="Add docs" app')
+        self.assertEqual(self.rt.calls[2][1:], ("Add docs" + DEPLOY_NOTE, "GPT/GPT-6", None, True))
+        self.say("/fix model=GPT/GPT-9 app=app Tidy the readme")
+        self.assertEqual(self.rt.calls[3][1:3], ("Tidy the readme" + DEPLOY_NOTE, "GPT/GPT-9"))
+        self.say("/fix model=GPT/GPT-9 Use the active app")
+        self.assertEqual(self.rt.calls[4][0], self.dest)
+
+    def test_fix_command_rejects_malformed_or_repeated_options(self):
+        for command in ("/fix app=", '/fix app="two words" x', "/fix app=a app=b x", "/fix model=bad app=app x",
+                        "/fix app=app", '/fix app=app prompt="x" extra', '/fix prompt="x" one two',
+                        "/fix prompt=one prompt=two", "/fix model=GPT/GPT-6"):
+            with self.subTest(command=command):
+                self.say(command)
+                self.assertTrue(any(text in self.tg.sent[-1] for text in (
+                    "Usage: /fix", "only once", "nonempty value", "provider/model")), self.tg.sent[-1])
+        self.assertEqual(self.rt.calls, [])
+
+    def test_regular_users_fix_command_offers_only_the_user_choices(self):
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}))
+        self.state.set_app_owner("me/app", telegram_owner(77))
+        for command in ("/fix tempchat app=app prompt=x", "/fix notempchat app x",
+                        "/fix browser app=app prompt=x"):
+            with self.subTest(command=command):
+                self.user_say(77, command)
+                self.assertIn("Only kurwalab.fyi admins", self.tg.sent[-1])
+        self.assertEqual(self.rt.calls, [])
+        self.user_say(77, "/fix")
+        self.assertNotIn("tempchat", self.tg.sent[-1])
+        self.assertNotIn("browser", self.tg.sent[-1])
+        self.user_say(77, '/fix model="Claude/Opus 5.5" app=app prompt="Improve it"')
+        self.assertEqual(self.rt.calls[0][1:], ("Improve it" + DEPLOY_NOTE, "Claude/Opus 5.5", None, None))
 
     def test_fix_option_requires_request_and_active_repo(self):
         self.say("/fix browser")
@@ -1205,7 +1272,7 @@ class ServiceTests(unittest.TestCase):
         self.say("/status")
         self.assertIn("Model: Claude/Opus 5.5", self.tg.sent[-1])
         self.say("/unknown")
-        self.assertIn("Unknown command", self.tg.sent[-1])
+        self.assertEqual(self.tg.sent[-1], "Unknown command: /unknown.\n\n" + ADMIN_WELCOME)
         self.say("/fix")
         self.assertIn("Usage", self.tg.sent[-1])
 
