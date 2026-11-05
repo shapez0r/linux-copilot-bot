@@ -16,7 +16,7 @@ setup: $(PY)
 system-deps: $(PY)
 	sudo $(PY) -m playwright install-deps chromium
 
-# Sign in to Microsoft 365 Copilot in a visible browser; needs a display.
+# Sign in to Copilot in a visible browser; needs a display.
 login: $(PY)
 	$(PY) -m bot login
 

@@ -18,7 +18,7 @@ from bot.service import (ACCESS_REQUESTS, APPROVE_ACCESS, DECISION_KEYBOARD, GUE
                          DEPLOY_NOTE, FIX_APP, HELP, KNOWN_MODELS, LIST_APPS, MAIN_KEYBOARD, MODEL_KEYBOARD,
                          NEW_APP_PROMPT, PRIVATE_REPO, PUBLIC_REPO, VISIBILITY_KEYBOARD,
                          REGULAR_CHAT, TEMPORARY_CHAT, USER_HELP, USER_KEYBOARD, REGISTER_SERVICES,
-                         START_APP, STOP_APP, ADMIN_WELCOME, USER_WELCOME, NOTHING_STARTED, Bot, Progress,
+                         START_APP, STOP_APP, SHOW_COMMANDS, ADMIN_WELCOME, USER_WELCOME, NOTHING_STARTED, Bot, Progress,
                          Session)
 from bot.state import ADMIN_OWNER, State, telegram_owner
 from bot.telegram_api import TelegramError
@@ -365,9 +365,13 @@ class ServiceTests(unittest.TestCase):
         admin_labels = {button["text"] for row in MAIN_KEYBOARD["keyboard"] for button in row}
         for label in user_labels:
             self.assertIn(label, USER_WELCOME)
-        for label in admin_labels - user_labels - {"❌ Cancel / stop"}:
+        for label in admin_labels - user_labels:
             self.assertIn(label, ADMIN_WELCOME)
             self.assertNotIn(label, USER_WELCOME)
+        for welcome in (USER_WELCOME, ADMIN_WELCOME):
+            self.assertNotRegex(welcome, r"(^|\s)/[a-z]")
+            self.assertNotIn("365", welcome)
+            self.assertIn("Copilot", welcome)
         self.assertEqual(self.bot.welcome_text(77), USER_WELCOME)
         for hidden in ("admin", "tempchat", "browser", "public|private", "/delete", "/repo", "/register",
                        "/cloudflare", "/model ", "/status", "/requests", "/sessions", "port", "folder"):
@@ -379,13 +383,27 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue(self.tg.sent[-1].startswith(USER_WELCOME))
         self.assertIn(ADMIN_VIEW, self.tg.sent[-1])
 
+    def test_commands_button_lists_the_senders_commands(self):
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}))
+        self.user_say(77, SHOW_COMMANDS)
+        self.assertEqual((self.tg.sent[-1], self.tg.markups[-1]), (USER_HELP, USER_KEYBOARD))
+        self.user_say(42, SHOW_COMMANDS)
+        self.assertEqual((self.tg.sent[-1], self.tg.markups[-1]), (HELP, MAIN_KEYBOARD))
+        self.user_say(42, USER_VIEW)
+        self.user_say(42, SHOW_COMMANDS)
+        self.assertEqual(self.tg.sent[-1], USER_HELP + "\n\n" + ADMIN_VIEW_HINT)
+        self.guest_say(500, SHOW_COMMANDS)
+        self.assertEqual(self.tg.sent[-1], GUEST_NO_ACCESS)
+        self.assertEqual(self.rt.calls, [])
+
     def test_regular_users_see_create_list_fix_and_own_app_controls(self):
         self.approve(77)
         self.bot.cfg = make_config(self.tmp)
         self.user_say(77, "/start")
         self.assertEqual(self.tg.markups[-1], USER_KEYBOARD)
         labels = {button["text"] for row in USER_KEYBOARD["keyboard"] for button in row}
-        self.assertEqual(labels, {CREATE_APP, "📱 List apps", FIX_APP, START_APP, STOP_APP})
+        self.assertEqual(labels, {CREATE_APP, "📱 List apps", FIX_APP, START_APP, STOP_APP, SHOW_COMMANDS})
         self.user_say(77, "/help")
         self.assertEqual(self.tg.sent[-1], USER_HELP)
 
@@ -411,7 +429,7 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("User view enabled", self.tg.sent[-1])
         self.assertEqual(self.tg.markups[-1], ADMIN_USER_VIEW_KEYBOARD)
         user_labels = {button["text"] for row in ADMIN_USER_VIEW_KEYBOARD["keyboard"] for button in row}
-        self.assertEqual(user_labels, {CREATE_APP, LIST_APPS, FIX_APP, START_APP, STOP_APP, ADMIN_VIEW})
+        self.assertEqual(user_labels, {CREATE_APP, LIST_APPS, FIX_APP, START_APP, STOP_APP, SHOW_COMMANDS, ADMIN_VIEW})
         self.assertTrue(State(self.tmp / "state.json", "x").user_view(42))
         self.user_say(42, "/status")
         self.assertIn("only in admin view", self.tg.sent[-1])

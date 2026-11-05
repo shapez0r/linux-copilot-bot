@@ -4,7 +4,7 @@ A Telegram bot for an Ubuntu VM that turns chat messages from authorized users i
 
 1. selects an existing GitHub repository and clones it, or creates a new one from a selected local app template (`eurofish` by default), at `/home/localadmin/repos/<name>`;
 2. takes the message as the prompt;
-3. sends the repository to Microsoft 365 Copilot Chat through the Playwright round-trip engine and applies the returned repository; once the Copilot prompt has ended, the engine deletes the **Microsoft Copilot Chat Files** folder from the signed-in account's OneDrive and empties its recycle bin;
+3. sends the repository to Copilot Chat through the Playwright round-trip engine and applies the returned repository; once the Copilot prompt has ended, the engine deletes the **Microsoft Copilot Chat Files** folder from the signed-in account's OneDrive and empties its recycle bin;
 4. commits and pushes the result to GitHub;
 5. registers and restarts an enabled systemd system service that runs `make run` from `/home/localadmin/repos/<name>`;
 6. for `/new`, allocates the next tunnel port and creates the Cloudflare route.
@@ -14,7 +14,7 @@ A Telegram bot for an Ubuntu VM that turns chat messages from authorized users i
 ## Requirements
 
 - Ubuntu with Python 3.9+, `python3-venv`, Git, and `make`.
-- A Microsoft 365 account with access to Copilot Chat.
+- An account with access to Copilot Chat.
 - A Telegram bot token from [@BotFather](https://t.me/BotFather) and the numeric Telegram user id of each administrator (for example from @userinfobot). Regular users request access in the bot.
 - A GitHub token with read/write access to repository contents. Creating repositories requires permission to create repositories for the owner, and `/delete` requires permission to delete repositories.
 - A local app checkout to use as a new-repository template. The default is `<REPOS_DIR>/eurofish` (`/home/localadmin/repos/eurofish` with the default configuration).
@@ -66,7 +66,7 @@ Administrators have every bot permission. Regular users can create apps, list al
 
 Administrators can switch between **admin view** and **user view** at any time with the **👤 Switch to user view** and **🛡 Switch to admin view** buttons, which are always in their main menu. In user view, an administrator sees and uses the bot exactly as a regular user: the regular-user menu, help, listings, messages, and permissions apply, admin-only commands and buttons are refused, and apps created in that view are public and owned by the administrator's Telegram user id. The choice is stored per administrator and persists across restarts. Regular users cannot switch views.
 
-Send `/start` to get a role-specific welcome message with a persistent keyboard, or `/menu` for the keyboard alone. The welcome message explains how to use the bot with the buttons or with commands, listing only the buttons and commands the sender can use: regular users (and administrators in user view) see the regular-user actions, the `/new` and `/fix` forms without administrator options, and no administrator hints; administrators in user view also get a note on switching back. Any other message outside a guided step, including free text, an unknown command, or a message without text or files, starts nothing and gets the same welcome message after a short note (for example `Unknown command: /foo.`), so a fresh chat always starts from the menu (or, for users without access, from the **🔑 Request access** button). Regular users see creation, listing, fixing, and start/stop controls for their apps; administrators in admin view also see service registration, access requests, deletion, tunnel-management, and **🧵 Running sessions** options, and every administrator menu includes the view switch. The guided **Create an app** flow:
+Send `/start` to get a role-specific welcome message with a persistent keyboard, or `/menu` for the keyboard alone. The welcome message explains how to use the bot with the buttons, describing only the buttons the sender can use, and mentions no commands: regular users (and administrators in user view) see the regular-user actions and no administrator hints; administrators in user view also get a note on switching back. Every main menu has a **⌨️ Commands** button that lists the commands available to the sender, the same as `/help`. Any other message outside a guided step, including free text, an unknown command, or a message without text or files, starts nothing and gets the same welcome message after a short note (for example `Unknown command: /foo.`), so a fresh chat always starts from the menu (or, for users without access, from the **🔑 Request access** button). Regular users see creation, listing, fixing, and start/stop controls for their apps; administrators in admin view also see service registration, access requests, deletion, tunnel-management, and **🧵 Running sessions** options, and every administrator menu includes the view switch. The guided **Create an app** flow:
 
 1. asks for a lowercase app name;
 2. checks the models available in Copilot (see below) and offers them for selection;
@@ -91,7 +91,8 @@ Apps created by regular users are public GitHub repositories. Apps created by ad
 
 | Message | Effect |
 | --- | --- |
-| `/start` | Show the role-specific welcome message, which describes the available buttons and commands, with the app-management keyboard. |
+| `/start` | Show the role-specific welcome message, which describes the available buttons, with the app-management keyboard. |
+| `/help` or **⌨️ Commands** | List the commands available to the sender. |
 | `/menu` | Show the app-management keyboard. |
 | `/new [public\|private] [tempchat\|notempchat] [model=<provider/model>] [template=<app>] name="<name\|owner/name>" prompt="<request>"` | Create an owned GitHub repository (private by default for administrators, always public for regular users), seed it from the selected local app (`eurofish` by default), run the request with the allocated port instruction, push the result, register and start its systemd service, and publish `https://<name>.kurwalab.fyi`. Available to all configured users; `tempchat` and `notempchat` are administrator-only. The optional model and chat type apply only to this command; quote a model name containing spaces or punctuation, such as `model="Claude/Opus 5.5"`. Straight or typographic quotes are accepted. Refuses existing repositories. |
 | `/delete <name>` or `/delete <owner/name>` | **Admin only.** Independently attempt to stop and unregister the app service, remove its Cloudflare tunnel route and matching CNAME, GitHub repository, verified local checkout at `<REPOS_DIR>/<name>`, ownership record, and active selections. Missing resources are successful no-ops; failures and skipped cleanup are reported without blocking other deletion attempts. Cloudflare credentials are needed only for route cleanup, and deleting an existing GitHub repository requires repository-delete permission. |

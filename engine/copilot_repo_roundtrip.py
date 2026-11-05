@@ -2411,7 +2411,7 @@ def _delete_shown(page):
 
 
 def open_signed_in(page, url, timeout_seconds=CLEANUP_LOAD_SECONDS):
-    """Open a OneDrive page with the profile's Microsoft 365 sign-in, choosing the signed-in account if asked."""
+    """Open a OneDrive page with the profile's Copilot sign-in, choosing the signed-in account if asked."""
     page.goto(url, wait_until="domcontentloaded", timeout=timeout_seconds * 1000)
     target = _host(url)
     deadline = time.monotonic() + timeout_seconds

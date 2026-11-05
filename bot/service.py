@@ -80,6 +80,7 @@ APPROVE_ACCESS = "✅ Approve access"
 REJECT_ACCESS = "🚫 Reject request"
 RUNNING_SESSIONS = "🧵 Running sessions"
 STOP_SESSION = "⏹ Stop session"
+SHOW_COMMANDS = "⌨️ Commands"
 
 
 def _keyboard(rows):
@@ -97,19 +98,21 @@ MAIN_KEYBOARD = _keyboard([
     [START_APP, STOP_APP],
     [REGISTER_SERVICES, ACCESS_REQUESTS],
     [TUNNEL_ROUTES, RUNNING_SESSIONS],
-    [CANCEL_ACTION],
+    [CANCEL_ACTION, SHOW_COMMANDS],
     [USER_VIEW],
 ])
 USER_KEYBOARD = _keyboard([
     [CREATE_APP, LIST_APPS],
     [FIX_APP],
     [START_APP, STOP_APP],
+    [SHOW_COMMANDS],
 ])
 # Administrators in user view get the regular-user menu plus a way back to admin view.
 ADMIN_USER_VIEW_KEYBOARD = _keyboard([
     [CREATE_APP, LIST_APPS],
     [FIX_APP],
     [START_APP, STOP_APP],
+    [SHOW_COMMANDS],
     [ADMIN_VIEW],
 ])
 MODEL_KEYBOARD = _keyboard([
@@ -205,25 +208,18 @@ GUEST_WELCOME = (f"This bot creates and manages apps for approved users. Tap {RE
                  "kurwalab.fyi admin for access; you will be notified when it is approved.")
 GUEST_PENDING = "Your access request is waiting for admin approval. You will be notified when it is approved."
 GUEST_NO_ACCESS = f"You do not have access to this bot yet. Send /start and tap {REQUEST_ACCESS}."
-# Welcome texts list only the actions available in each role's menu and commands.
-USER_WELCOME = f"""\U0001f44b Welcome! This bot builds, deploys and runs web apps with Microsoft 365 Copilot.
+# Welcome texts describe only the buttons available in each role's menu; commands are listed by SHOW_COMMANDS.
+USER_WELCOME = f"""\U0001f44b Welcome! This bot builds, deploys and runs web apps with Copilot.
 
 Use the buttons below:
 {CREATE_APP} - enter a name, choose a model and a template, then describe the app.
 {LIST_APPS} - see every app with its status and link.
 {FIX_APP} - choose one of your apps and a model, then describe the change.
 {START_APP} / {STOP_APP} - start or stop one of your apps.
-
-Or type a command with the same choices:
-/new [model=<provider/model>] [template=<app>] name="<name>" prompt="<description>"
-/fix [model=<provider/model>] app="<name>" prompt="<change>"
-/list - list the apps
-/app start|stop <name> - start or stop one of your apps
-/cancel - stop your running request
-/help - every command and option
+{SHOW_COMMANDS} - see the commands available to you.
 
 To attach files, screenshots or photos, send them before the request text or add the request as a caption."""
-ADMIN_WELCOME = f"""\U0001f44b Welcome! This bot builds, deploys and runs web apps with Microsoft 365 Copilot.
+ADMIN_WELCOME = f"""\U0001f44b Welcome! This bot builds, deploys and runs web apps with Copilot.
 
 Use the buttons below:
 {CREATE_APP} - enter a name, choose a model, a template, the repository visibility and the chat type, then describe the app.
@@ -235,13 +231,9 @@ Use the buttons below:
 {ACCESS_REQUESTS} - approve or reject access requests.
 {TUNNEL_ROUTES} - list, add or delete Cloudflare routes.
 {RUNNING_SESSIONS} - see and stop every user's running session.
+{CANCEL_ACTION} - stop your running request.
+{SHOW_COMMANDS} - see the commands available to you.
 {USER_VIEW} - use the bot as a regular user.
-
-Or type a command with the same choices:
-/new [public|private] [tempchat|notempchat] [model=<provider/model>] [template=<app>] name="<name>" prompt="<description>"
-/fix [model=<provider/model>] [tempchat|notempchat] app="<name>" prompt="<change>"
-/cancel - stop your running request
-/help - every command and option
 
 To attach files, screenshots or photos, send them before the request text or add the request as a caption."""
 NOTHING_STARTED = "That message did not start anything."
@@ -569,6 +561,14 @@ class Bot:
             text = USER_WELCOME
         return f"{lead}\n\n{text}" if lead else text
 
+    def help_text(self, user_id=None) -> str:
+        """Return the commands the sender can use, shown by /help and the SHOW_COMMANDS button."""
+        if self._is_admin(user_id):
+            return HELP
+        if self._is_configured_admin(user_id):
+            return f"{USER_HELP}\n\n{ADMIN_VIEW_HINT}"
+        return USER_HELP
+
     def show_welcome(self, chat_id: int, user_id=None, lead: str = ""):
         self.show_menu(chat_id, self.welcome_text(user_id, lead), user_id)
 
@@ -722,6 +722,9 @@ class Bot:
         if text in (USER_VIEW, ADMIN_VIEW):
             self._switch_view(chat_id, text == USER_VIEW, user_id)
             return
+        if text == SHOW_COMMANDS:
+            self.say_keyboard(chat_id, self.help_text(user_id), self._main_keyboard(user_id))
+            return
         if text == REQUEST_ACCESS:
             self.show_menu(chat_id, "You already have access to this bot.", user_id)
             return
@@ -746,13 +749,7 @@ class Bot:
         if command == "start":
             self.show_welcome(chat_id, user_id)
         elif command == "help":
-            if self._is_admin(user_id):
-                help_text = HELP
-            elif self._is_configured_admin(user_id):
-                help_text = f"{USER_HELP}\n\n{ADMIN_VIEW_HINT}"
-            else:
-                help_text = USER_HELP
-            self.say_keyboard(chat_id, help_text, self._main_keyboard(user_id))
+            self.say_keyboard(chat_id, self.help_text(user_id), self._main_keyboard(user_id))
         elif command == "menu":
             self.show_menu(chat_id, user_id=user_id)
         elif command == "new":
