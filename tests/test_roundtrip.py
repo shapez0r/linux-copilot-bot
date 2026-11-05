@@ -92,6 +92,29 @@ class RoundTripTests(unittest.TestCase):
         self.assertNotIn("--show-browser", overridden)
         self.assertNotIn("--no-temporary-chat", overridden)
 
+    def test_parallel_runs_use_a_temporary_copy_of_the_busy_profile(self):
+        profile = self.tmp / "profile"
+        (profile / "Default" / "Cache").mkdir(parents=True)
+        (profile / "Default" / "Cookies").write_text("signed in")
+        (profile / "Default" / "Cache" / "data").write_text("cache")
+        (profile / "SingletonLock").symlink_to("host-123")
+        cfg = make_config(self.tmp, profile=profile)
+        runner = RoundTrip(cfg)
+        with runner.browser_profile() as first:
+            self.assertEqual(first, profile)
+            with runner.browser_profile() as second:
+                self.assertNotEqual(second, profile)
+                self.assertEqual((second / "Default" / "Cookies").read_text(), "signed in")
+                self.assertFalse((second / "Default" / "Cache").exists())
+                self.assertFalse(os.path.lexists(second / "SingletonLock"))
+                self.assertIn(cfg.state_dir, second.parents)
+            self.assertFalse(second.exists())
+        with runner.browser_profile() as again:
+            self.assertEqual(again, profile)
+        cmd = runner.command(self.tmp, "x", "A/B", profile=self.tmp / "copy")
+        self.assertEqual(cmd[cmd.index("--profile") + 1], str(self.tmp / "copy"))
+        self.assertEqual(runner.models_command(profile=self.tmp / "copy")[3], str(self.tmp / "copy"))
+
     def test_success_returns_result_and_relays_status(self):
         result = self.run_engine("ok")
         self.assertEqual(result["chat_response"], "done")

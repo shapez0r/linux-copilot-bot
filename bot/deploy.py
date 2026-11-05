@@ -10,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,6 +78,9 @@ def _unit_path(value: str) -> str:
 
 
 class Deployer:
+    # Parallel sessions must not overwrite each other's crontab edits.
+    _crontab_lock = threading.Lock()
+
     def __init__(self, cfg: Config, bot_repo_dir: Path = ROOT):
         self._cfg = cfg
         self._bot_repo_dir = Path(bot_repo_dir).resolve()
@@ -297,6 +301,10 @@ class Deployer:
 
     def _remove_reboot_entry(self, repo_dir: Path) -> bool:
         """Remove the exact app startup line when crontab is available."""
+        with self._crontab_lock:
+            return self._remove_reboot_line(repo_dir)
+
+    def _remove_reboot_line(self, repo_dir: Path) -> bool:
         crontab = shutil.which("crontab")
         if not crontab:
             return False

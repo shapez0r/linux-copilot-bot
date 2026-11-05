@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 
 from .config import Config, redact
@@ -17,6 +18,9 @@ class GitError(Exception):
 
 
 class Git:
+    # Parallel sessions share the helper copy in STATE_DIR.
+    _helper_lock = threading.Lock()
+
     def __init__(self, cfg: Config, github_login: str = "x-access-token"):
         self._cfg = cfg
         self._login = github_login
@@ -27,18 +31,19 @@ class Git:
         Changing the helper's mode in place would leave the bot's own checkout with an uncommitted change.
         """
         helper = self._cfg.state_dir / "git-askpass"
-        try:
-            content = self._cfg.askpass.read_bytes()
-            if not helper.is_file() or helper.read_bytes() != content:
-                helper.parent.mkdir(parents=True, exist_ok=True)
-                temporary = helper.with_suffix(".tmp")
-                temporary.write_bytes(content)
-                temporary.chmod(0o700)
-                os.replace(temporary, helper)
-            elif not os.access(helper, os.X_OK):
-                helper.chmod(0o700)
-        except OSError as exc:
-            raise GitError(f"Cannot prepare the Git credential helper: {exc.strerror or exc}") from None
+        with self._helper_lock:
+            try:
+                content = self._cfg.askpass.read_bytes()
+                if not helper.is_file() or helper.read_bytes() != content:
+                    helper.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = helper.with_suffix(".tmp")
+                    temporary.write_bytes(content)
+                    temporary.chmod(0o700)
+                    os.replace(temporary, helper)
+                elif not os.access(helper, os.X_OK):
+                    helper.chmod(0o700)
+            except OSError as exc:
+                raise GitError(f"Cannot prepare the Git credential helper: {exc.strerror or exc}") from None
         return helper
 
     def _env(self):

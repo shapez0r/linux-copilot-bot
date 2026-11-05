@@ -187,8 +187,11 @@ class CloudflareRoutes:
                 apps.append({"app": app, "hostname": hostname, "service": service})
         return apps
 
-    def next_port(self) -> int:
-        """Return the port after the last local HTTP route, or 8080 when the list is empty."""
+    def next_port(self, reserved=()) -> int:
+        """Return the port after the last local HTTP route, or 8080 when the list is empty.
+
+        Reserved ports, held by app creations that have not published their routes yet, are skipped.
+        """
         tunnel_id = self._resolve_tunnel()
         _, ingress = self._configuration(tunnel_id)
         last_port = None
@@ -198,11 +201,14 @@ class CloudflareRoutes:
             match = _LOCAL_HTTP.fullmatch(str(rule.get("service", "")))
             if match and 1 <= int(match.group(1)) <= 65535:
                 last_port = int(match.group(1))
-        if last_port is None:
-            return FIRST_APP_PORT
         if last_port == 65535:
             raise CloudflareError("the last tunnel route uses port 65535; no next port is available")
-        return last_port + 1
+        port = FIRST_APP_PORT if last_port is None else last_port + 1
+        while port in reserved:
+            port += 1
+        if port > 65535:
+            raise CloudflareError("every port after the last tunnel route is reserved; no next port is available")
+        return port
 
     def delete_route(self, app: str, missing_ok: bool = False) -> str:
         """Delete one explicitly named ingress rule and its tunnel CNAME."""

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -24,6 +25,8 @@ def owner_label(owner: str) -> str:
 class State:
     def __init__(self, path: Path, default_model: str):
         self._path = path
+        # Parallel sessions save concurrently through the same temporary file.
+        self._save_lock = threading.Lock()
         self.repo = ""
         self.model = default_model
         self.app_owners = {}
@@ -148,15 +151,16 @@ class State:
         return next((key for key in self.app_owners if key.lower() == target), repo)
 
     def save(self):
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({
-            "repo": self.repo,
-            "model": self.model,
-            "app_owners": self.app_owners,
-            "active_repos": self.active_repos,
-            "user_view_ids": sorted(self.user_view_ids, key=int),
-            "approved_users": self.approved_users,
-            "access_requests": self.access_requests,
-        }, sort_keys=True))
-        os.replace(tmp, self._path)
+        with self._save_lock:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({
+                "repo": self.repo,
+                "model": self.model,
+                "app_owners": dict(self.app_owners),
+                "active_repos": dict(self.active_repos),
+                "user_view_ids": sorted(set(self.user_view_ids), key=int),
+                "approved_users": dict(self.approved_users),
+                "access_requests": dict(self.access_requests),
+            }, sort_keys=True))
+            os.replace(tmp, self._path)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import itertools
 import logging
 import re
 import shutil
@@ -19,7 +20,7 @@ from .github_api import GitHub, GitHubError
 from .gitops import Git, GitError
 from .repos import RepoError, local_path, parse_repo_ref
 from .roundtrip import (Cancelled, RoundTrip, RoundTripError, StatusTimeline,
-                        format_stage_status)
+                        format_stage_status, format_timestamp)
 from .state import ADMIN_OWNER, State, telegram_owner
 from .telegram_api import DOWNLOAD_LIMIT, Telegram, TelegramError
 
@@ -77,6 +78,8 @@ REQUEST_ACCESS = "🔑 Request access"
 ACCESS_REQUESTS = "📨 Access requests"
 APPROVE_ACCESS = "✅ Approve access"
 REJECT_ACCESS = "🚫 Reject request"
+RUNNING_SESSIONS = "🧵 Running sessions"
+STOP_SESSION = "⏹ Stop session"
 
 
 def _keyboard(rows):
@@ -93,7 +96,7 @@ MAIN_KEYBOARD = _keyboard([
     [FIX_APP, DELETE_APP],
     [START_APP, STOP_APP],
     [REGISTER_SERVICES, ACCESS_REQUESTS],
-    [TUNNEL_ROUTES],
+    [TUNNEL_ROUTES, RUNNING_SESSIONS],
     [CANCEL_ACTION],
     [USER_VIEW],
 ])
@@ -137,7 +140,7 @@ ATTACH_HELP = (
     "create or fix request; a file caption is used as the request text. Cancel / stop discards attached files."
 )
 
-HELP = f"""Use the buttons below to create and manage apps. You can also send a request as plain text to change the active repository, commit, push and redeploy it with `make run`. Use {USER_VIEW} in the main menu to use the bot as a regular user.
+HELP = f"""Use the buttons below to create and manage apps. You can also send a request as plain text to change the active repository, commit, push and redeploy it with `make run`. Each user runs one session (a create, fix or other job) at a time, in parallel with other users. Use {USER_VIEW} in the main menu to use the bot as a regular user.
 
 {ATTACH_HELP}
 
@@ -155,15 +158,17 @@ HELP = f"""Use the buttons below to create and manage apps. You can also send a 
 /cloudflare list - list tunnel routes
 /cloudflare delete <subdomain> - delete a tunnel route by name
 /model <provider/model> - choose the Copilot model (for example GPT/GPT-6)
-/status - show repository, model, job and app state
+/status - show repository, model, session and app state
 /requests - show pending access requests and approved users
 /approve <user id> - give a Telegram user regular-user access
 /reject <user id> - decline a pending access request
 /revoke <user id> - remove a regular user's access
-/cancel - stop the running job and discard attached files
+/sessions - list every user's running session
+/sessions stop <number> - stop a running session
+/cancel - stop your running session and discard attached files
 /help - show this message"""
 ADMIN_VIEW_HINT = f"You are an admin in user view. Use {ADMIN_VIEW} in the main menu to return to admin view."
-USER_HELP = f"""Use the buttons below to create and list apps, and to fix, start, or stop apps you created.
+USER_HELP = f"""Use the buttons below to create and list apps, and to fix, start, or stop apps you created. You can run one session (a create, fix or other job) at a time, in parallel with other users.
 
 {ATTACH_HELP}
 
@@ -173,21 +178,23 @@ USER_HELP = f"""Use the buttons below to create and list apps, and to fix, start
 /fix [browser|nobrowser] [tempchat|notempchat] <request> - fix your active app
 /list - list every local app with its status and public URL
 /app start|stop <name> - start or stop one of your app services
-/cancel - stop your own running job and discard attached files
+/cancel - stop your running session and discard attached files
 /help - show this message"""
 
 ADMIN_ONLY_BUTTONS = {
     DELETE_APP, TUNNEL_ROUTES,
-    LIST_ROUTES, ADD_ROUTE, DELETE_ROUTE, REGISTER_SERVICES, ACCESS_REQUESTS,
+    LIST_ROUTES, ADD_ROUTE, DELETE_ROUTE, REGISTER_SERVICES, ACCESS_REQUESTS, RUNNING_SESSIONS,
 }
 ADMIN_ONLY_COMMANDS = {"delete", "repo", "cloudflare", "model", "status", "register",
-                       "requests", "approve", "reject", "revoke"}
+                       "requests", "approve", "reject", "revoke", "sessions"}
 ADMIN_ONLY_MESSAGE = "This action is available only to kurwalab.fyi admins."
 USER_VIEW_ADMIN_ONLY_MESSAGE = f"This action is available only in admin view. Use {ADMIN_VIEW} in the main menu."
 GUEST_WELCOME = (f"This bot creates and manages apps for approved users. Tap {REQUEST_ACCESS} to ask a "
                  "kurwalab.fyi admin for access; you will be notified when it is approved.")
 GUEST_PENDING = "Your access request is waiting for admin approval. You will be notified when it is approved."
 GUEST_NO_ACCESS = f"You do not have access to this bot yet. Send /start and tap {REQUEST_ACCESS}."
+RESTART_PENDING_MESSAGE = ("The bot restarts to apply an update as soon as the running sessions finish. "
+                           "Try again after the restart.")
 
 
 
@@ -228,15 +235,43 @@ class Progress:
             log.warning("progress update failed: %s", e)
 
 
+class Session:
+    """One running job of a user, such as a Copilot round-trip; each user runs at most one at a time."""
+
+    def __init__(self, number: int, user_id, chat_id: int, label: str, app: str = ""):
+        self.number, self.user_id, self.chat_id, self.label = number, user_id, chat_id, label
+        # The app folder this session changes; two sessions never work on the same app.
+        self.app = app.lower()
+        self.started, self.started_at = time.monotonic(), format_timestamp()
+        self.cancel = threading.Event()
+        # Tunnel port reserved by an app creation until the session ends.
+        self.port = None
+        self.thread = None
+
+    def elapsed(self) -> str:
+        seconds = int(time.monotonic() - self.started)
+        hours, rest = divmod(seconds, 3600)
+        minutes, seconds = divmod(rest, 60)
+        return f"{hours}h {minutes:02d}m" if hours else f"{minutes}m {seconds:02d}s" if minutes else f"{seconds}s"
+
+
 class Bot:
     def __init__(self, cfg: Config, tg: Telegram, gh: GitHub, git: Git, roundtrip: RoundTrip,
                  deployer: Deployer, state: State):
         self.cfg, self.tg, self.gh, self.git = cfg, tg, gh, git
         self.roundtrip, self.deployer, self.state = roundtrip, deployer, state
-        self._lock = threading.Lock()
-        self._cancel = threading.Event()
+        # Running sessions keyed by Telegram user id; guarded by _sessions_lock.
+        self._sessions = {}
+        self._sessions_lock = threading.Lock()
+        self._session_numbers = itertools.count(1)
+        self._port_lock = threading.Lock()
+        self._local = threading.local()
+        self._idle_cancel = threading.Event()
+        # Chat to report to while a bot restart waits for the running sessions to finish.
+        self._restart_chat = None
+        self._restart_pending = False
+        self._names = {}
         self._worker = None
-        self._job_user_id = None
         self._list_worker = None
         self._dialogs = {}
         self._pending_files = {}
@@ -268,9 +303,13 @@ class Bot:
         self.shutdown()
 
     def shutdown(self):
-        self._cancel.set()
-        if self._worker is not None:
-            self._worker.join(timeout=60)
+        sessions = self._running_sessions()
+        for session in sessions:
+            session.cancel.set()
+        deadline = time.monotonic() + 60
+        for session in sessions:
+            if session.thread is not None:
+                session.thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
     def handle_update(self, update: dict):
         message = update.get("message") or {}
@@ -282,6 +321,9 @@ class Bot:
         if not self._authorized(sender):
             self._handle_guest(chat["id"], sender, message)
             return
+        name = self._display_name(message.get("from") or {})
+        if name:
+            self._names[sender] = name
         text = (message.get("text") or "").strip()
         files = self._message_files(message)
         if files:
@@ -377,10 +419,10 @@ class Bot:
         pending = self._pending_files.pop(chat_id, None)
         return f" Discarded {len(pending)} attached file(s)." if pending else ""
 
-    def _spawn_request(self, chat_id: int, job, after=None, user_id=None) -> bool:
-        """Start a create or fix job with the chat's pending attachments, which it then consumes."""
+    def _spawn_request(self, chat_id: int, job, after=None, user_id=None, label: str = "", app: str = "") -> bool:
+        """Start a create or fix session with the chat's pending attachments, which it then consumes."""
         files = list(self._pending_files.get(chat_id) or [])
-        started = self._spawn(chat_id, lambda: job(files), after=after, user_id=user_id)
+        started = self._spawn(chat_id, lambda: job(files), after=after, user_id=user_id, label=label, app=app)
         if started:
             self._pending_files.pop(chat_id, None)
         return started
@@ -589,9 +631,13 @@ class Bot:
                 self.show_menu(chat_id, f"{target} is not an approved user.", user_id)
                 return
             self.state.save()
-            # Private chat ids equal user ids, so the revoked user's open dialog and held files are dropped.
+            # Private chat ids equal user ids, so the revoked user's open dialog and held files are dropped
+            # and a running session is stopped.
             self._dialogs.pop(target, None)
             self._pending_files.pop(target, None)
+            session = self._session_of(target)
+            if session is not None:
+                session.cancel.set()
             self.say_keyboard(target, "Your access to this bot was removed.", REMOVE_KEYBOARD)
             self.show_menu(chat_id, f"Removed access for {self._person_label(target, info)}. Their apps are kept.",
                            user_id)
@@ -615,7 +661,7 @@ class Bot:
             self.show_menu(chat_id, "You already have access to this bot.", user_id)
             return
         if text in (CREATE_APP, LIST_APPS, FIX_APP, START_APP, STOP_APP, REGISTER_SERVICES,
-                    DELETE_APP, TUNNEL_ROUTES, ACCESS_REQUESTS,
+                    DELETE_APP, TUNNEL_ROUTES, ACCESS_REQUESTS, RUNNING_SESSIONS,
                     LIST_ROUTES, ADD_ROUTE, DELETE_ROUTE):
             self._handle_menu_button(chat_id, text, user_id)
             return
@@ -646,7 +692,7 @@ class Bot:
         elif command == "new":
             self.cmd_new(chat_id, arg, user_id)
         elif command == "delete":
-            self.cmd_delete(chat_id, arg)
+            self.cmd_delete(chat_id, arg, user_id)
         elif command == "repo":
             self.cmd_repo(chat_id, arg, user_id)
         elif command == "fix":
@@ -658,7 +704,7 @@ class Bot:
         elif command == "register":
             self.cmd_register(chat_id, arg, user_id)
         elif command == "cloudflare":
-            self.cmd_cloudflare(chat_id, arg)
+            self.cmd_cloudflare(chat_id, arg, user_id)
         elif command == "model":
             self.cmd_model(chat_id, arg)
         elif command == "status":
@@ -667,6 +713,8 @@ class Bot:
             self.cmd_requests(chat_id, arg, user_id)
         elif command in ("approve", "reject", "revoke"):
             self.cmd_access(chat_id, command, arg, user_id)
+        elif command == "sessions":
+            self.cmd_sessions(chat_id, arg, user_id)
         elif command == "cancel":
             self.cmd_cancel(chat_id, user_id)
         else:
@@ -685,11 +733,13 @@ class Bot:
             self._dialogs.pop(chat_id, None)
             self.say_keyboard(chat_id, "Manage Cloudflare Tunnel routes.", ROUTES_KEYBOARD)
         elif label == LIST_ROUTES:
-            self.cmd_cloudflare(chat_id, "list")
+            self.cmd_cloudflare(chat_id, "list", user_id)
         elif label == ACCESS_REQUESTS:
             self._show_access_requests(chat_id, user_id)
+        elif label == RUNNING_SESSIONS:
+            self._show_sessions(chat_id, user_id)
         elif label == CREATE_APP:
-            if self._cloudflare_unavailable(chat_id) or self._job_blocks_dialog(chat_id):
+            if self._cloudflare_unavailable(chat_id) or self._job_blocks_dialog(chat_id, user_id):
                 return
             self._dialogs[chat_id] = {"flow": "create", "step": "name", "data": {},
                                       "user_id": user_id}
@@ -699,7 +749,7 @@ class Bot:
                 CANCEL_KEYBOARD,
             )
         elif label == FIX_APP:
-            if self._job_blocks_dialog(chat_id):
+            if self._job_blocks_dialog(chat_id, user_id):
                 return
             choices = self._app_choices(user_id, include_active=True, include_bot=True)
             if not choices and not self._is_admin(user_id):
@@ -727,7 +777,7 @@ class Bot:
                                       "user_id": user_id}
             self.say_keyboard(chat_id, f"Choose an app to {action}.", self._choice_keyboard(choices))
         elif label == DELETE_APP:
-            if self._job_blocks_dialog(chat_id):
+            if self._job_blocks_dialog(chat_id, user_id):
                 return
             choices = self._app_choices(user_id, include_active=True)
             self._dialogs[chat_id] = {"flow": "delete", "step": "name", "data": {},
@@ -738,22 +788,24 @@ class Bot:
                 self._choice_keyboard(choices),
             )
         elif label == ADD_ROUTE:
-            if self._cloudflare_unavailable(chat_id) or self._job_blocks_dialog(chat_id):
+            if self._cloudflare_unavailable(chat_id) or self._job_blocks_dialog(chat_id, user_id):
                 return
             self._dialogs[chat_id] = {"flow": "route-add", "step": "name", "data": {},
                                       "user_id": user_id}
             self.say_keyboard(chat_id, "Enter the lowercase subdomain for the route.", CANCEL_KEYBOARD)
         elif label == DELETE_ROUTE:
-            if self._cloudflare_unavailable(chat_id) or self._job_blocks_dialog(chat_id):
+            if self._cloudflare_unavailable(chat_id) or self._job_blocks_dialog(chat_id, user_id):
                 return
             self._dialogs[chat_id] = {"flow": "route-delete", "step": "name", "data": {},
                                       "user_id": user_id}
             self.say_keyboard(chat_id, "Enter the lowercase subdomain of the route to delete.", CANCEL_KEYBOARD)
 
-    def _job_blocks_dialog(self, chat_id: int) -> bool:
-        if not self._lock.locked():
+    def _job_blocks_dialog(self, chat_id: int, user_id=None) -> bool:
+        """Refuse to open a guided flow while the user's own session still runs."""
+        session = self._session_of(user_id)
+        if session is None:
             return False
-        self.say(chat_id, "A job is already running. Wait for it or use Cancel / stop.")
+        self.say(chat_id, f"Your session is still running: {session.label}. Wait for it or use Cancel / stop.")
         return True
 
     def _app_choices(self, user_id=None, include_active: bool = False, include_bot: bool = False):
@@ -864,6 +916,12 @@ class Bot:
             self._handle_route_delete_dialog(chat_id, dialog, text)
         elif flow == "access":
             self._handle_access_dialog(chat_id, dialog, text, user_id)
+        elif flow == "sessions":
+            match = re.search(r"#(\d+)\s*$", text)
+            if not match:
+                self.say(chat_id, "Choose one of the listed sessions to stop.")
+                return
+            self._stop_session(chat_id, int(match.group(1)), user_id)
         else:
             self.show_menu(chat_id, "That action expired. Choose another action.", user_id)
 
@@ -922,11 +980,10 @@ class Bot:
                                             data.get("temporary_chat"), files),
                 after=lambda: self.show_menu(chat_id, "App creation finished. Choose the next action.",
                                              dialog.get("user_id")),
-                user_id=dialog.get("user_id"),
+                user_id=dialog.get("user_id"), label=f"Create {data['ref']}", app=self._app_key(data["ref"]),
             )
             if not started:
-                self.show_menu(chat_id, "App creation could not start because another job is running.",
-                               dialog.get("user_id"))
+                self.show_menu(chat_id, "App creation did not start.", dialog.get("user_id"))
 
     def _ask_create_prompt(self, chat_id: int, dialog: dict):
         dialog["step"] = "prompt"
@@ -966,7 +1023,7 @@ class Bot:
         self.say_keyboard(chat_id, "Checking the Claude and GPT models currently available in Copilot...",
                           CANCEL_KEYBOARD)
         started = self._spawn(chat_id, lambda: self._load_model_choices(chat_id, dialog),
-                              user_id=dialog.get("user_id"))
+                              user_id=dialog.get("user_id"), label="Model check")
         if not started:
             self._dialogs.pop(chat_id, None)
 
@@ -976,6 +1033,12 @@ class Bot:
             error = "" if models else "the model picker listed no Claude or GPT models"
         except RoundTripError as exc:
             models, error = [], str(exc)
+        except Cancelled:
+            # A session stopped by an admin leaves no dialog waiting for the model list.
+            if self._dialogs.get(chat_id) is not dialog:
+                raise
+            self.show_menu(chat_id, "The model check was stopped. Choose the next action.", dialog.get("user_id"))
+            return
         if self._dialogs.get(chat_id) is not dialog:
             return
         data = dialog["data"]
@@ -1017,7 +1080,7 @@ class Bot:
         dialog["step"] = "loading-templates"
         self.say_keyboard(chat_id, "Loading template apps from the Cloudflare tunnel routes...", CANCEL_KEYBOARD)
         started = self._spawn(chat_id, lambda: self._load_template_choices(chat_id, dialog),
-                              user_id=dialog.get("user_id"))
+                              user_id=dialog.get("user_id"), label="Template list")
         if not started:
             self._dialogs.pop(chat_id, None)
 
@@ -1090,9 +1153,9 @@ class Bot:
                                           temporary_chat=temporary_chat, attachments=files),
                               after=lambda: self.show_menu(chat_id, "Fix finished. Choose the next action.",
                                                            user_id),
-                              user_id=user_id)
+                              user_id=user_id, label=f"Fix {repo}", app=self._app_key(repo))
         if not started:
-            self.show_menu(chat_id, "The fix could not start because another job is running.", user_id)
+            self.show_menu(chat_id, "The fix did not start.", user_id)
 
     def _handle_delete_dialog(self, chat_id: int, dialog: dict, text: str):
         if dialog["step"] == "name":
@@ -1123,10 +1186,12 @@ class Bot:
         started = self._spawn(
             chat_id,
             lambda: self._delete_app(chat_id, ref),
-            after=lambda: self.show_menu(chat_id, "Deletion attempt finished. Choose the next action."),
+            after=lambda: self.show_menu(chat_id, "Deletion attempt finished. Choose the next action.",
+                                         dialog.get("user_id")),
+            user_id=dialog.get("user_id"), label=f"Delete {ref}", app=self._app_key(ref),
         )
         if not started:
-            self.show_menu(chat_id, "Deletion could not start because another job is running.")
+            self.show_menu(chat_id, "Deletion did not start.", dialog.get("user_id"))
 
     def _handle_route_add_dialog(self, chat_id: int, dialog: dict, text: str):
         if dialog["step"] == "name":
@@ -1145,10 +1210,12 @@ class Bot:
         started = self._spawn(
             chat_id,
             lambda: self.say(chat_id, CloudflareRoutes(self.cfg).prepare(name, port)),
-            after=lambda: self.show_menu(chat_id, "Route update finished. Choose the next action."),
+            after=lambda: self.show_menu(chat_id, "Route update finished. Choose the next action.",
+                                         dialog.get("user_id")),
+            user_id=dialog.get("user_id"), label=f"Tunnel route {name}",
         )
         if not started:
-            self.show_menu(chat_id, "The route update could not start because another job is running.")
+            self.show_menu(chat_id, "The route update did not start.", dialog.get("user_id"))
 
     def _handle_route_delete_dialog(self, chat_id: int, dialog: dict, text: str):
         if dialog["step"] == "name":
@@ -1171,12 +1238,14 @@ class Bot:
         started = self._spawn(
             chat_id,
             lambda: self.say(chat_id, CloudflareRoutes(self.cfg).delete_route(name)),
-            after=lambda: self.show_menu(chat_id, "Route deletion finished. Choose the next action."),
+            after=lambda: self.show_menu(chat_id, "Route deletion finished. Choose the next action.",
+                                         dialog.get("user_id")),
+            user_id=dialog.get("user_id"), label=f"Delete tunnel route {name}",
         )
         if not started:
-            self.show_menu(chat_id, "Route deletion could not start because another job is running.")
+            self.show_menu(chat_id, "Route deletion did not start.", dialog.get("user_id"))
 
-    def cmd_cloudflare(self, chat_id: int, arg: str):
+    def cmd_cloudflare(self, chat_id: int, arg: str, user_id=None):
         """Manage only routes explicitly requested by an authorized user."""
         parts = arg.split()
         usage = "Usage: /cloudflare <subdomain> <port> | list | delete <subdomain>"
@@ -1186,7 +1255,8 @@ class Bot:
                 return
             if self._cloudflare_unavailable(chat_id):
                 return
-            self._spawn(chat_id, lambda: self.say(chat_id, CloudflareRoutes(self.cfg).list_routes()))
+            self._spawn(chat_id, lambda: self.say(chat_id, CloudflareRoutes(self.cfg).list_routes()),
+                        user_id=user_id, label="Tunnel route list")
             return
         if parts and parts[0] == "delete":
             if len(parts) != 2:
@@ -1198,7 +1268,8 @@ class Bot:
                 return
             if self._cloudflare_unavailable(chat_id):
                 return
-            self._spawn(chat_id, lambda: self.say(chat_id, CloudflareRoutes(self.cfg).delete_route(route)))
+            self._spawn(chat_id, lambda: self.say(chat_id, CloudflareRoutes(self.cfg).delete_route(route)),
+                        user_id=user_id, label=f"Delete tunnel route {route}")
             return
         if len(parts) != 2:
             self.say(chat_id, usage)
@@ -1212,7 +1283,8 @@ class Bot:
             return
         if self._cloudflare_unavailable(chat_id):
             return
-        self._spawn(chat_id, lambda: self.say(chat_id, CloudflareRoutes(self.cfg).prepare(route, int(raw_port))))
+        self._spawn(chat_id, lambda: self.say(chat_id, CloudflareRoutes(self.cfg).prepare(route, int(raw_port))),
+                    user_id=user_id, label=f"Tunnel route {route}")
 
     @staticmethod
     def _valid_route(route: str) -> bool:
@@ -1243,8 +1315,10 @@ class Bot:
 
     def cmd_status(self, chat_id: int, user_id=None):
         active = self.state.get_active_repo(user_id, self._is_admin(user_id))
+        session = self._session_of(user_id)
         lines = [f"Repository: {active or 'none selected'}", f"Model: {self.state.model}",
-                 f"Job: {'running' if self._lock.locked() else 'idle'}"]
+                 f"Your session: {session.label + ' (running ' + session.elapsed() + ')' if session else 'idle'}",
+                 f"Running sessions of all users: {len(self._running_sessions())}"]
         if active:
             name = active.split("/", 1)[1]
             try:
@@ -1294,7 +1368,7 @@ class Bot:
                     message = f"{name} is stopped." if stopped else f"{name} was already stopped."
                 self.say(chat_id, "✅ " + message)
 
-        self._spawn(chat_id, control, user_id=user_id)
+        self._spawn(chat_id, control, user_id=user_id, label=f"{action.capitalize()} {name}")
 
     def cmd_register(self, chat_id: int, arg: str, user_id=None):
         target = arg.strip() or "all"
@@ -1327,7 +1401,7 @@ class Bot:
                 self.state.save()
             self.say(chat_id, "\n".join(lines))
 
-        self._spawn(chat_id, register, user_id=user_id)
+        self._spawn(chat_id, register, user_id=user_id, label="Register app services")
 
     def cmd_list(self, chat_id: int, arg: str, user_id=None):
         if arg:
@@ -1399,20 +1473,132 @@ class Bot:
             log.warning("send failed: %s", redact(str(error), self.cfg.secrets))
 
     def cmd_cancel(self, chat_id: int, user_id=None):
+        """Stop the sender's own session; admins stop other users' sessions from Running sessions."""
         discarded = self._discard_files(chat_id)
+        session = self._session_of(user_id)
         if chat_id in self._dialogs:
-            if self._dialogs[chat_id].get("step") == "loading-models" and self._job_user_id == user_id:
-                self._cancel.set()
+            if self._dialogs[chat_id].get("step") == "loading-models" and session is not None:
+                session.cancel.set()
             self.show_menu(chat_id, "Action cancelled." + discarded, user_id)
             return
-        if self._lock.locked():
-            if not self._is_admin(user_id) and self._job_user_id != user_id:
-                self.say(chat_id, "You can only cancel your own running job." + discarded)
-                return
-            self._cancel.set()
-            self.say(chat_id, "Cancelling; Copilot is asked to stop." + discarded)
+        if session is not None:
+            session.cancel.set()
+            self.say(chat_id, f"Cancelling your session ({session.label}); Copilot is asked to stop." + discarded)
+            return
+        message = "You have no running session." + discarded
+        if self._is_admin(user_id) and self._running_sessions():
+            message += f" Use {RUNNING_SESSIONS} or /sessions to stop other users' sessions."
+        self.say(chat_id, message)
+
+    # ---- Sessions ------------------------------------------------------
+
+    @property
+    def _cancel(self) -> threading.Event:
+        """Cancel event of the session running on the current thread."""
+        session = getattr(self._local, "session", None)
+        return session.cancel if session is not None else self._idle_cancel
+
+    def _session_of(self, user_id):
+        with self._sessions_lock:
+            return self._sessions.get(user_id)
+
+    def _running_sessions(self):
+        with self._sessions_lock:
+            return sorted(self._sessions.values(), key=lambda session: session.number)
+
+    @staticmethod
+    def _app_key(ref: str) -> str:
+        """Return the app folder name a repository reference changes, or an empty string."""
+        try:
+            return parse_repo_ref(ref, "owner")[1].lower()
+        except RepoError:
+            return ""
+
+    def _session_owner(self, user_id) -> str:
+        if user_id is None:
+            return "bot"
+        info = self.state.approved_users.get(str(user_id)) or {}
+        label = self._person_label(user_id, {"name": self._names.get(user_id) or info.get("name")})
+        return label + (" (admin)" if self._is_configured_admin(user_id) else "")
+
+    def _session_line(self, session: Session) -> str:
+        line = (f"#{session.number} · {self._session_owner(session.user_id)} · {session.label} · "
+                f"started {session.started_at}, running {session.elapsed()}")
+        return line + (" · stopping" if session.cancel.is_set() else "")
+
+    def cmd_sessions(self, chat_id: int, arg: str, user_id=None):
+        parts = arg.split()
+        if not parts:
+            self._show_sessions(chat_id, user_id)
+        elif len(parts) == 2 and parts[0].lower() == "stop" and parts[1].lstrip("#").isdecimal():
+            self._stop_session(chat_id, int(parts[1].lstrip("#")), user_id)
         else:
-            self.say(chat_id, ("No job is running." + discarded) if discarded else "No job is running.")
+            self.say(chat_id, "Usage: /sessions [stop <number>]")
+
+    def _show_sessions(self, chat_id: int, user_id=None):
+        """List every user's running session and offer a stop button for each."""
+        sessions = self._running_sessions()
+        if not sessions:
+            self.show_menu(chat_id, "No sessions are running.", user_id)
+            return
+        lines = [f"Running sessions ({len(sessions)}):"] + [f"- {self._session_line(item)}" for item in sessions]
+        self._dialogs[chat_id] = {"flow": "sessions", "step": "choose", "data": {}, "user_id": user_id}
+        buttons = [f"{STOP_SESSION} #{item.number}" for item in sessions]
+        self.say_keyboard(chat_id, "\n".join(lines) + f"\n\nChoose a session to stop, or tap {RUNNING_SESSIONS} "
+                                                      "to refresh the list.",
+                          self._choice_keyboard(buttons, [[RUNNING_SESSIONS]]))
+
+    def _stop_session(self, chat_id: int, number: int, user_id=None):
+        session = next((item for item in self._running_sessions() if item.number == number), None)
+        if session is None:
+            self.show_menu(chat_id, f"Session #{number} is not running.", user_id)
+            return
+        if session.cancel.is_set():
+            self.show_menu(chat_id, f"Session #{number} is already stopping.", user_id)
+            return
+        session.cancel.set()
+        if session.user_id != user_id:
+            self.say(session.chat_id, f"\u23f9 A kurwalab.fyi admin stopped your running session: {session.label}.")
+        self.show_menu(chat_id, f"Stopping session #{number} ({session.label}) of "
+                                f"{self._session_owner(session.user_id)}; Copilot is asked to stop. Actions that "
+                                "do not use Copilot finish their current step first.", user_id)
+
+    def _session_refusal(self, user_id, app: str) -> str:
+        """Return why a new session cannot start; the caller holds _sessions_lock."""
+        if self._restart_pending:
+            return RESTART_PENDING_MESSAGE
+        own = self._sessions.get(user_id)
+        if own is not None:
+            return f"Your session is still running: {own.label}. Wait for it to finish or use Cancel / stop."
+        if app and any(session.app == app for session in self._sessions.values()):
+            return f"Another session is already working on {app}. Try again when it finishes."
+        return ""
+
+    def _reserve_port(self, routes: CloudflareRoutes) -> int:
+        """Allocate the next tunnel port, skipping ports that other app creations hold until they end."""
+        session = getattr(self._local, "session", None)
+        with self._port_lock:
+            with self._sessions_lock:
+                reserved = {item.port for item in self._sessions.values() if item.port}
+            port = routes.next_port(reserved=reserved)
+            if session is not None:
+                session.port = port
+        return port
+
+    def _schedule_bot_restart(self, chat_id: int):
+        """Restart the bot once every session has ended, so no other user's session is interrupted."""
+        with self._sessions_lock:
+            self._restart_pending, self._restart_chat = True, chat_id
+
+    def _restart_when_idle(self):
+        with self._sessions_lock:
+            if not self._restart_pending or self._sessions:
+                return
+            chat_id, self._restart_pending, self._restart_chat = self._restart_chat, False, None
+        try:
+            self.deployer.restart_bot()
+        except DeployError as error:
+            self.say(chat_id, f"\u274c {error}")
 
     def cmd_fix(self, chat_id: int, arg: str, user_id=None):
         """Run a request with optional browser and Temporary chat overrides."""
@@ -1571,13 +1757,14 @@ class Bot:
         ref, request = parts[0], parts[1].strip()
         self._spawn_request(chat_id, lambda files: self._new_app(
             chat_id, ref, request, private, model, template or NEW_REPO_TEMPLATE, user_id, temporary_chat,
-            files), user_id=user_id)
+            files), user_id=user_id, label=f"Create {ref}", app=self._app_key(ref))
 
-    def cmd_delete(self, chat_id: int, arg: str):
+    def cmd_delete(self, chat_id: int, arg: str, user_id=None):
         if len(arg.split()) != 1:
             self.say(chat_id, "Usage: /delete <name|owner/name>")
             return
-        self._spawn(chat_id, lambda: self._delete_app(chat_id, arg))
+        self._spawn(chat_id, lambda: self._delete_app(chat_id, arg), user_id=user_id, label=f"Delete {arg}",
+                    app=self._app_key(arg))
 
     def cmd_repo(self, chat_id: int, arg: str, user_id=None):
         arg, private = self._creation_options(arg)
@@ -1587,7 +1774,7 @@ class Bot:
                      else "No repository selected. Use /repo <name>.")
             return
         self._spawn(chat_id, lambda: self._select_repo(chat_id, arg, private=private, user_id=user_id),
-                    user_id=user_id)
+                    user_id=user_id, label=f"Select {arg}", app=self._app_key(arg))
 
     def start_request(self, chat_id: int, ref: str, request: str,
                       show_browser=None, temporary_chat=None, user_id=None):
@@ -1610,20 +1797,25 @@ class Bot:
             return
         self._spawn_request(chat_id, lambda files: self._request(
             chat_id, full, request, show_browser, temporary_chat, user_id, attachments=files),
-            user_id=user_id)
+            user_id=user_id, label=f"Fix {full}", app=name)
 
     # ---- Job execution -------------------------------------------------
 
-    def _spawn(self, chat_id: int, job, after=None, user_id=None):
-        if not self._lock.acquire(blocking=False):
-            self.say(chat_id, "A job is already running. Wait for it or send /cancel.")
+    def _spawn(self, chat_id: int, job, after=None, user_id=None, label: str = "", app: str = ""):
+        """Run a job as the user's session; sessions of different users run in parallel."""
+        with self._sessions_lock:
+            refusal = self._session_refusal(user_id, app.lower())
+            if not refusal:
+                session = Session(next(self._session_numbers), user_id, chat_id, label or "Bot action", app)
+                self._sessions[user_id] = session
+        if refusal:
+            self.say(chat_id, refusal)
             return False
-        self._cancel.clear()
-        self._job_user_id = user_id
         # Errors use the view that was active when the job started.
         admin = self._is_admin(user_id)
 
         def run():
+            self._local.session = session
             try:
                 job()
             except Cancelled:
@@ -1639,11 +1831,14 @@ class Bot:
                         after()
                     except Exception:
                         log.exception("post-job UI update failed")
-                self._job_user_id = None
-                self._lock.release()
+                with self._sessions_lock:
+                    if self._sessions.get(user_id) is session:
+                        del self._sessions[user_id]
+                self._local.session = None
+                self._restart_when_idle()
 
-        self._worker = threading.Thread(target=run, name="job", daemon=True)
-        self._worker.start()
+        session.thread = self._worker = threading.Thread(target=run, name=f"session-{session.number}", daemon=True)
+        session.thread.start()
         return True
 
     def _user_error(self, error) -> str:
@@ -1741,7 +1936,7 @@ class Bot:
             routes = CloudflareRoutes(self.cfg)
             progress.update(f"{full}: checking tunnel routes for the next port..." if admin
                             else f"{full}: preparing the app address...")
-            port = routes.next_port()
+            port = self._reserve_port(routes)
             prompt = NEW_APP_PROMPT.format(port=port) + request + DEPLOY_NOTE
             if self._cancel.is_set():
                 raise Cancelled()
@@ -1926,6 +2121,7 @@ class Bot:
         """Change the bot's own repository from a separate clone, then update and restart the bot.
 
         The live checkout keeps its ignored files (.env, .venv), which a full worktree replacement would remove.
+        The restart waits until every running session has ended.
         """
         full = f"{owner}/{name}"
         progress = Progress(self.tg, chat_id, self.cfg)
@@ -1961,12 +2157,17 @@ class Bot:
         if diff_lines:
             lines.append(f"Changes: {diff_lines[-1].strip()}")
         lines.append(f"Local checkout: {live} updated.")
-        lines.append(f"Restart: {BOT_SERVICE} is restarting to apply the changes; the bot is back shortly."
-                     if restart else "Restart: the bot is not running as its systemd service; restart it to "
-                                     "apply the changes.")
+        others = len(self._running_sessions()) - 1
+        if not restart:
+            lines.append("Restart: the bot is not running as its systemd service; restart it to apply the changes.")
+        elif others > 0:
+            lines.append(f"Restart: {BOT_SERVICE} restarts to apply the changes once the {others} other running "
+                         "session(s) finish; new sessions wait for the restart.")
+        else:
+            lines.append(f"Restart: {BOT_SERVICE} is restarting to apply the changes; the bot is back shortly.")
         self.say(chat_id, "\n".join(lines))
         if restart:
-            self.deployer.restart_bot()
+            self._schedule_bot_restart(chat_id)
 
     def _warn_dirty(self, chat_id: int, dest, full: str, admin: bool):
         if not self.git.is_dirty(dest):

@@ -5,12 +5,16 @@ import html
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
 
 from .config import SECRET_NAMES, Config
 
@@ -34,6 +38,10 @@ HEARTBEAT_STAGE = "heartbeat"
 HEARTBEAT_ICON = "⏳"
 # Engine stages that keep the latest heartbeat line while Copilot is still responding.
 HEARTBEAT_KEEP_STAGES = frozenset({HEARTBEAT_STAGE, "task"})
+# Chromium's single-instance locks and rebuildable caches are not copied into a parallel session's profile.
+PROFILE_COPY_IGNORE = shutil.ignore_patterns(
+    "Singleton*", "Cache", "Code Cache", "GPUCache", "GrShaderCache", "GraphiteDawnCache", "ShaderCache",
+    "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache", "Crashpad")
 
 
 class RoundTripError(Exception):
@@ -438,12 +446,46 @@ def format_task_status(message: str, tasks) -> str:
 class RoundTrip:
     def __init__(self, cfg: Config):
         self._cfg = cfg
+        self._profile_lock = threading.Lock()
+        self._profile_busy = False
+
+    @contextmanager
+    def browser_profile(self):
+        """Yield a Copilot browser profile that no other engine process uses.
+
+        Chromium allows one process per profile. The first engine run uses the signed-in profile itself,
+        so refreshed sign-in state is kept; runs in parallel with it use a private temporary copy that is
+        deleted afterwards.
+        """
+        with self._profile_lock:
+            primary, self._profile_busy = not self._profile_busy, True
+        if primary:
+            try:
+                yield self._cfg.profile
+            finally:
+                with self._profile_lock:
+                    self._profile_busy = False
+            return
+        self._cfg.state_dir.mkdir(parents=True, exist_ok=True)
+        work = Path(tempfile.mkdtemp(prefix="profile-", dir=self._cfg.state_dir))
+        try:
+            copy = work / "profile"
+            try:
+                shutil.copytree(self._cfg.profile, copy, symlinks=True, ignore=PROFILE_COPY_IGNORE)
+            except shutil.Error:
+                pass  # Files that the running browser changed or removed during the copy are skipped.
+            except OSError as error:
+                raise RoundTripError("Cannot copy the Copilot browser profile for a parallel session: "
+                                     f"{error.strerror or error}") from None
+            yield copy
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
 
     def command(self, repo_dir, request: str, model: str, show_browser=None, temporary_chat=None,
-                attachments=(), history=True):
+                attachments=(), history=True, profile=None):
         show_browser = self._cfg.show_browser if show_browser is None else show_browser
         temporary_chat = self._cfg.temporary_chat if temporary_chat is None else temporary_chat
-        cmd = [sys.executable, str(self._cfg.engine), "--profile", str(self._cfg.profile), "fix",
+        cmd = [sys.executable, str(self._cfg.engine), "--profile", str(profile or self._cfg.profile), "fix",
                "--repo", str(repo_dir), "--model", model]
         if show_browser:
             cmd.append("--show-browser")
@@ -459,7 +501,12 @@ class RoundTrip:
             show_browser=None, temporary_chat=None, attachments=(), history=True) -> dict:
         """Run one round-trip with optional extra files attached to the prompt; returns the engine's
         JSON result. `cancel` requests a graceful stop; history=False uploads no Git history."""
-        command = self.command(repo_dir, request, model, show_browser, temporary_chat, attachments, history)
+        with self.browser_profile() as profile:
+            command = self.command(repo_dir, request, model, show_browser, temporary_chat, attachments, history,
+                                   profile)
+            return self._run_engine(command, on_status, cancel)
+
+    def _run_engine(self, command, on_status, cancel: threading.Event) -> dict:
         proc = subprocess.Popen(command, stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
                                 env={k: v for k, v in os.environ.items() if k not in SECRET_NAMES})
@@ -509,10 +556,10 @@ class RoundTrip:
 
         return self._finish(proc, read_stderr, out, tail, cancel, "The Copilot round-trip")
 
-    def models_command(self, show_browser=None, temporary_chat=None):
+    def models_command(self, show_browser=None, temporary_chat=None, profile=None):
         show_browser = self._cfg.show_browser if show_browser is None else show_browser
         temporary_chat = self._cfg.temporary_chat if temporary_chat is None else temporary_chat
-        cmd = [sys.executable, str(self._cfg.engine), "--profile", str(self._cfg.profile), "models"]
+        cmd = [sys.executable, str(self._cfg.engine), "--profile", str(profile or self._cfg.profile), "models"]
         if show_browser:
             cmd.append("--show-browser")
         if not temporary_chat:
@@ -521,21 +568,22 @@ class RoundTrip:
 
     def list_models(self, on_status, cancel: threading.Event) -> list[str]:
         """Return the provider/model pairs currently offered in Copilot's Claude and GPT submenus."""
-        proc = subprocess.Popen(self.models_command(), stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
-                                env={k: v for k, v in os.environ.items() if k not in SECRET_NAMES})
-        tail, out = deque(maxlen=8), []
+        with self.browser_profile() as profile:
+            proc = subprocess.Popen(self.models_command(profile=profile), stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
+                                    env={k: v for k, v in os.environ.items() if k not in SECRET_NAMES})
+            tail, out = deque(maxlen=8), []
 
-        def read_stderr():
-            for line in proc.stderr:
-                line = line.rstrip()
-                status = parse_status(line)
-                if status:
-                    on_status(*status)
-                elif line.strip():
-                    tail.append(line.strip())
+            def read_stderr():
+                for line in proc.stderr:
+                    line = line.rstrip()
+                    status = parse_status(line)
+                    if status:
+                        on_status(*status)
+                    elif line.strip():
+                        tail.append(line.strip())
 
-        result = self._finish(proc, read_stderr, out, tail, cancel, "The Copilot model check")
+            result = self._finish(proc, read_stderr, out, tail, cancel, "The Copilot model check")
         models = result.get("models") if isinstance(result, dict) else None
         if not isinstance(models, list):
             raise RoundTripError("The Copilot model check returned no model list.")

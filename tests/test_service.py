@@ -3,7 +3,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from support import git, make_config, make_origin
 from bot.cloudflare import CloudflareError
@@ -13,12 +13,12 @@ from bot.gitops import Git, GitError
 from bot.roundtrip import Cancelled, RoundTripError
 from bot.service import (ACCESS_REQUESTS, APPROVE_ACCESS, DECISION_KEYBOARD, GUEST_KEYBOARD,
                          GUEST_NO_ACCESS, GUEST_PENDING, GUEST_WELCOME, REMOVE_KEYBOARD, REQUEST_ACCESS,
-                         ADMIN_USER_VIEW_KEYBOARD, ADMIN_VIEW, ADMIN_VIEW_HINT, BOT_DEPLOY_NOTE, CHAT_MODE_KEYBOARD,
+                         ADMIN_USER_VIEW_KEYBOARD, ADMIN_VIEW, RUNNING_SESSIONS, STOP_SESSION, ADMIN_VIEW_HINT, BOT_DEPLOY_NOTE, CHAT_MODE_KEYBOARD,
                          CONFIRM_DELETE, CREATE_APP, CUSTOM_MODEL, DELETE_APP, USER_VIEW,
                          DEPLOY_NOTE, FIX_APP, HELP, KNOWN_MODELS, LIST_APPS, MAIN_KEYBOARD, MODEL_KEYBOARD,
                          NEW_APP_PROMPT, PRIVATE_REPO, PUBLIC_REPO, VISIBILITY_KEYBOARD,
                          REGULAR_CHAT, TEMPORARY_CHAT, USER_HELP, USER_KEYBOARD, REGISTER_SERVICES,
-                         START_APP, STOP_APP, Bot, Progress)
+                         START_APP, STOP_APP, Bot, Progress, Session)
 from bot.state import ADMIN_OWNER, State, telegram_owner
 from bot.telegram_api import TelegramError
 
@@ -601,8 +601,9 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue(started.wait(10))
         self.bot.handle_text(1, "Improve it")
         self.assertIn("Still checking the available models", self.tg.sent[-1])
+        session = self.bot._session_of(None)
         self.bot.handle_text(1, "/cancel")
-        self.assertTrue(self.bot._cancel.is_set())
+        self.assertTrue(session.cancel.is_set())
         release.set()
         self.bot._worker.join(timeout=30)
         self.assertNotIn(1, self.bot._dialogs)
@@ -671,7 +672,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.rt.calls[0][1],
                          NEW_APP_PROMPT.format(port=8081) + "build a starter app" + DEPLOY_NOTE)
         self.assertEqual(self.rt.calls[0][2], "GPT/GPT-6")
-        routes.return_value.next_port.assert_called_once_with()
+        routes.return_value.next_port.assert_called_once_with(reserved=set())
         routes.return_value.prepare.assert_called_once_with("fresh-app", 8081)
         self.assertEqual(self.deployer.calls, [("fresh-app", self.cfg.repos_dir / "fresh-app")])
         self.assertEqual(self.deployer.registered, [("fresh-app", self.cfg.repos_dir / "fresh-app")])
@@ -1398,25 +1399,147 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(len(self.tg.sent), 1)
         self.assertTrue(self.tg.sent[0].startswith("📱 <b>Apps</b>"))
 
-    def test_second_job_is_refused_while_one_runs(self):
-        release = threading.Event()
-        started = threading.Event()
+    def blocking_roundtrip(self, names=None):
+        """Replace the round-trip with one that waits for release in the named checkouts (all by default).
+
+        Returns (started, release): started maps each checkout name to an event set when its run begins.
+        """
+        started, release = {}, threading.Event()
 
         class Slow(FakeRoundTrip):
-            def run(inner, *args, **kwargs):
-                started.set()
-                release.wait(10)
-                return super().run(*args, **kwargs)
+            def run(inner, repo_dir, *args, **kwargs):
+                name = Path(repo_dir).name
+                started.setdefault(name, threading.Event()).set()
+                if names is None or name in names:
+                    release.wait(10)
+                return super().run(repo_dir, *args, **kwargs)
 
         self.bot.roundtrip = Slow()
-        self.bot.handle_text(1, "/fix app first")
-        self.assertTrue(started.wait(10))
-        self.bot.handle_text(1, "/fix app second")
-        self.assertIn("already running", self.tg.sent[-1])
-        self.bot.handle_text(1, "/cancel")
-        self.assertTrue(self.bot._cancel.is_set())
+        return started, release
+
+    @staticmethod
+    def wait_started(started, name):
+        for _ in range(200):
+            if name in started:
+                return True
+            threading.Event().wait(0.05)
+        return False
+
+    def test_each_user_runs_one_session_in_parallel_with_other_users(self):
+        self.approve(77, 88)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}))
+        self.gh.repos["me/mine"] = {"clone_url": str(make_origin(self.tmp, "mine.git"))}
+        self.state.set_app_owner("me/app", telegram_owner(77))
+        self.state.set_app_owner("me/mine", telegram_owner(88))
+        started, release = self.blocking_roundtrip()
+        self.bot.handle_text(77, "/fix app first", 77)
+        self.assertTrue(self.wait_started(started, "app"))
+        self.bot.handle_text(77, "/fix app second", 77)
+        self.assertIn("Your session is still running: Fix me/app", self.tg.sent[-1])
+        self.bot.handle_text(77, FIX_APP, 77)
+        self.assertIn("Your session is still running: Fix me/app", self.tg.sent[-1])
+        self.bot.handle_text(42, "/fix app third", 42)
+        self.assertIn("Another session is already working on app", self.tg.sent[-1])
+        self.bot.handle_text(88, "/fix mine parallel", 88)
+        self.assertTrue(self.wait_started(started, "mine"))
+        self.assertEqual(len(self.bot._running_sessions()), 2)
+        self.bot.handle_text(42, "/status", 42)
+        self.assertIn("Running sessions of all users: 2", self.tg.sent[-1])
         release.set()
-        self.bot._worker.join(timeout=30)
+        for session in self.bot._running_sessions():
+            session.thread.join(timeout=30)
+        self.assertEqual(self.bot._running_sessions(), [])
+        self.assertEqual(sorted(call[0].name for call in self.bot.roundtrip.calls), ["app", "mine"])
+
+    def test_admin_lists_and_stops_any_users_session_from_the_main_menu(self):
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}))
+        self.state.set_app_owner("me/app", telegram_owner(77))
+        labels = {button["text"] for row in MAIN_KEYBOARD["keyboard"] for button in row}
+        self.assertIn(RUNNING_SESSIONS, labels)
+        self.user_say(42, RUNNING_SESSIONS)
+        self.assertIn("No sessions are running", self.tg.sent[-1])
+        started, release = self.blocking_roundtrip()
+        self.bot.handle_text(77, "/fix app first", 77)
+        self.assertTrue(self.wait_started(started, "app"))
+        for text in (RUNNING_SESSIONS, "/sessions"):
+            self.bot.handle_text(77, text, 77)
+            self.assertIn("only to kurwalab.fyi admins", self.tg.sent[-1])
+        session = self.bot._session_of(77)
+        self.bot.handle_text(42, RUNNING_SESSIONS, 42)
+        self.assertIn(f"#{session.number} · User 77 · 77 · Fix me/app · started", self.tg.sent[-1])
+        stop = f"{STOP_SESSION} #{session.number}"
+        self.assertIn(stop, {button["text"] for row in self.tg.markups[-1]["keyboard"] for button in row})
+        self.bot.handle_text(42, stop, 42)
+        self.assertTrue(session.cancel.is_set())
+        self.assertEqual(self.tg.chats[-2], 77)
+        self.assertIn("admin stopped your running session: Fix me/app", self.tg.sent[-2])
+        self.assertIn(f"Stopping session #{session.number}", self.tg.sent[-1])
+        self.bot.handle_text(42, f"/sessions stop {session.number}", 42)
+        self.assertIn("already stopping", self.tg.sent[-1])
+        release.set()
+        session.thread.join(timeout=30)
+        self.bot.handle_text(42, f"/sessions stop {session.number}", 42)
+        self.assertIn("is not running", self.tg.sent[-1])
+        self.bot.handle_text(42, "/sessions stop", 42)
+        self.assertIn("Usage: /sessions", self.tg.sent[-1])
+
+    def test_cancel_stops_only_the_senders_session(self):
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}))
+        self.state.set_app_owner("me/app", telegram_owner(77))
+        started, release = self.blocking_roundtrip()
+        self.bot.handle_text(77, "/fix app first", 77)
+        self.assertTrue(self.wait_started(started, "app"))
+        session = self.bot._session_of(77)
+        self.bot.handle_text(42, "/cancel", 42)
+        self.assertIn("You have no running session", self.tg.sent[-1])
+        self.assertIn(RUNNING_SESSIONS, self.tg.sent[-1])
+        self.assertFalse(session.cancel.is_set())
+        self.bot.handle_text(77, "/cancel", 77)
+        self.assertTrue(session.cancel.is_set())
+        release.set()
+        session.thread.join(timeout=30)
+
+    def test_parallel_app_creations_reserve_distinct_tunnel_ports(self):
+        holder = Session(1, 77, 77, "Create me/first", "first")
+        holder.port = 8085
+        self.bot._sessions[77] = holder
+        routes = Mock()
+        routes.next_port.return_value = 8086
+        self.assertEqual(self.bot._reserve_port(routes), 8086)
+        routes.next_port.assert_called_once_with(reserved={8085})
+
+    def test_bot_restart_waits_for_other_running_sessions(self):
+        _, live = self.make_bot_checkout()
+        self.approve(77)
+        self.state.set_app_owner("me/app", telegram_owner(77))
+        started, release = self.blocking_roundtrip({"app"})
+        self.bot.handle_text(77, "/fix app slow", 77)
+        self.assertTrue(self.wait_started(started, "app"))
+        user_session = self.bot._session_of(77)
+        self.say("/fix linux-copilot-bot tidy it")
+        self.assertIn("once the 1 other running session(s) finish", self.tg.sent[-1])
+        self.assertTrue((live / "Makefile").is_file())
+        self.assertEqual(self.deployer.bot_restarts, 0)
+        self.bot.handle_text(42, "/fix app more", 42)
+        self.assertIn("restarts to apply an update", self.tg.sent[-1])
+        release.set()
+        user_session.thread.join(timeout=30)
+        self.assertEqual(self.deployer.bot_restarts, 1)
+
+    def test_revoking_a_user_stops_their_session(self):
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}))
+        self.state.set_app_owner("me/app", telegram_owner(77))
+        started, release = self.blocking_roundtrip()
+        self.bot.handle_text(77, "/fix app first", 77)
+        self.assertTrue(self.wait_started(started, "app"))
+        session = self.bot._session_of(77)
+        self.bot.handle_text(42, "/revoke 77", 42)
+        self.assertTrue(session.cancel.is_set())
+        release.set()
+        session.thread.join(timeout=30)
 
     def test_polling_loop_confirms_updates_and_survives_errors(self):
         from bot.telegram_api import TelegramError

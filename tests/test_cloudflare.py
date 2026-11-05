@@ -129,6 +129,16 @@ class CloudflareRouteTests(unittest.TestCase):
         ])
         self.assertEqual(routes.next_port(), 8084)
 
+    def test_next_port_skips_ports_reserved_by_running_app_creations(self):
+        routes = FakeRoutes([
+            [{"id": "tunnel-id", "name": "kurwalab-tunnel", "tun_type": "cfd_tunnel"}],
+            {"config": {"ingress": [
+                {"hostname": "last.kurwalab.fyi", "service": "http://127.0.0.1:8083"},
+                {"service": "http_status:404"},
+            ]}},
+        ])
+        self.assertEqual(routes.next_port(reserved={8084, 8085, 9000}), 8086)
+
     def test_next_port_starts_at_8080_for_an_empty_route_list(self):
         routes = FakeRoutes([
             [{"id": "tunnel-id", "name": "kurwalab-tunnel", "tun_type": "cfd_tunnel"}],
