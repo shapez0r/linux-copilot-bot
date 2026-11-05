@@ -66,7 +66,7 @@ Administrators have every bot permission. Regular users can create apps, list al
 
 Administrators can switch between **admin view** and **user view** at any time with the **👤 Switch to user view** and **🛡 Switch to admin view** buttons, which are always in their main menu. In user view, an administrator sees and uses the bot exactly as a regular user: the regular-user menu, help, listings, messages, and permissions apply, admin-only commands and buttons are refused, and apps created in that view are public and owned by the administrator's Telegram user id. The choice is stored per administrator and persists across restarts. Regular users cannot switch views.
 
-Send `/start` or `/menu` to open a role-specific persistent keyboard. Regular users see creation, listing, fixing, and start/stop controls for their apps; administrators in admin view also see service registration, access requests, deletion, repository, model, status, and tunnel-management options, and every administrator menu includes the view switch. The guided **Create an app** flow:
+Send `/start` or `/menu` to open a role-specific persistent keyboard. Regular users see creation, listing, fixing, and start/stop controls for their apps; administrators in admin view also see service registration, access requests, deletion, and tunnel-management options, and every administrator menu includes the view switch. The guided **Create an app** flow:
 
 1. asks for a lowercase app name;
 2. checks the models available in Copilot (see below) and offers them for selection;
@@ -77,7 +77,7 @@ Send `/start` or `/menu` to open a role-specific persistent keyboard. Regular us
 7. accepts the description, together with any files attached as described in [Attaching files](#attaching-files), then shows the existing edited progress message while Copilot builds, commits, deploys, and publishes the app;
 8. returns the final public app link when provisioning succeeds.
 
-The guided **Fix an app** flow offers the apps the sender may fix that have a folder under `REPOS_DIR` (the same folders `/list` shows), so ownership records of apps without a local checkout are not offered; the **Delete an app** picker uses the same rule, and a name can still be typed. The flow then checks the available models, accepts the chosen model, lets administrators choose a temporary or regular Copilot chat, accepts the fix request and any attached files, and then runs, commits, pushes, and redeploys the app with those choices. The chosen model and chat type apply only to that request; the shared model set with `/model` is unchanged, and regular users always use `BOT_TEMPORARY_CHAT`.
+The guided **Fix an app** flow offers the apps the sender may fix that have a folder under `REPOS_DIR` (the same folders `/list` shows), so ownership records of apps without a local checkout are not offered. Its buttons show only app names, and a repository can still be typed as `name` or `owner/name`; the **Delete an app** picker uses the same rule, and a name can still be typed. The flow then checks the available models, accepts the chosen model, lets administrators choose a temporary or regular Copilot chat, accepts the fix request and any attached files, and then runs, commits, pushes, and redeploys the app with those choices. The chosen model and chat type apply only to that request; the shared model set with `/model` is unchanged, and regular users always use `BOT_TEMPORARY_CHAT`.
 
 #### Attaching files
 
@@ -87,7 +87,7 @@ When the request runs, the bot downloads the files into a temporary folder under
 
 Before either flow offers models, the bot opens Copilot with the browser profile, reads the **Claude** and **GPT** submenus of the model picker, and shows every enabled entry as a `provider/model` button, such as `Claude/Opus 5.5`. The check uses the shared job slot and can be stopped with **Cancel / stop**. If the picker cannot be read, the bot reports why and offers `Claude/Sonnet 5.5`, `Claude/Opus 5.5`, `GPT/GPT-6`, `GPT/GPT-6.1 Sol`, or a free-form provider/model value instead.
 
-Apps created by regular users are public GitHub repositories. Apps created by administrators are private unless the administrator chooses a public repository in the guided flow or passes `public` to `/new`. The administrator menu also provides app service registration and controls, confirmed app deletion, repository selection, model selection, status, and Cloudflare route management. Command forms remain available for automation and direct use, subject to the same permissions.
+Apps created by regular users are public GitHub repositories. Apps created by administrators are private unless the administrator chooses a public repository in the guided flow or passes `public` to `/new`. The administrator menu also provides app service registration and controls, confirmed app deletion, and Cloudflare route management. Repository selection, the shared model, and status are available through `/repo`, `/model`, and `/status`. Command forms remain available for automation and direct use, subject to the same permissions.
 
 | Message | Effect |
 | --- | --- |

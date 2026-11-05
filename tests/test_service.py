@@ -335,6 +335,21 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue(self.state.has_request(500))
         self.assertTrue(self.state.is_approved(77))
 
+    def test_admin_menu_omits_repository_model_and_status_buttons(self):
+        labels = {button["text"] for row in MAIN_KEYBOARD["keyboard"] for button in row}
+        for removed in ("📂 Select repository", "🤖 Set model", "ℹ️ Status"):
+            self.assertNotIn(removed, labels)
+
+    def test_fix_picker_maps_app_names_to_recorded_repositories(self):
+        self.state.set_app_owner("org/other-app", ADMIN_OWNER)
+        (self.cfg.repos_dir / "other-app").mkdir()
+        self.say(FIX_APP)
+        labels = {button["text"] for row in self.tg.markups[-1]["keyboard"] for button in row}
+        self.assertIn("other-app", labels)
+        self.assertNotIn("org/other-app", labels)
+        self.say("other-app")
+        self.assertEqual(self.bot._dialogs[1]["data"]["repo"], "org/other-app")
+
     def test_start_shows_the_app_management_menu(self):
         self.say("/start")
         self.assertIn("Create and manage apps", self.tg.sent[-1])
@@ -426,9 +441,9 @@ class ServiceTests(unittest.TestCase):
             (self.cfg.repos_dir / name).mkdir(exist_ok=True)
         self.user_say(77, FIX_APP)
         labels = {button["text"] for row in self.tg.markups[-1]["keyboard"] for button in row}
-        self.assertIn("me/mine", labels)
-        self.assertNotIn("me/theirs", labels)
-        self.assertNotIn("me/admin-app", labels)
+        self.assertIn("mine", labels)
+        self.assertNotIn("theirs", labels)
+        self.assertNotIn("admin-app", labels)
 
     def test_fix_picker_omits_recorded_apps_without_a_local_folder(self):
         self.state.set_app_owner("me/stale-app", ADMIN_OWNER)
@@ -437,8 +452,8 @@ class ServiceTests(unittest.TestCase):
         self.state.set_app_owner("me/listed-app", ADMIN_OWNER)
         self.say(FIX_APP)
         labels = {button["text"] for row in self.tg.markups[-1]["keyboard"] for button in row}
-        self.assertIn("me/listed-app", labels)
-        self.assertNotIn("me/stale-app", labels)
+        self.assertIn("listed-app", labels)
+        self.assertNotIn("stale-app", labels)
 
     def test_create_app_menu_guides_name_model_template_prompt_and_returns_link(self):
         self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,
@@ -534,7 +549,7 @@ class ServiceTests(unittest.TestCase):
     def test_fix_app_menu_selects_an_app_accepts_a_prompt_and_restores_the_menu(self):
         self.state.repo = "me/app"
         self.say(FIX_APP)
-        self.say("me/app")
+        self.say("app")
         self.assertEqual(self.rt.model_checks, 1)
         self.assertIn("will fix the app", self.tg.sent[-1])
         self.say("GPT/GPT-9 Pro")
@@ -551,7 +566,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_fix_app_menu_offers_a_regular_chat_to_admins(self):
         self.say(FIX_APP)
-        self.say("me/app")
+        self.say("app")
         self.say("GPT/GPT-9 Pro")
         self.say(REGULAR_CHAT)
         self.say("Keep this chat")
@@ -563,7 +578,7 @@ class ServiceTests(unittest.TestCase):
         self.state.set_app_owner("me/app", telegram_owner(77))
         git("clone", str(self.origin), str(self.dest))
         self.user_say(77, FIX_APP)
-        self.user_say(77, "me/app")
+        self.user_say(77, "app")
         self.user_say(77, "GPT/GPT-9 Pro")
         self.assertIn("Describe what should be fixed", self.tg.sent[-1])
         self.assertNotEqual(self.tg.markups[-1], CHAT_MODE_KEYBOARD)
@@ -582,7 +597,7 @@ class ServiceTests(unittest.TestCase):
 
         self.rt.list_models = slow_models
         self.bot.handle_text(1, FIX_APP)
-        self.bot.handle_text(1, "me/app")
+        self.bot.handle_text(1, "app")
         self.assertTrue(started.wait(10))
         self.bot.handle_text(1, "Improve it")
         self.assertIn("Still checking the available models", self.tg.sent[-1])
@@ -1266,7 +1281,7 @@ class ServiceTests(unittest.TestCase):
         origin, live = self.make_bot_checkout()
         self.say(FIX_APP)
         labels = {button["text"] for row in self.tg.markups[-1]["keyboard"] for button in row}
-        self.assertIn("me/linux-copilot-bot", labels)
+        self.assertIn("linux-copilot-bot", labels)
         self.say("linux-copilot-bot")
         self.say("GPT/GPT-9 Pro")
         self.say(TEMPORARY_CHAT)
@@ -1467,7 +1482,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_files_are_attached_to_the_guided_fix_request(self):
         self.user_say(42, FIX_APP)
-        self.user_say(42, "me/app")
+        self.user_say(42, "app")
         self.user_say(42, "GPT/GPT-9 Pro")
         self.user_say(42, TEMPORARY_CHAT)
         self.assertIn("screenshots or photos", self.tg.sent[-1])

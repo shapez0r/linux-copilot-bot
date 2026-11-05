@@ -59,9 +59,6 @@ STOP_APP = "⏹ Stop an app"
 REGISTER_SERVICES = "⚙️ Register app services"
 DELETE_APP = "🗑 Delete an app"
 TUNNEL_ROUTES = "☁️ Tunnel routes"
-SELECT_REPOSITORY = "📂 Select repository"
-SET_MODEL = "🤖 Set model"
-SHOW_STATUS = "ℹ️ Status"
 CANCEL_ACTION = "❌ Cancel / stop"
 BACK_TO_MENU = "⬅️ Main menu"
 CUSTOM_MODEL = "⌨️ Enter another model"
@@ -96,8 +93,7 @@ MAIN_KEYBOARD = _keyboard([
     [FIX_APP, DELETE_APP],
     [START_APP, STOP_APP],
     [REGISTER_SERVICES, ACCESS_REQUESTS],
-    [TUNNEL_ROUTES, SELECT_REPOSITORY],
-    [SET_MODEL, SHOW_STATUS],
+    [TUNNEL_ROUTES],
     [CANCEL_ACTION],
     [USER_VIEW],
 ])
@@ -181,7 +177,7 @@ USER_HELP = f"""Use the buttons below to create and list apps, and to fix, start
 /help - show this message"""
 
 ADMIN_ONLY_BUTTONS = {
-    DELETE_APP, TUNNEL_ROUTES, SELECT_REPOSITORY, SET_MODEL, SHOW_STATUS,
+    DELETE_APP, TUNNEL_ROUTES,
     LIST_ROUTES, ADD_ROUTE, DELETE_ROUTE, REGISTER_SERVICES, ACCESS_REQUESTS,
 }
 ADMIN_ONLY_COMMANDS = {"delete", "repo", "cloudflare", "model", "status", "register",
@@ -620,7 +616,7 @@ class Bot:
             return
         if text in (CREATE_APP, LIST_APPS, FIX_APP, START_APP, STOP_APP, REGISTER_SERVICES,
                     DELETE_APP, TUNNEL_ROUTES, ACCESS_REQUESTS,
-                    SELECT_REPOSITORY, SET_MODEL, SHOW_STATUS, LIST_ROUTES, ADD_ROUTE, DELETE_ROUTE):
+                    LIST_ROUTES, ADD_ROUTE, DELETE_ROUTE):
             self._handle_menu_button(chat_id, text, user_id)
             return
         if chat_id in self._dialogs and not text.startswith("/"):
@@ -683,8 +679,6 @@ class Bot:
             return
         if label == LIST_APPS:
             self.cmd_list(chat_id, "", user_id)
-        elif label == SHOW_STATUS:
-            self.cmd_status(chat_id, user_id)
         elif label == REGISTER_SERVICES:
             self.cmd_register(chat_id, "all", user_id)
         elif label == TUNNEL_ROUTES:
@@ -711,12 +705,16 @@ class Bot:
             if not choices and not self._is_admin(user_id):
                 self.say(chat_id, "You do not have any apps to fix. Create an app first.")
                 return
-            self._dialogs[chat_id] = {"flow": "fix", "step": "repo", "data": {},
+            # Buttons show app names; each maps back to its recorded repository.
+            apps = {}
+            for repo in choices:
+                apps.setdefault(repo.rsplit("/", 1)[-1], repo)
+            self._dialogs[chat_id] = {"flow": "fix", "step": "repo", "data": {"apps": apps},
                                       "user_id": user_id}
             self.say_keyboard(
                 chat_id,
                 "Choose an app or enter its repository as `name` or `owner/name`.",
-                self._choice_keyboard(choices),
+                self._choice_keyboard(list(apps)),
             )
         elif label in (START_APP, STOP_APP):
             choices = self._manageable_app_names(user_id)
@@ -739,16 +737,6 @@ class Bot:
                 "Choose the app to delete, or enter its name. You will be asked to confirm.",
                 self._choice_keyboard(choices),
             )
-        elif label == SELECT_REPOSITORY:
-            if self._job_blocks_dialog(chat_id):
-                return
-            self._dialogs[chat_id] = {"flow": "repo", "step": "repo", "data": {},
-                                      "user_id": user_id}
-            self.say_keyboard(chat_id, "Enter `name` or `owner/name` to select a repository.", CANCEL_KEYBOARD)
-        elif label == SET_MODEL:
-            self._dialogs[chat_id] = {"flow": "model", "step": "model", "data": {},
-                                      "user_id": user_id}
-            self.say_keyboard(chat_id, f"Choose a model. Current model: {self.state.model}", MODEL_KEYBOARD)
         elif label == ADD_ROUTE:
             if self._cloudflare_unavailable(chat_id) or self._job_blocks_dialog(chat_id):
                 return
@@ -866,10 +854,6 @@ class Bot:
             self._handle_fix_dialog(chat_id, dialog, text, user_id)
         elif flow == "delete":
             self._handle_delete_dialog(chat_id, dialog, text)
-        elif flow == "repo":
-            self._handle_repo_dialog(chat_id, text, user_id)
-        elif flow == "model":
-            self._handle_model_dialog(chat_id, dialog, text)
         elif flow == "app-control":
             action = dialog["step"]
             self._dialogs.pop(chat_id, None)
@@ -1068,6 +1052,7 @@ class Bot:
 
     def _handle_fix_dialog(self, chat_id: int, dialog: dict, text: str, user_id=None):
         if dialog["step"] == "repo":
+            text = dialog["data"].get("apps", {}).get(text.strip(), text)
             try:
                 owner, name = self._resolve_ref(text)
             except RepoError as error:
@@ -1142,35 +1127,6 @@ class Bot:
         )
         if not started:
             self.show_menu(chat_id, "Deletion could not start because another job is running.")
-
-    def _handle_repo_dialog(self, chat_id: int, text: str, user_id=None):
-        try:
-            parse_repo_ref(text, "owner")
-        except RepoError as error:
-            self.say(chat_id, str(error))
-            return
-        self._dialogs.pop(chat_id, None)
-        started = self._spawn(chat_id, lambda: self._select_repo(chat_id, text, user_id=user_id),
-                              after=lambda: self.show_menu(chat_id, "Repository selection finished.", user_id),
-                              user_id=user_id)
-        if not started:
-            self.show_menu(chat_id, "Repository selection could not start because another job is running.",
-                           user_id)
-
-    def _handle_model_dialog(self, chat_id: int, dialog: dict, text: str):
-        if dialog["step"] == "model" and text == CUSTOM_MODEL:
-            dialog["step"] = "custom-model"
-            self.say_keyboard(chat_id, "Enter a provider/model value.", CANCEL_KEYBOARD)
-            return
-        if dialog["step"] == "model" and text not in KNOWN_MODELS:
-            self.say_keyboard(chat_id, "Choose a listed model or select Enter another model.", MODEL_KEYBOARD)
-            return
-        if not self._valid_model(text):
-            self.say(chat_id, "Use a provider/model pair such as GPT/GPT-6.")
-            return
-        self.state.model = text.strip()
-        self.state.save()
-        self.show_menu(chat_id, f"Model set to {self.state.model}.")
 
     def _handle_route_add_dialog(self, chat_id: int, dialog: dict, text: str):
         if dialog["step"] == "name":
