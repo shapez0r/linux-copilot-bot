@@ -237,7 +237,7 @@ class ServiceTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.guest_say(500, text)
                 self.assertEqual(self.tg.sent[-1], GUEST_NO_ACCESS)
-        self.bot.handle_update(self.file_update(500, caption="/fix app x",
+        self.bot.handle_update(self.file_update(500, caption="/fix app=app prompt=x",
                                                 document={"file_id": "doc", "file_name": "a.txt"}))
         self.assertEqual(self.tg.sent[-1], GUEST_NO_ACCESS)
         self.assertNotIn(500, self.bot._pending_files)
@@ -369,7 +369,8 @@ class ServiceTests(unittest.TestCase):
             self.assertIn(label, ADMIN_WELCOME)
             self.assertNotIn(label, USER_WELCOME)
         for welcome in (USER_WELCOME, ADMIN_WELCOME):
-            self.assertNotRegex(welcome, r"(^|\s)/[a-z]")
+            # The only slash text is the /cli button's own label.
+            self.assertNotRegex(welcome.replace(SHOW_COMMANDS, ""), r"(^|\s)/[a-z]")
             self.assertNotIn("365", welcome)
             self.assertIn("Copilot", welcome)
         self.assertEqual(self.bot.welcome_text(77), USER_WELCOME)
@@ -393,6 +394,9 @@ class ServiceTests(unittest.TestCase):
         self.user_say(42, USER_VIEW)
         self.user_say(42, SHOW_COMMANDS)
         self.assertEqual(self.tg.sent[-1], USER_HELP + "\n\n" + ADMIN_VIEW_HINT)
+        self.user_say(77, "/cli")
+        self.assertEqual(self.tg.sent[-1], USER_HELP)
+        self.assertEqual(SHOW_COMMANDS, "/cli")
         self.guest_say(500, SHOW_COMMANDS)
         self.assertEqual(self.tg.sent[-1], GUEST_NO_ACCESS)
         self.assertEqual(self.rt.calls, [])
@@ -455,7 +459,7 @@ class ServiceTests(unittest.TestCase):
         self.user_say(42, "/list")
         self.assertNotIn("📁", self.tg.sent[-1])
         self.assertNotIn("🔌", self.tg.sent[-1])
-        self.user_say(42, "/fix theirs change it")
+        self.user_say(42, "/fix app=theirs prompt=change it")
         self.assertIn("only fix apps you created", self.tg.sent[-1])
         self.user_say(42, "/app stop theirs")
         self.assertIn("only start or stop apps you created", self.tg.sent[-1])
@@ -673,9 +677,13 @@ class ServiceTests(unittest.TestCase):
                          "Currently doing: Testing\nRepository: https://github.com/me/app\n\n"
                          "[16:21:21] ▶ Testing")
 
-    def test_fix_without_repository_asks_to_select_one(self):
-        self.say("/fix nobrowser add a login page")
-        self.assertIn("Select a repository first", self.tg.sent[-1])
+    def test_fix_without_app_shows_the_universal_usage(self):
+        self.state.repo = "me/app"
+        for command in ("/fix nobrowser add a login page", "/fix app add a login page", '/fix prompt="add it"'):
+            with self.subTest(command=command):
+                self.say(command)
+                self.assertIn('Usage: /fix [model=<provider/model>] [tempchat|notempchat] [browser|nobrowser] '
+                              'app="<name|owner/name>" prompt="<request>"', self.tg.sent[-1])
         self.assertEqual(self.rt.calls, [])
 
     def test_repo_command_clones_and_persists_selection(self):
@@ -757,11 +765,11 @@ class ServiceTests(unittest.TestCase):
 
         calls = len(self.rt.calls)
         self.rt.behavior = "append"
-        self.user_say(88, "/fix member-app change the title")
+        self.user_say(88, "/fix app=member-app prompt=change the title")
         self.assertEqual(len(self.rt.calls), calls)
         self.assertIn("only fix apps you created", self.tg.sent[-1])
 
-        self.user_say(77, "/fix member-app change the title")
+        self.user_say(77, "/fix app=member-app prompt=change the title")
         self.assertEqual(len(self.rt.calls), calls + 1)
         report = self.tg.sent[-1]
         self.assertIn("App: https://member-app.kurwalab.fyi", report)
@@ -783,7 +791,7 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("Deploy:", report)
         self.deployer.ok = False
         self.rt.behavior = "append"
-        self.user_say(77, "/fix member-app break it")
+        self.user_say(77, "/fix app=member-app prompt=break it")
         self.assertIn("redeploy failed. Ask an admin", self.tg.sent[-1])
         self.assertNotIn("copilot-app-", self.tg.sent[-1])
         with patch("bot.service.CloudflareRoutes") as routes:
@@ -804,7 +812,7 @@ class ServiceTests(unittest.TestCase):
     def test_admin_can_fix_a_regular_users_app_without_changing_its_owner(self):
         self.state.set_app_owner("me/app", telegram_owner(77))
         self.state.save()
-        self.say("/fix app update it")
+        self.say("/fix app=app prompt=update it")
         self.assertEqual(len(self.rt.calls), 1)
         self.assertEqual(self.state.app_owner("me/app"), telegram_owner(77))
 
@@ -1113,7 +1121,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_request_runs_commits_pushes_and_redeploys(self):
         self.say("/repo app")
-        self.say("/fix app add a Makefile")
+        self.say("/fix app=app prompt=add a Makefile")
         self.assertEqual(self.rt.histories, [True])
         self.assertEqual(self.rt.calls[0][1], "add a Makefile" + DEPLOY_NOTE)
         self.assertEqual(self.rt.calls[0][2], "GPT/GPT-6")
@@ -1127,21 +1135,20 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("Copilot:", report)
 
     def test_fix_selects_the_repository_and_runs(self):
-        self.say("/fix app tidy the readme")
+        self.say("/fix app=app prompt=tidy the readme")
         self.assertEqual(self.state.repo, "me/app")
         self.assertEqual(len(self.rt.calls), 1)
 
-    def test_fix_options_override_environment_defaults_for_active_repo(self):
-        self.state.repo = "me/app"
-        self.say("/fix browser tidy the readme")
+    def test_fix_options_override_environment_defaults(self):
+        self.say("/fix browser app=app prompt=tidy the readme")
         self.assertEqual(self.rt.calls[0][0], self.dest)
         self.assertEqual(self.rt.calls[0][1], "tidy the readme" + DEPLOY_NOTE)
         self.assertEqual(self.rt.calls[0][3:], (True, None))
 
-        self.say("/fix notempchat add tests")
+        self.say("/fix notempchat app=app prompt=add tests")
         self.assertEqual(self.rt.calls[1][3:], (None, False))
 
-        self.say("/fix tempchat nobrowser update docs")
+        self.say("/fix tempchat nobrowser app=app prompt=update docs")
         self.assertEqual(self.rt.calls[2][3:], (False, True))
 
     def test_free_text_outside_a_dialog_always_shows_the_menu(self):
@@ -1187,20 +1194,17 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.rt.calls[0][1], "Improve the empty state" + DEPLOY_NOTE)
         self.assertEqual(self.rt.calls[0][2:], ("Claude/Opus 5.5", None, False))
         self.assertEqual(self.state.model, "GPT/GPT-6")
-        self.say("/fix prompt=Add tests now tempchat app=app")
+        self.say("/fix app=app prompt=Add tests now tempchat app=app")
         self.assertEqual(self.rt.calls[1][1:], ("Add tests now tempchat app=app" + DEPLOY_NOTE, "GPT/GPT-6",
                                                 None, None))
-        self.say('/fix tempchat prompt="Add docs" app')
+        self.say('/fix tempchat prompt="Add docs" name=app')
         self.assertEqual(self.rt.calls[2][1:], ("Add docs" + DEPLOY_NOTE, "GPT/GPT-6", None, True))
-        self.say("/fix model=GPT/GPT-9 app=app Tidy the readme")
-        self.assertEqual(self.rt.calls[3][1:3], ("Tidy the readme" + DEPLOY_NOTE, "GPT/GPT-9"))
-        self.say("/fix model=GPT/GPT-9 Use the active app")
-        self.assertEqual(self.rt.calls[4][0], self.dest)
 
     def test_fix_command_rejects_malformed_or_repeated_options(self):
         for command in ("/fix app=", '/fix app="two words" x', "/fix app=a app=b x", "/fix model=bad app=app x",
                         "/fix app=app", '/fix app=app prompt="x" extra', '/fix prompt="x" one two',
-                        "/fix prompt=one prompt=two", "/fix model=GPT/GPT-6"):
+                        "/fix prompt=one prompt=two", "/fix model=GPT/GPT-6", "/fix app=app Tidy the readme",
+                        '/fix prompt="x" app', "/fix model=GPT/GPT-9 Use the active app"):
             with self.subTest(command=command):
                 self.say(command)
                 self.assertTrue(any(text in self.tg.sent[-1] for text in (
@@ -1223,28 +1227,28 @@ class ServiceTests(unittest.TestCase):
         self.user_say(77, '/fix model="Claude/Opus 5.5" app=app prompt="Improve it"')
         self.assertEqual(self.rt.calls[0][1:], ("Improve it" + DEPLOY_NOTE, "Claude/Opus 5.5", None, None))
 
-    def test_fix_option_requires_request_and_active_repo(self):
+    def test_fix_option_requires_app_and_request(self):
         self.say("/fix browser")
         self.assertIn("Usage", self.tg.sent[-1])
         self.say("/fix browser add tests")
-        self.assertIn("Select a repository first", self.tg.sent[-1])
+        self.assertIn("Usage", self.tg.sent[-1])
         self.assertEqual(self.rt.calls, [])
 
     def test_no_changes_skips_redeploy(self):
         self.rt.behavior = "none"
-        self.say("/fix app nothing")
+        self.say("/fix app=app prompt=nothing")
         self.assertEqual(self.deployer.calls, [])
         self.assertIn("no changes", self.tg.sent[-1])
 
     def test_failed_redeploy_is_reported_after_the_push(self):
         self.deployer.ok = False
-        self.say("/fix app break it")
+        self.say("/fix app=app prompt=break it")
         self.assertIn("redeploy failed", self.tg.sent[-1])
         self.assertIn("copilot-app-app.service failed", self.tg.sent[-1])
 
     def test_cancelled_run_reports_and_does_not_commit(self):
         self.rt.behavior = "cancel"
-        self.say("/fix app anything")
+        self.say("/fix app=app prompt=anything")
         self.assertEqual(self.tg.sent[-1], "Cancelled.")
         self.assertEqual(self.deployer.calls, [])
 
@@ -1424,7 +1428,7 @@ class ServiceTests(unittest.TestCase):
     def test_bot_fix_outside_systemd_is_not_restarted(self):
         _, live = self.make_bot_checkout()
         self.deployer.as_service = False
-        self.say("/fix linux-copilot-bot tidy it")
+        self.say("/fix app=linux-copilot-bot prompt=tidy it")
         self.assertEqual(self.deployer.bot_restarts, 0)
         self.assertIn("not running as its systemd service", self.tg.sent[-1])
         self.assertTrue((live / "Makefile").is_file())
@@ -1441,7 +1445,7 @@ class ServiceTests(unittest.TestCase):
             self.user_say(77, label)
             self.assertNotIn("linux-copilot-bot", str(self.tg.sent[-1]) + str(self.tg.markups[-1]))
         self.bot._dialogs.clear()
-        self.user_say(77, "/fix linux-copilot-bot change it")
+        self.user_say(77, "/fix app=linux-copilot-bot prompt=change it")
         self.assertIn("only fix apps you created", self.tg.sent[-1])
         self.user_say(77, "/app stop linux-copilot-bot")
         self.assertEqual(self.tg.sent[-1], "App not found: linux-copilot-bot")
@@ -1553,15 +1557,15 @@ class ServiceTests(unittest.TestCase):
         self.state.set_app_owner("me/app", telegram_owner(77))
         self.state.set_app_owner("me/mine", telegram_owner(88))
         started, release = self.blocking_roundtrip()
-        self.bot.handle_text(77, "/fix app first", 77)
+        self.bot.handle_text(77, "/fix app=app prompt=first", 77)
         self.assertTrue(self.wait_started(started, "app"))
-        self.bot.handle_text(77, "/fix app second", 77)
+        self.bot.handle_text(77, "/fix app=app prompt=second", 77)
         self.assertIn("Your session is still running: Fix me/app", self.tg.sent[-1])
         self.bot.handle_text(77, FIX_APP, 77)
         self.assertIn("Your session is still running: Fix me/app", self.tg.sent[-1])
-        self.bot.handle_text(42, "/fix app third", 42)
+        self.bot.handle_text(42, "/fix app=app prompt=third", 42)
         self.assertIn("Another session is already working on app", self.tg.sent[-1])
-        self.bot.handle_text(88, "/fix mine parallel", 88)
+        self.bot.handle_text(88, "/fix app=mine prompt=parallel", 88)
         self.assertTrue(self.wait_started(started, "mine"))
         self.assertEqual(len(self.bot._running_sessions()), 2)
         self.bot.handle_text(42, "/status", 42)
@@ -1581,7 +1585,7 @@ class ServiceTests(unittest.TestCase):
         self.user_say(42, RUNNING_SESSIONS)
         self.assertIn("No sessions are running", self.tg.sent[-1])
         started, release = self.blocking_roundtrip()
-        self.bot.handle_text(77, "/fix app first", 77)
+        self.bot.handle_text(77, "/fix app=app prompt=first", 77)
         self.assertTrue(self.wait_started(started, "app"))
         for text in (RUNNING_SESSIONS, "/sessions"):
             self.bot.handle_text(77, text, 77)
@@ -1610,7 +1614,7 @@ class ServiceTests(unittest.TestCase):
         self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}))
         self.state.set_app_owner("me/app", telegram_owner(77))
         started, release = self.blocking_roundtrip()
-        self.bot.handle_text(77, "/fix app first", 77)
+        self.bot.handle_text(77, "/fix app=app prompt=first", 77)
         self.assertTrue(self.wait_started(started, "app"))
         session = self.bot._session_of(77)
         self.bot.handle_text(42, "/cancel", 42)
@@ -1636,14 +1640,14 @@ class ServiceTests(unittest.TestCase):
         self.approve(77)
         self.state.set_app_owner("me/app", telegram_owner(77))
         started, release = self.blocking_roundtrip({"app"})
-        self.bot.handle_text(77, "/fix app slow", 77)
+        self.bot.handle_text(77, "/fix app=app prompt=slow", 77)
         self.assertTrue(self.wait_started(started, "app"))
         user_session = self.bot._session_of(77)
-        self.say("/fix linux-copilot-bot tidy it")
+        self.say("/fix app=linux-copilot-bot prompt=tidy it")
         self.assertIn("once the 1 other running session(s) finish", self.tg.sent[-1])
         self.assertTrue((live / "Makefile").is_file())
         self.assertEqual(self.deployer.bot_restarts, 0)
-        self.bot.handle_text(42, "/fix app more", 42)
+        self.bot.handle_text(42, "/fix app=app prompt=more", 42)
         self.assertIn("restarts to apply an update", self.tg.sent[-1])
         release.set()
         user_session.thread.join(timeout=30)
@@ -1654,7 +1658,7 @@ class ServiceTests(unittest.TestCase):
         self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}))
         self.state.set_app_owner("me/app", telegram_owner(77))
         started, release = self.blocking_roundtrip()
-        self.bot.handle_text(77, "/fix app first", 77)
+        self.bot.handle_text(77, "/fix app=app prompt=first", 77)
         self.assertTrue(self.wait_started(started, "app"))
         session = self.bot._session_of(77)
         self.bot.handle_text(42, "/revoke 77", 42)
@@ -1739,7 +1743,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.rt.attachments, [[("photo.jpg", b"data-shot"), ("error.log", b"data-log")]])
         self.assertEqual(self.bot._pending_files, {})
         self.assertEqual(list((self.cfg.state_dir).glob("attachments-*")), [])
-        self.user_say(42, "/fix app another change")
+        self.user_say(42, "/fix app=app prompt=another change")
         self.assertEqual(self.rt.attachments[-1], [])
 
     def test_caption_runs_as_the_request_with_its_file(self):
@@ -1761,7 +1765,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_album_caption_runs_once_with_every_file(self):
         self.state.set_active_repo(42, "me/app", True)
-        self.bot.handle_update(self.file_update(42, caption="/fix app match these photos", group="g",
+        self.bot.handle_update(self.file_update(42, caption="/fix app=app prompt=match these photos", group="g",
                                                 photo=[{"file_id": "one"}]))
         self.bot.handle_update(self.file_update(42, group="g", photo=[{"file_id": "two"}]))
         self.assertEqual(self.rt.calls, [])
@@ -1784,7 +1788,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_failed_download_is_reported_without_running_copilot(self):
         self.state.set_active_repo(42, "me/app", True)
-        self.send_file(42, caption="/fix app use this", document={"file_id": "broken", "file_name": "x.txt"})
+        self.send_file(42, caption="/fix app=app prompt=use this", document={"file_id": "broken", "file_name": "x.txt"})
         self.assertIn("Could not download the attached file x.txt", self.tg.sent[-1])
         self.assertEqual(self.rt.calls, [])
         self.bot.cfg = make_config(self.tmp, cloudflare_api_token="cf", cloudflare_account_id="a" * 32,

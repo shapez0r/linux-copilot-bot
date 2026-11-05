@@ -80,7 +80,7 @@ APPROVE_ACCESS = "✅ Approve access"
 REJECT_ACCESS = "🚫 Reject request"
 RUNNING_SESSIONS = "🧵 Running sessions"
 STOP_SESSION = "⏹ Stop session"
-SHOW_COMMANDS = "⌨️ Commands"
+SHOW_COMMANDS = "/cli"
 
 
 def _keyboard(rows):
@@ -140,13 +140,9 @@ NEW_USAGE = (
 
 ADMIN_FIX_USAGE = (
     "Usage: /fix [model=<provider/model>] [tempchat|notempchat] [browser|nobrowser] "
-    'app="<name|owner/name>" prompt="<request>", /fix <name|owner/name> <request>, '
-    "or /fix [options] <request> for the active repository"
+    'app="<name|owner/name>" prompt="<request>"'
 )
-USER_FIX_USAGE = (
-    'Usage: /fix [model=<provider/model>] app="<name>" prompt="<request>", /fix <name> <request>, '
-    "or /fix [model=<provider/model>] <request> for your active app"
-)
+USER_FIX_USAGE = 'Usage: /fix [model=<provider/model>] app="<name>" prompt="<request>"'
 
 ATTACH_HELP = (
     f"Send files, screenshots or photos (up to {MAX_ATTACHMENTS}, each at most 20 MB) to attach them to your next "
@@ -163,8 +159,6 @@ HELP = f"""Use the buttons below to create and manage apps. Every action starts 
 /repo [public|private] <name|owner/name> - select a repository; a missing one is created from the eurofish reference app
 /repo - show the active repository
 /fix [model=<provider/model>] [tempchat|notempchat] [browser|nobrowser] app="<name|owner/name>" prompt="<request>" - fix an app with the same choices as Fix an app; linux-copilot-bot changes this bot and restarts it
-/fix <name|owner/name> <request> - fix an app with the shared model
-/fix [model=<provider/model>] [tempchat|notempchat] [browser|nobrowser] <request> - fix the active repository
 /list - list every local app and this bot with systemd status and tunnel details
 /app start|stop <name> - start or stop an app service
 /register [all|<name>] - register and enable systemd services for existing local apps
@@ -180,7 +174,7 @@ HELP = f"""Use the buttons below to create and manage apps. Every action starts 
 /sessions - list every user's running session
 /sessions stop <number> - stop a running session
 /cancel - stop your running session and discard attached files
-/help - show this message"""
+/help or /cli - show this message"""
 ADMIN_VIEW_HINT = f"You are an admin in user view. Use {ADMIN_VIEW} in the main menu to return to admin view."
 USER_HELP = f"""Use the buttons below to create and list apps, and to fix, start, or stop apps you created. You can run one session (a create, fix or other job) at a time, in parallel with other users.
 
@@ -189,12 +183,10 @@ USER_HELP = f"""Use the buttons below to create and list apps, and to fix, start
 /menu - show the app menu
 /new [model=<provider/model>] [template=<app>] name="<name|owner/name>" prompt="<request>" - create, build, deploy and publish a new app in a public repository
 /fix [model=<provider/model>] app="<name>" prompt="<request>" - fix an app you created with the same choices as Fix an app
-/fix <name> <request> - fix an app you created
-/fix [model=<provider/model>] <request> - fix your active app
 /list - list every local app with its status and public URL
 /app start|stop <name> - start or stop one of your app services
 /cancel - stop your running session and discard attached files
-/help - show this message"""
+/help or /cli - show this message"""
 
 ADMIN_ONLY_BUTTONS = {
     DELETE_APP, TUNNEL_ROUTES,
@@ -562,7 +554,7 @@ class Bot:
         return f"{lead}\n\n{text}" if lead else text
 
     def help_text(self, user_id=None) -> str:
-        """Return the commands the sender can use, shown by /help and the SHOW_COMMANDS button."""
+        """Return the commands the sender can use, shown by /help and the /cli button."""
         if self._is_admin(user_id):
             return HELP
         if self._is_configured_admin(user_id):
@@ -748,7 +740,7 @@ class Bot:
             return
         if command == "start":
             self.show_welcome(chat_id, user_id)
-        elif command == "help":
+        elif command in ("help", "cli"):
             self.say_keyboard(chat_id, self.help_text(user_id), self._main_keyboard(user_id))
         elif command == "menu":
             self.show_menu(chat_id, user_id=user_id)
@@ -1681,29 +1673,10 @@ class Bot:
             self.say(chat_id, "Use a provider/model pair such as GPT/GPT-6.")
             return
         ref, prompt = options["app"], options["prompt"]
-        if ref is not None:
-            if prompt is not None and arg:
-                self.say(chat_id, usage)
-                return
-            request = prompt if prompt is not None else arg
-        elif prompt is not None:
-            # Like /new, a single positional word before or after prompt= names the app.
-            if len(arg.split()) > 1:
-                self.say(chat_id, usage)
-                return
-            ref, request = arg, prompt
-        elif options["used"]:
-            # Options followed by plain text run the text against the active app.
-            ref, request = "", arg
-        else:
-            ref, _, request = arg.partition(" ")
-            if not ref:
-                self.say(chat_id, usage)
-                return
-        if not request.strip():
+        if ref is None or prompt is None or arg:
             self.say(chat_id, usage)
             return
-        self.start_request(chat_id, ref, request.strip(), options["show_browser"], options["temporary_chat"],
+        self.start_request(chat_id, ref, prompt, options["show_browser"], options["temporary_chat"],
                            user_id, options["model"])
 
     @staticmethod
@@ -1722,8 +1695,7 @@ class Bot:
         An unquoted final prompt= consumes the rest of the message.
         """
         remaining = arg.strip()
-        options = {"app": None, "model": None, "prompt": None, "temporary_chat": None, "show_browser": None,
-                   "used": False}
+        options = {"app": None, "model": None, "prompt": None, "temporary_chat": None, "show_browser": None}
         while remaining:
             parts = remaining.split(None, 1)
             word = parts[0].lower()
@@ -1753,7 +1725,6 @@ class Bot:
                         return remaining, options, "Specify prompt only once."
                     value, rest = f"{value} {rest}", ""
                 options[field] = value
-            options["used"] = True
             remaining = rest
         return remaining, options, ""
 
@@ -1908,16 +1879,8 @@ class Bot:
 
     def start_request(self, chat_id: int, ref: str, request: str,
                       show_browser=None, temporary_chat=None, user_id=None, model=None):
-        active = self.state.get_active_repo(user_id, self._is_admin(user_id))
-        if not ref and not active:
-            if self._is_admin(user_id):
-                self.say(chat_id, "Select a repository first with /repo <name>.")
-            else:
-                self.say(chat_id, "Create an app or choose Fix an app first.")
-            return
-        selected = ref or active
         try:
-            owner, name = self._resolve_ref(selected)
+            owner, name = self._resolve_ref(ref)
         except RepoError as error:
             self.say(chat_id, str(error))
             return
