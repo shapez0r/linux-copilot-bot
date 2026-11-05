@@ -4,12 +4,12 @@ A Telegram bot for an Ubuntu VM that turns chat messages from authorized users i
 
 1. selects an existing GitHub repository and clones it, or creates a new one from a selected local app template (`eurofish` by default), at `/home/localadmin/repos/<name>`;
 2. takes the message as the prompt;
-3. sends the repository to Microsoft 365 Copilot Chat through the Playwright round-trip engine and applies the returned repository;
+3. sends the repository to Microsoft 365 Copilot Chat through the Playwright round-trip engine and applies the returned repository; once the Copilot prompt has ended, the engine deletes every folder in the signed-in account's OneDrive and empties its recycle bin;
 4. commits and pushes the result to GitHub;
 5. registers and restarts an enabled systemd system service that runs `make run` from `/home/localadmin/repos/<name>`;
 6. for `/new`, allocates the next tunnel port and creates the Cloudflare route.
 
-**Experimental:** the engine drives Copilot's browser UI, so UI changes can interrupt it. Changes are pushed without review; review the commits on GitHub afterwards.
+**Experimental:** the engine drives Copilot's and OneDrive's browser UIs, so UI changes can interrupt it. Changes are pushed without review; review the commits on GitHub afterwards.
 
 ## Requirements
 
@@ -138,6 +138,7 @@ Administrators in admin view open **🧵 Running sessions** (or `/sessions`) to 
 
 - **Prepare:** the checkout must be on a branch with no uncommitted changes; the bot fast-forwards it to `origin`. A mode-only change of `bin/git-askpass` in the bot's own checkout is reverted first; any other change still stops the request.
 - **Round-trip:** the engine opens a new Copilot chat for every request, whether temporary or saved, so no earlier conversation is continued. It uploads a ZIP of the committed `HEAD`. For fixes it adds a `.git` directory holding the checked-out branch's history (without remotes, hooks, or reflogs), so Copilot can read earlier changes with `git log`; for `/new` the archive has no `.git` directory and the prompt does not mention Git history, so each new app starts fresh. It asks Copilot for the complete fixed repository without a `.git` directory, rejects a returned ZIP that contains one, validates the rest, and replaces the worktree. Attached files are uploaded with the archive as context. The bot appends a note asking Copilot to keep a Makefile whose `run` target starts one HTTP server in the foreground and to keep secrets and runtime data outside the repository.
+- **OneDrive cleanup:** after every submitted prompt ends, whether it succeeded, failed, or was stopped, the engine opens `https://kurwalabb-my.sharepoint.com/my` in the same signed-in browser (choosing the signed-in account if Microsoft asks), selects every folder in **My files**, deletes them with **Delete** and the confirmation dialog's **Delete**, then opens `https://kurwalabb-my.sharepoint.com/recycle` and confirms **Empty recycle bin** with **Yes**. Folders are recognized by their folder icon or item count; files in the root of My files are kept. This permanently removes the uploaded archives and attachments together with every other folder and recycle-bin item of that account, so use a Copilot account whose OneDrive holds nothing else. Cleanup is best effort: its progress and any failure are shown as status lines, a failure does not fail the request, and anything left behind (for example when a stopped session ends before cleanup finishes) is removed after a later prompt. The model check submits no prompt and does not clean up.
 - **Commit and push:** all changes are committed on the current branch with the first line of the request as the subject and a body holding the request followed by Copilot's final answer without code (tokens redacted), and pushed to `origin`. Later fix requests upload this history, starting with the new app's first commit, so Copilot can see what each earlier change did. If Copilot changed nothing, nothing is committed or deployed. A failed push leaves the commit locally and is reported; the next request pushes it.
 - **Redeploy:** the bot uses non-interactive `sudo` to write and enable `/etc/systemd/system/copilot-app-<name>.service`, then asks systemd to restart it. The unit sets the app repository as `WorkingDirectory`, executes `make run`, restarts on failure, removes bot secrets from its environment, and appends output to `<STATE_DIR>/logs/<name>.log`. The redeploy counts as successful only when systemd reports the service active through `DEPLOY_SETTLE_SECONDS`; otherwise the systemd state and log tail are sent. A repository without a usable `run` target is pushed but not started.
 - **New-app publish:** after a successful `/new` service restart, the bot creates `<name>.kurwalab.fyi` on `kurwalab-tunnel`, targeting the allocated `127.0.0.1` port. If deployment or routing fails, the report identifies the completed and failed stages.
@@ -185,14 +186,14 @@ Without `.env` values or per-request overrides, requests use `nobrowser` and `te
 
 - The bot obeys only the Telegram user ids in `TELEGRAM_ADMIN_IDS` and the users an administrator approved; any other user can only send an access request. Administrators can manage every app and infrastructure setting; regular users can execute Copilot-written code only through apps recorded as their own.
 - A request can create or change a `Makefile` that the bot then runs. Use a dedicated unprivileged VM user, restrict its passwordless sudo rules to the required service-management commands, restrict the GitHub token to the repositories involved, and keep `.env` and the browser profile readable only by that user.
-- Upload only repositories and attachments approved for your organization's Copilot environment. Each fix upload includes the branch's full Git history, and commit messages include Copilot's outputs; on public repositories these are visible to anyone. Attachments are kept only in a temporary folder under `STATE_DIR` while their request runs; browser-profile copies of parallel sessions hold sign-in state and are likewise kept only under `STATE_DIR` while their session runs.
+- Upload only repositories and attachments approved for your organization's Copilot environment. After every prompt, the engine permanently deletes all folders in the Copilot account's OneDrive and empties its recycle bin (see [What a request does](#what-a-request-does)). Each fix upload includes the branch's full Git history, and commit messages include Copilot's outputs; on public repositories these are visible to anyone. Attachments are kept only in a temporary folder under `STATE_DIR` while their request runs; browser-profile copies of parallel sessions hold sign-in state and are likewise kept only under `STATE_DIR` while their session runs.
 - Telegram, GitHub, and Cloudflare API tokens are redacted from errors and messages. App units explicitly unset these token variables and `VIRTUAL_ENV`.
 
 ## Layout
 
 | Path | Purpose |
 | --- | --- |
-| `engine/copilot_repo_roundtrip.py` | Playwright round-trip engine (`login`, `models`, and `fix`), the single automation engine. |
+| `engine/copilot_repo_roundtrip.py` | Playwright round-trip engine (`login`, `models`, and `fix`, including the OneDrive cleanup after each prompt), the single automation engine. |
 | `bot/service.py`, `bot/state.py` | Access requests and approvals, role-aware menus, admin/user view switching, permissions, app ownership, per-user selections, per-user sessions and their admin overview, guided conversations, commands, held attachments, and the request pipeline. |
 | `bot/app_list.py` | Telegram HTML app list: status summary and per-app cards, split into messages within Telegram's size limit. |
 | `bot/telegram_api.py`, `bot/github_api.py` | Telegram long polling, reply keyboards, HTML-formatted messages, file downloads, and GitHub REST clients (standard library only). |
@@ -208,4 +209,4 @@ Without `.env` values or per-request overrides, requests use `nobrowser` and `te
 make test
 ```
 
-The unit tests use fakes for Telegram, GitHub, Copilot, and Cloudflare, and local bare repositories for Git. Browser tests in `tests/test_engine.py` require Playwright and Chromium and are skipped if they are unavailable; set `ROUNDTRIP_TEST_CHROMIUM` to an existing Chromium executable to run them with that browser. The tests do not exercise a live Copilot sign-in, Telegram bot, GitHub account, or Cloudflare account.
+The unit tests use fakes for Telegram, GitHub, Copilot, OneDrive, and Cloudflare, and local bare repositories for Git. Browser tests in `tests/test_engine.py` require Playwright and Chromium and are skipped if they are unavailable; set `ROUNDTRIP_TEST_CHROMIUM` to an existing Chromium executable to run them with that browser. The tests do not exercise a live Copilot sign-in, OneDrive, Telegram bot, GitHub account, or Cloudflare account.

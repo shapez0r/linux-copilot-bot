@@ -2151,6 +2151,263 @@ def browser_is_headless(show_browser: bool, environ=None) -> bool:
     return not show_browser or not (environ.get("DISPLAY") or environ.get("WAYLAND_DISPLAY"))
 
 
+# Every Copilot prompt uploads its files to the signed-in account's OneDrive. After a submitted prompt ends,
+# the engine deletes every folder under My files and then empties the OneDrive recycle bin.
+ONEDRIVE_FILES_URL = "https://kurwalabb-my.sharepoint.com/my"
+ONEDRIVE_RECYCLE_URL = "https://kurwalabb-my.sharepoint.com/recycle"
+# Each page load and list action is bounded, so a changed OneDrive UI cannot hold the run open.
+CLEANUP_LOAD_SECONDS = 30
+CLEANUP_ACTION_SECONDS = 60
+# Microsoft sign-in pages that may appear before OneDrive opens with the browser profile's account.
+SIGN_IN_HOSTS = ("login.microsoftonline.com", "login.live.com", "login.microsoft.com")
+ACCOUNT_TILES = ('#tilesHolder [role="button"], #tilesHolder .table, [data-test-id="accountList"] [role="button"], '
+                 '[role="listitem"] [role="button"]')
+CONFIRM_SIGN_IN = "#idSIButton9, input[type=\"submit\"][value=\"Yes\" i], button:text-is(\"Yes\")"
+
+# Marks visible list rows that are folders: a folder icon or an "N items" size cell instead of a file size.
+FOLDER_ROWS_SCRIPT = r"""
+() => {
+  const visible = el => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+  const norm = value => String(value || '').replace(/\s+/g, ' ').trim();
+  document.querySelectorAll('[data-roundtrip-folder]').forEach(el => el.removeAttribute('data-roundtrip-folder'));
+  const icon = '[data-icon-name*="folder" i], img[alt="folder" i], img[alt^="folder," i], ' +
+    '[aria-label="folder" i], [title="folder" i], [data-automationid*="folder" i]';
+  const names = [];
+  for (const row of document.querySelectorAll('[role="row"]')) {
+    if (!visible(row) || row.querySelector('[role="columnheader"]') || row.closest('[role="dialog"]')) continue;
+    const cells = Array.from(row.querySelectorAll('[role="gridcell"], [role="cell"]'));
+    const count = cells.some(cell => /^\d[\d,.\s]*items?$/i.test(norm(cell.innerText)));
+    if (!count && !row.querySelector(icon)) continue;
+    row.setAttribute('data-roundtrip-folder', String(names.length));
+    const label = row.querySelector('[data-automationid="FieldRenderer-name"], button, a');
+    names.push(norm(label && label.innerText) || norm(row.getAttribute('aria-label')) || 'folder');
+  }
+  return names;
+}
+"""
+FOLDER_ROW = '[data-roundtrip-folder]'
+ROW_CHECKBOX = ('[role="checkbox"], input[type="checkbox"], [data-selection-toggle="true"], '
+                '[data-automationid="DetailsRowCheck"]')
+# Item rows of the recycle bin list; the header row holds column headers.
+ITEM_ROWS_SCRIPT = r"""
+() => Array.from(document.querySelectorAll('[role="row"]')).filter(row =>
+  row.getClientRects().length > 0 && !row.querySelector('[role="columnheader"]') &&
+  !row.closest('[role="dialog"]') && (row.innerText || '').trim()).length
+"""
+DIALOGS = '[role="dialog"]:visible, [role="alertdialog"]:visible'
+DELETE_NAME = re.compile(r"^\s*delete\s*$", re.I)
+EMPTY_BIN_NAME = re.compile(r"^\s*empty recycle bin\s*$", re.I)
+CONFIRM_EMPTY_NAME = re.compile(r"^\s*(yes|delete|empty recycle bin)\s*$", re.I)
+
+
+def _host(url):
+    from urllib.parse import urlparse
+    return (urlparse(url or "").hostname or "").lower()
+
+
+def _visible_controls(scope, name, roles=("button", "menuitem")):
+    """Visible controls with an exact accessible name, outside dialogs unless scope is a dialog."""
+    found = []
+    for role in roles:
+        try:
+            loc = scope.get_by_role(role, name=name)
+            for i in range(loc.count()):
+                node = loc.nth(i)
+                if node.is_visible() and node.is_enabled():
+                    found.append(node)
+        except Exception:
+            continue
+    return found
+
+
+def _outside_dialogs(nodes):
+    result = []
+    for node in nodes:
+        try:
+            if not node.evaluate("e => !!e.closest('[role=\"dialog\"], [role=\"alertdialog\"]')"):
+                result.append(node)
+        except Exception:
+            continue
+    return result
+
+
+def open_signed_in(page, url, timeout_seconds=CLEANUP_LOAD_SECONDS):
+    """Open a OneDrive page with the profile's Microsoft 365 sign-in, choosing the signed-in account if asked."""
+    page.goto(url, wait_until="domcontentloaded", timeout=timeout_seconds * 1000)
+    target = _host(url)
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        host = _host(page.url)
+        if host == target:
+            page.wait_for_timeout(UI_SETTLE_MS)
+            return
+        if host in SIGN_IN_HOSTS:
+            try:
+                text = page.locator("body").inner_text(timeout=2000)
+            except Exception:
+                text = ""
+            tiles = page.locator(ACCOUNT_TILES)
+            clicked = False
+            for i in range(_count(page, ACCOUNT_TILES)):
+                tile = tiles.nth(i)
+                try:
+                    if tile.is_visible() and "@" in tile.inner_text(timeout=1000):
+                        tile.click(timeout=3000)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+            if not clicked and re.search(r"stay signed in", text, re.I):
+                try:
+                    page.locator(CONFIRM_SIGN_IN).first.click(timeout=3000)
+                except Exception:
+                    pass
+        page.wait_for_timeout(1000)
+    raise RuntimeError(f"{url} did not open with the signed-in account; run make login again")
+
+
+def _wait_rows(page, script, timeout_seconds):
+    """Wait until the list shows rows; returns the last result (empty when the list stays empty)."""
+    deadline = time.monotonic() + timeout_seconds
+    result = page.evaluate(script)
+    while not result and time.monotonic() < deadline:
+        page.wait_for_timeout(500)
+        result = page.evaluate(script)
+    return result
+
+
+def _row_selected(row):
+    try:
+        return bool(row.evaluate(
+            "r => r.getAttribute('aria-selected') === 'true' || "
+            "!!r.querySelector('[role=\"checkbox\"][aria-checked=\"true\"], input[type=\"checkbox\"]:checked, "
+            "[data-selection-toggle=\"true\"][aria-checked=\"true\"]')"))
+    except Exception:
+        return False
+
+
+def _select_row(row, additive):
+    """Select one list row through its check control (shown on hover), else by clicking beside its name."""
+    if _row_selected(row):
+        return True
+    try:
+        row.hover(timeout=2000)
+    except Exception:
+        pass
+    checks = row.locator(ROW_CHECKBOX)
+    try:
+        for i in range(checks.count()):
+            check = checks.nth(i)
+            if check.is_visible():
+                check.click(timeout=3000)
+                if _row_selected(row):
+                    return True
+                break
+    except Exception:
+        pass
+    try:
+        box = row.bounding_box()
+        if box:
+            row.click(position={"x": 6, "y": box["height"] / 2}, timeout=3000,
+                      modifiers=["Control"] if additive else None)
+    except Exception:
+        pass
+    return _row_selected(row)
+
+
+def _confirm(page, name, timeout_seconds=10):
+    """Click the named button in the confirmation dialog."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        dialogs = page.locator(DIALOGS)
+        for i in range(dialogs.count()):
+            buttons = _visible_controls(dialogs.nth(i), name, ("button",))
+            if buttons:
+                buttons[0].click(timeout=3000)
+                return True
+        page.wait_for_timeout(300)
+    return False
+
+
+def delete_folders(page, rounds=5, timeout_seconds=CLEANUP_ACTION_SECONDS):
+    """Select every folder in the open My files list, delete it to the recycle bin, and return the count."""
+    deleted = 0
+    for _ in range(rounds):
+        names = _wait_rows(page, FOLDER_ROWS_SCRIPT, CLEANUP_LOAD_SECONDS if not deleted else 3)
+        if not names:
+            return deleted
+        rows = page.locator(FOLDER_ROW)
+        selected = sum(1 for i in range(rows.count()) if _select_row(rows.nth(i), i > 0))
+        if not selected:
+            raise RuntimeError("the folders in My files could not be selected")
+        controls = _outside_dialogs(_visible_controls(page, DELETE_NAME))
+        if not controls:
+            raise RuntimeError("the Delete command was not shown for the selected folders")
+        controls[0].click(timeout=3000)
+        if not _confirm(page, DELETE_NAME):
+            raise RuntimeError("the Delete confirmation dialog did not appear")
+        deadline = time.monotonic() + timeout_seconds
+        while len(page.evaluate(FOLDER_ROWS_SCRIPT)) >= len(names) and time.monotonic() < deadline:
+            page.wait_for_timeout(500)
+        remaining = len(page.evaluate(FOLDER_ROWS_SCRIPT))
+        if remaining >= len(names):
+            raise RuntimeError("the selected folders were not deleted")
+        deleted += len(names) - remaining
+    return deleted
+
+
+def empty_recycle_bin(page, timeout_seconds=CLEANUP_ACTION_SECONDS):
+    """Empty the open OneDrive recycle bin; returns False when it was already empty."""
+    deadline = time.monotonic() + CLEANUP_LOAD_SECONDS
+    controls = []
+    while not controls and time.monotonic() < deadline:
+        controls = _outside_dialogs(_visible_controls(page, EMPTY_BIN_NAME))
+        if not controls:
+            page.wait_for_timeout(500)
+    if not controls:
+        if page.evaluate(ITEM_ROWS_SCRIPT):
+            raise RuntimeError("the Empty recycle bin command was not shown")
+        return False
+    controls[0].click(timeout=3000)
+    if not _confirm(page, CONFIRM_EMPTY_NAME):
+        raise RuntimeError("the Empty recycle bin confirmation dialog did not appear")
+    deadline = time.monotonic() + timeout_seconds
+    while page.evaluate(ITEM_ROWS_SCRIPT) and time.monotonic() < deadline:
+        page.wait_for_timeout(500)
+    if page.evaluate(ITEM_ROWS_SCRIPT):
+        raise RuntimeError("the recycle bin still lists items")
+    return True
+
+
+def clean_onedrive(ctx, files_url=ONEDRIVE_FILES_URL, recycle_url=ONEDRIVE_RECYCLE_URL):
+    """Best effort: delete every My files folder, then empty the recycle bin; never fails the run.
+
+    Cancellation does not interrupt it, so files uploaded by a stopped prompt are removed as well.
+    """
+    page = None
+    try:
+        page = ctx.new_page()
+        page.set_default_timeout(CLEANUP_LOAD_SECONDS * 1000)
+        emit_status("cleanup", "Opening OneDrive My files to delete its folders...")
+        open_signed_in(page, files_url)
+        deleted = delete_folders(page)
+        emit_status("cleanup", f"Deleted {deleted} OneDrive folder(s)." if deleted
+                    else "OneDrive My files has no folders to delete.")
+        emit_status("cleanup", "Emptying the OneDrive recycle bin...")
+        open_signed_in(page, recycle_url)
+        emptied = empty_recycle_bin(page)
+        emit_status("cleanup", "OneDrive recycle bin emptied." if emptied
+                    else "OneDrive recycle bin is already empty.")
+    except Exception as error:
+        emit_status("cleanup", f"OneDrive cleanup did not finish: {str(error).splitlines()[0][:300]}")
+    finally:
+        if page is not None:
+            try:
+                page.close()
+            except Exception:
+                pass
+
+
 def cmd_login(args):
     from playwright.sync_api import sync_playwright
     profile = Path(args.profile).expanduser().resolve(); profile.mkdir(parents=True, exist_ok=True)
@@ -2291,6 +2548,21 @@ def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout)
         ctx = open_context(p, profile, headless, work)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         submitted = False
+        closed = False
+
+        def close_browser():
+            # Once a prompt was submitted, OneDrive is cleaned before the browser closes, whatever the outcome.
+            nonlocal closed
+            if closed:
+                return
+            closed = True
+            if submitted:
+                clean_onedrive(ctx)
+            try:
+                ctx.close()
+            except Exception:
+                pass
+
         try:
             if continuing:
                 emit_status("browser", "Reopening the saved Copilot chat...")
@@ -2444,7 +2716,7 @@ def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout)
             if downloaded is None:
                 page.screenshot(path=str(work / "copilot-timeout.png"), full_page=True)
                 (work / "copilot-timeout.html").write_text(page.content(), encoding="utf-8")
-                ctx.close()
+                close_browser()
                 raise SystemExit(NOT_RESPONDING_MESSAGE)
             # Download discovery starts only after Stop is gone; read the final response layout twice.
             emit_status("waiting", "Copilot response finished; downloadable repository found.")
@@ -2466,7 +2738,7 @@ def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout)
                     reported_url = current_url
                     emit_chat(current_url)
             chat_response = final_answer(live_answers, read_chat_response(page))
-            ctx.close()
+            close_browser()
         except QuitRequested:
             if submitted:
                 emit_status("cancelled", "Quit requested: clicking Stop on the Copilot response...")
@@ -2474,12 +2746,12 @@ def run_roundtrip(args, root, profile, work, sync_playwright, PlaywrightTimeout)
                     emit_status("cancelled", "No running Copilot response was found to stop.")
             else:
                 emit_status("cancelled", "Quit requested before the prompt was submitted.")
-            try:
-                ctx.close()
-            except Exception:
-                pass
+            close_browser()
             emit_status("cancelled", "Run cancelled. The repository was not changed.")
             raise SystemExit(QUIT_EXIT_CODE)
+        except (Exception, SystemExit):
+            close_browser()
+            raise
     if quit_requested():
         emit_status("cancelled", "Run cancelled before applying changes. The repository was not changed.")
         raise SystemExit(QUIT_EXIT_CODE)

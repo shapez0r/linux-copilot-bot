@@ -261,6 +261,39 @@ class CompletionTests(unittest.TestCase):
         self.assertIn('if now - last_update >= HEARTBEAT_SECONDS:', source)
         self.assertIn("emit_status('heartbeat', heartbeat_message(running, now - started, idle, idle_limit))", source)
 
+    def test_onedrive_cleanup_runs_folders_then_recycle_bin_and_never_raises(self):
+        ctx, page = Mock(), Mock()
+        ctx.new_page.return_value = page
+        with patch.object(rt, 'open_signed_in') as opened, \
+                patch.object(rt, 'delete_folders', return_value=2), \
+                patch.object(rt, 'empty_recycle_bin', return_value=True), \
+                patch.object(rt, 'emit_status') as status:
+            rt.clean_onedrive(ctx)
+        self.assertEqual([call.args[1] for call in opened.call_args_list],
+                         ['https://kurwalabb-my.sharepoint.com/my', 'https://kurwalabb-my.sharepoint.com/recycle'])
+        messages = [call.args[1] for call in status.call_args_list]
+        self.assertIn('Deleted 2 OneDrive folder(s).', messages)
+        self.assertEqual(messages[-1], 'OneDrive recycle bin emptied.')
+        page.close.assert_called_once_with()
+        with patch.object(rt, 'open_signed_in', side_effect=RuntimeError('sign-in required')), \
+                patch.object(rt, 'emit_status') as status:
+            rt.clean_onedrive(ctx)
+        self.assertEqual(status.call_args_list[-1].args,
+                         ('cleanup', 'OneDrive cleanup did not finish: sign-in required'))
+
+    def test_every_submitted_prompt_cleans_onedrive_before_the_browser_closes(self):
+        tree = ast.parse(SCRIPT.read_text())
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'run_roundtrip')
+        source = ast.unparse(fn)
+        self.assertRegex(source, r'if submitted:\n\s+clean_onedrive\(ctx\)')
+        self.assertNotIn('ctx.close()\n            raise SystemExit', source)
+        self.assertEqual(source.count('ctx.close()'), 1)
+        self.assertEqual(sum(1 for n in ast.walk(fn) if isinstance(n, ast.Call)
+                             and isinstance(n.func, ast.Name) and n.func.id == 'close_browser'), 4)
+        handler = next(n for n in ast.walk(fn) if isinstance(n, ast.ExceptHandler)
+                       and ast.unparse(n.type) == '(Exception, SystemExit)')
+        self.assertEqual([ast.unparse(s) for s in handler.body], ['close_browser()', 'raise'])
+
     def test_signature_survives_a_failing_activity_parser(self):
         page = Mock()
         page.evaluate.side_effect = lambda script, *args: '10:1' if script == rt.SIGNATURE_SCRIPT else 1 / 0
@@ -931,6 +964,87 @@ secret_two()</code>
     def test_reused_composer_control_is_not_excluded_by_prior_marker(self):
         self.page.set_content('<form><button data-roundtrip-prior="1" aria-label="Stop responding">Stop</button></form>')
         self.assertTrue(rt.response_is_running(self.page, self.sel))
+
+    MY_FILES = '''<style>.check { visibility: hidden; } [role="row"]:hover .check { visibility: visible; }</style>
+      <div role="menubar" id="bar"><button id="copilot">Copilot</button></div>
+      <div role="grid">
+        <div role="row"><span role="columnheader">Name</span><span role="columnheader">File size</span></div>
+        <div role="row" aria-selected="false"><span role="gridcell"><span class="check" role="checkbox"
+          aria-checked="false" aria-label="Select row">&#9711;</span></span><span role="gridcell"><button>Documents</button>
+          </span><span role="gridcell">1 item</span></div>
+        <div role="row" aria-selected="false"><span role="gridcell"><span class="check" role="checkbox"
+          aria-checked="false" aria-label="Select row">&#9711;</span></span><span role="gridcell"><button>Microsoft Copilot
+          Chat Files</button></span><span role="gridcell">7 items</span></div>
+        <div role="row" aria-selected="false"><span role="gridcell"><span class="check" role="checkbox"
+          aria-checked="false" aria-label="Select row">&#9711;</span></span><span role="gridcell"><button>notes.docx</button>
+          </span><span role="gridcell">12 KB</span></div>
+      </div>
+      <script>
+        const bar = document.getElementById('bar');
+        const selected = () => Array.from(document.querySelectorAll('[role="row"][aria-selected="true"]'));
+        document.querySelectorAll('.check').forEach(check => check.addEventListener('click', () => {
+          const row = check.closest('[role="row"]');
+          const on = row.getAttribute('aria-selected') !== 'true';
+          row.setAttribute('aria-selected', String(on));
+          check.setAttribute('aria-checked', String(on));
+          let del = document.getElementById('delete');
+          if (selected().length && !del) {
+            del = document.createElement('button'); del.id = 'delete'; del.textContent = 'Delete';
+            del.onclick = () => {
+              const dialog = document.createElement('div');
+              dialog.setAttribute('role', 'dialog');
+              dialog.innerHTML = '<h2>Delete?</h2><button id="confirm">Delete</button><button>Cancel</button>';
+              dialog.querySelector('#confirm').onclick = () => {
+                selected().forEach(r => r.remove()); dialog.remove(); del.remove();
+              };
+              document.body.appendChild(dialog);
+            };
+            bar.appendChild(del);
+          }
+        }));
+      </script>'''
+
+    RECYCLE_BIN = '''<div role="menubar"><button id="empty">Empty recycle bin</button></div>
+      <div role="grid"><div role="row"><span role="columnheader">Name</span></div>
+        <div role="row"><span role="gridcell">Microsoft Copilot Chat Files</span></div>
+        <div role="row"><span role="gridcell">Documents</span></div></div>
+      <script>
+        document.getElementById('empty').onclick = () => {
+          const dialog = document.createElement('div');
+          dialog.setAttribute('role', 'dialog');
+          dialog.innerHTML = '<h2>Empty Recycle Bin?</h2><button id="yes">Yes</button><button>No</button>';
+          dialog.querySelector('#yes').onclick = () => {
+            document.querySelectorAll('[role="row"]:not(:first-child)').forEach(r => r.remove());
+            dialog.remove();
+          };
+          document.body.appendChild(dialog);
+        };
+      </script>'''
+
+    def test_onedrive_cleanup_deletes_only_folders(self):
+        self.page.set_content(self.MY_FILES)
+        self.assertEqual(rt.delete_folders(self.page), 2)
+        rows = self.page.locator('[role="row"]').all_inner_texts()
+        self.assertEqual(len(rows), 2)
+        self.assertIn('notes.docx', rows[1])
+        self.assertEqual(self.page.locator('[role="dialog"]').count(), 0)
+
+    def test_onedrive_cleanup_without_folders_deletes_nothing(self):
+        self.page.set_content('<div role="grid"><div role="row"><span role="gridcell">notes.docx</span>'
+                              '<span role="gridcell">12 KB</span></div></div>')
+        with patch.object(rt, 'CLEANUP_LOAD_SECONDS', 0):
+            self.assertEqual(rt.delete_folders(self.page), 0)
+
+    def test_onedrive_recycle_bin_is_emptied_after_confirmation(self):
+        self.page.set_content(self.RECYCLE_BIN)
+        self.assertTrue(rt.empty_recycle_bin(self.page))
+        self.assertEqual(self.page.evaluate(rt.ITEM_ROWS_SCRIPT), 0)
+        self.assertEqual(self.page.locator('[role="dialog"]').count(), 0)
+
+    def test_empty_onedrive_recycle_bin_needs_no_action(self):
+        self.page.set_content('<div role="grid"><div role="row"><span role="columnheader">Name</span></div></div>')
+        with patch.object(rt, 'CLEANUP_LOAD_SECONDS', 0):
+            self.assertFalse(rt.empty_recycle_bin(self.page))
 
     def test_prior_long_running_task_card_is_ignored(self):
         self.page.set_content('''<main><article data-roundtrip-prior-msg="1">
