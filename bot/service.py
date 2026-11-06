@@ -184,7 +184,7 @@ USER_HELP = f"""Use the buttons below to create and list apps, and to fix, start
 /new [model=<provider/model>] [template=<app>] name="<name|owner/name>" prompt="<request>" - create, build, deploy and publish a new app in a public repository
 /fix [model=<provider/model>] app="<name>" prompt="<request>" - fix an app you created with the same choices as Fix an app
 /list - list every local app with its status and public URL
-/app start|stop <name> - start or stop one of your app services
+/app start|stop <name> - start or stop one of your apps
 /cancel - stop your running session and discard attached files
 /help or /cli - show this message"""
 
@@ -1911,7 +1911,7 @@ class Bot:
     def _user_error(self, error) -> str:
         """Describe a job failure to a regular user without service, tunnel or server-path details."""
         if isinstance(error, DeployError):
-            return "The app service could not be managed. Ask an admin to check it."
+            return "The app could not be started or stopped. Ask an admin to check it."
         if isinstance(error, CloudflareError):
             return "The app address could not be configured. Ask an admin to check it."
         text = str(error)
@@ -1924,8 +1924,15 @@ class Bot:
 
     @staticmethod
     def _public_status(status: str) -> str:
-        """Return an app status without its process id."""
-        return re.sub(r"\s*\(pid \d+\)", "", status)
+        """Reduce a service status to running, starting or stopped for regular users."""
+        lowered = status.lower()
+        if lowered.startswith("running"):
+            return "running"
+        if lowered.startswith(("activating", "reloading")):
+            return "starting"
+        if lowered.startswith("unavailable"):
+            return "unavailable"
+        return "stopped"
 
     def _owner_default(self) -> str:
         return self.cfg.github_owner or self.gh.login

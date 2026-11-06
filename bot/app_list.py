@@ -12,6 +12,7 @@ TITLE = "📱 <b>Apps</b>"
 _STATUSES = (
     ("running", "🟢", "running"),
     ("stopped", "⚪", "stopped"),
+    ("starting", "🟡", "starting"),
     ("failed", "🔴", "failed"),
     ("not registered", "⚫", "not registered"),
     ("unavailable", "❓", "unavailable"),

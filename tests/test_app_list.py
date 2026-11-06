@@ -13,9 +13,9 @@ class AppListTests(unittest.TestCase):
         entries = [AppEntry('a', 'running', 'https://a.example'),
                    AppEntry('long-name', 'stopped', 'not configured'),
                    AppEntry('broken', 'failed'),
-                   AppEntry('booting', 'activating (start)')]
+                   AppEntry('booting', 'activating (start)'), AppEntry('warming', 'starting')]
         message, = app_list_messages(entries)
-        self.assertTrue(message.startswith('📱 <b>Apps</b>\n🟢 1 running · ⚪ 1 stopped · 🔴 1 failed · 🟡 1 changing\n\n'))
+        self.assertTrue(message.startswith('📱 <b>Apps</b>\n🟢 1 running · ⚪ 1 stopped · 🟡 1 starting · 🔴 1 failed · 🟡 1 changing\n\n'))
         self.assertIn('🟢 <b>a</b> · running\n<blockquote>🔗 https://a.example</blockquote>',
                       message)
         self.assertIn('⚪ <b>long-name</b> · stopped\n<blockquote>🔗 not configured</blockquote>', message)

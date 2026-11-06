@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 from support import git, make_config, make_origin
 from bot.cloudflare import CloudflareError
-from bot.deploy import DeployResult
+from bot.deploy import DeployError, DeployResult
 from bot.github_api import GitHubError
 from bot.gitops import Git, GitError
 from bot.roundtrip import Cancelled, RoundTripError
@@ -1479,6 +1479,25 @@ class ServiceTests(unittest.TestCase):
             "📱 <b>Apps</b>\n🟢 1 running\n\n🟢 <b>eurofish</b> · running\n"
             '<blockquote>🔗 https://eurofish.kurwalab.fyi</blockquote>',
         )
+
+    def test_regular_users_see_only_running_starting_or_stopped(self):
+        self.approve(77)
+        self.bot.cfg = make_config(self.tmp, owner_ids=frozenset({42}))
+        for name in ("alpha", "beta", "gamma", "delta"):
+            (self.cfg.repos_dir / name).mkdir(exist_ok=True)
+        self.deployer.statuses.update({"alpha": "running (pid 5)", "beta": "failed",
+                                       "gamma": "not registered", "delta": "activating (start)"})
+        self.user_say(77, "/list")
+        listing = self.tg.sent[-1]
+        self.assertIn("<b>alpha</b> · running", listing)
+        self.assertIn("<b>beta</b> · stopped", listing)
+        self.assertIn("<b>gamma</b> · stopped", listing)
+        self.assertIn("<b>delta</b> · starting", listing)
+        for hidden in ("pid", "failed", "registered", "activating", "service", "systemd"):
+            self.assertNotIn(hidden, listing)
+        for hidden in ("service", "systemd", "pid"):
+            self.assertNotIn(hidden, USER_HELP.lower())
+        self.assertNotIn("service", self.bot._user_error(DeployError("copilot-app-x.service failed")))
 
     def test_list_reports_unavailable_routes_without_cloudflare_configuration(self):
         self.say("/list")
