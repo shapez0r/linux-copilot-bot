@@ -4,7 +4,7 @@ import unittest
 
 from support import make_config  # noqa: F401  (adds the repository root to sys.path)
 
-from bot.diff_view import ADDED, DELETED, MAX_FILES, format_changes, parse_numstat
+from bot.diff_view import MAX_FILES, format_changes, parse_numstat
 
 
 class DiffViewTests(unittest.TestCase):
@@ -14,14 +14,15 @@ class DiffViewTests(unittest.TestCase):
         text = format_changes(rows)
         lines = text.splitlines()
         self.assertEqual(lines[0], "Changes: 4 files \u00b7 \U0001f7e2 +13 \U0001f534 \u22128")
-        self.assertEqual(lines[1], "\U0001f4c4 new.py  +10 \u22120  " + ADDED * 5)
-        self.assertEqual(lines[2], "\U0001f4c4 bot/service.py  +3 \u22127  " + ADDED * 2 + DELETED * 3)
+        self.assertEqual(lines[1], "\U0001f4c4 new.py  +10 \u22120")
+        self.assertEqual(lines[2], "\U0001f4c4 bot/service.py  +3 \u22127")
         self.assertEqual(lines[3], "\U0001f4c4 logo.png  binary")
-        self.assertEqual(lines[4], "\U0001f4c4 old.txt  +0 \u22121  " + DELETED)
+        self.assertEqual(lines[4], "\U0001f4c4 old.txt  +0 \u22121")
 
-    def test_small_mixed_change_shows_both_signs(self):
+    def test_file_lines_show_only_counts(self):
         text = format_changes([(1, 1, "a"), (100, 0, "b")])
-        self.assertIn("+1 \u22121  " + ADDED + DELETED, text)
+        self.assertIn("\U0001f4c4 a  +1 \u22121\n", text)
+        self.assertTrue(text.endswith("\U0001f4c4 b  +100 \u22120"))
 
     def test_long_lists_are_truncated_and_empty_input_renders_nothing(self):
         rows = [(1, 0, f"f{i}") for i in range(MAX_FILES + 3)]

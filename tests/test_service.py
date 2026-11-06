@@ -1124,7 +1124,8 @@ class ServiceTests(unittest.TestCase):
         report = self.tg.sent[-1]
         self.assertIn("pushed to main", report)
         self.assertIn("Changes: 1 file \u00b7 \U0001f7e2 +2 \U0001f534 \u22120", report)
-        self.assertIn("\U0001f4c4 Makefile  +2 \u22120  +++++", report)
+        self.assertIn("\U0001f4c4 Makefile  +2 \u22120", report)
+        self.assertNotIn("+++", report)
         self.assertNotIn("Added it.", report)
         self.assertNotIn("Copilot:", report)
 
