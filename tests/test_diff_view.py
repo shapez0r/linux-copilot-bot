@@ -19,7 +19,7 @@ class DiffViewTests(unittest.TestCase):
         self.assertEqual(lines[3], "\U0001f4c4 logo.png  binary")
         self.assertEqual(lines[4], "\U0001f4c4 old.txt  +0 \u22121  " + DELETED)
 
-    def test_small_mixed_change_shows_both_colors(self):
+    def test_small_mixed_change_shows_both_signs(self):
         text = format_changes([(1, 1, "a"), (100, 0, "b")])
         self.assertIn("+1 \u22121  " + ADDED + DELETED, text)
 

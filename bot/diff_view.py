@@ -1,8 +1,9 @@
-"""Diff summary of a commit, rendered like an editor diff view: green additions and red deletions."""
+"""Diff summary of a commit, rendered like git diff --stat: per-file counts and a compact +/− bar."""
 
 from __future__ import annotations
 
-ADDED, DELETED, FILE = "\U0001f7e9", "\U0001f7e5", "\U0001f4c4"
+# Plain text characters keep the bar at text size; Telegram renders every emoji, including colored dots, large.
+ADDED, DELETED, FILE = "+", "\u2212", "\U0001f4c4"
 BAR_WIDTH = 5
 MAX_FILES = 20
 
@@ -21,7 +22,7 @@ def parse_numstat(text: str):
 
 
 def _bar(added: int, deleted: int, peak: int) -> str:
-    """Squares proportional to the largest file change; each nonzero side shows at least one square."""
+    """Bar proportional to the largest file change; each nonzero side shows at least one character."""
     total = added + deleted
     if not total:
         return ""
@@ -31,7 +32,7 @@ def _bar(added: int, deleted: int, peak: int) -> str:
 
 
 def format_changes(rows) -> str:
-    """Render per-file +/- counts with colored bars and a total line; empty when nothing changed."""
+    """Render per-file +/- counts with bars and a colored total line; empty when nothing changed."""
     rows = list(rows)
     if not rows:
         return ""
