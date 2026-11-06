@@ -1123,7 +1123,8 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue(git("log", "-1", "--format=%b", cwd=self.origin).endswith("Copilot output:\nAdded it."))
         report = self.tg.sent[-1]
         self.assertIn("pushed to main", report)
-        self.assertIn("1 file changed", report)
+        self.assertIn("Changes: 1 file \u00b7 \U0001f7e2 +2 \U0001f534 \u22120", report)
+        self.assertIn("\U0001f4c4 Makefile  +2 \u22120  " + "\U0001f7e9" * 5, report)
         self.assertNotIn("Added it.", report)
         self.assertNotIn("Copilot:", report)
 

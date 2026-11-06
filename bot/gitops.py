@@ -168,3 +168,7 @@ class Git:
         branch = self.run("symbolic-ref", "--short", "HEAD", cwd=dest)
         self.run("push", "origin", branch, cwd=dest)
         return self.run("rev-parse", "--short", "HEAD", cwd=dest), branch
+
+    def numstat(self, dest: Path) -> str:
+        """Per-file insertion and deletion counts of the HEAD commit, as git --numstat output."""
+        return self.run("show", "--numstat", "--format=", "--no-renames", "HEAD", cwd=dest)

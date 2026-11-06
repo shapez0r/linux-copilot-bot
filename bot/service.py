@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .app_list import AppEntry, app_list_messages
+from .diff_view import format_changes, parse_numstat
 from .config import Config, redact
 from .cloudflare import CloudflareError, CloudflareRoutes
 from .deploy import BOT_APP, BOT_SERVICE, DeployError, Deployer
@@ -2184,6 +2185,7 @@ class Bot:
             self.say(chat_id, f"Copilot returned no changes to commit for {full}; nothing was deployed.")
             return
         sha, pushed_branch = pushed
+        result["numstat"] = self._numstat(dest)
         progress.update(f"{full}: restarting its systemd service..." if admin else f"{full}: restarting the app...")
         deploy = self.deployer.redeploy(name, dest)
         progress.flush()
@@ -2217,6 +2219,8 @@ class Bot:
                                             attachments=files)
             progress.update(f"{full}: committing and pushing...")
             pushed = self.git.commit_and_push(dest, request, result.get("chat_response") or "")
+            if pushed is not None:
+                result["numstat"] = self._numstat(dest)
         if pushed is None:
             progress.flush()
             self.say(chat_id, f"Copilot returned no changes to commit for {full}; nothing was deployed.")
@@ -2227,9 +2231,9 @@ class Bot:
         progress.flush()
         restart = self.deployer.bot_runs_as_service()
         lines = [f"\u2705 {full}: commit {sha} pushed to {pushed_branch}."]
-        diff_lines = [line for line in (result.get("diff_stat") or "").splitlines() if line.strip()]
-        if diff_lines:
-            lines.append(f"Changes: {diff_lines[-1].strip()}")
+        changes = self._changes(result)
+        if changes:
+            lines.append(changes)
         lines.append(f"Local checkout: {live} updated.")
         others = len(self._running_sessions()) - 1
         if not restart:
@@ -2259,14 +2263,31 @@ class Bot:
             return first + f"\nRepository: {url}" + (separator + rest if separator else "")
         return f"{full}: {message}"
 
+    def _numstat(self, dest) -> str:
+        """Read the pushed commit's per-file counts; a failure only drops the change summary."""
+        try:
+            return self.git.numstat(dest)
+        except GitError as error:
+            log.warning("cannot read the commit's changes: %s", redact(str(error), self.cfg.secrets))
+            return ""
+
+    @staticmethod
+    def _changes(result: dict) -> str:
+        """Diff-style change list of the commit, or the engine's summary line when counts are unavailable."""
+        changes = format_changes(parse_numstat(result.get("numstat") or ""))
+        if changes:
+            return changes
+        diff_lines = [line for line in (result.get("diff_stat") or "").splitlines() if line.strip()]
+        return f"Changes: {diff_lines[-1].strip()}" if diff_lines else ""
+
     @staticmethod
     def _report(full: str, sha: str, branch: str, result: dict, deploy, url: str = "") -> str:
         """Summarize a fix; a URL selects the regular-user form without service details."""
-        diff_lines = [l for l in (result.get("diff_stat") or "").splitlines() if l.strip()]
         mark = "\u2705" if deploy.ok else "\u26a0\ufe0f"
         lines = [f"{mark} {full}: commit {sha} pushed to {branch}."]
-        if diff_lines:
-            lines.append(f"Changes: {diff_lines[-1].strip()}")
+        changes = Bot._changes(result)
+        if changes:
+            lines.append(changes)
         if not url:
             lines.append(("Deploy: " if deploy.ok else "Pushed, but the redeploy failed: ") + deploy.message)
         elif deploy.ok:
