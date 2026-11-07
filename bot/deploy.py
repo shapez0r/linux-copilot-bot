@@ -285,10 +285,12 @@ class Deployer:
     def _remove_unit(self, path: Path):
         self._sudo(["rm", "-f", "--", str(path)])
 
-    def _install_unit(self, service: str, content: str) -> bool:
+    def _install_unit(self, service: str, content: str, keep_existing: bool = False) -> bool:
+        """Write the unit when missing or different and enable it; keep_existing never rewrites a present unit."""
         path = self._unit_dir / service
         try:
-            changed = not path.is_file() or path.read_text(encoding="utf-8") != content
+            exists = path.is_file()
+            changed = not exists or (not keep_existing and path.read_text(encoding="utf-8") != content)
         except OSError as error:
             raise DeployError(f"cannot read systemd service {service}: {error}") from None
         if changed:
@@ -346,13 +348,16 @@ class Deployer:
         return f"Bot service {BOT_SERVICE} is {action}.{suffix}"
 
     def ensure_service(self, app: str, repo_dir: Path) -> str:
-        """Install and enable one app unit without changing its running state."""
+        """Install and enable one app unit without changing its running state.
+
+        An existing unit file is left as it is, so manual edits survive starts, stops and redeploys.
+        """
         repo_dir = Path(repo_dir)
         self._validate_repo(app, repo_dir)
         if not self.has_run_target(repo_dir):
             raise DeployError(f"{repo_dir} has no usable `make run` target")
         service = self.service_name(app)
-        changed = self._install_unit(service, self._app_unit(app, repo_dir))
+        changed = self._install_unit(service, self._app_unit(app, repo_dir), keep_existing=True)
         removed = self._remove_reboot_entry(repo_dir)
         action = "registered and enabled" if changed else "already registered and enabled"
         suffix = " The matching crontab entry was removed." if removed else ""
@@ -391,7 +396,7 @@ class Deployer:
         return state.active not in ("inactive", "failed")
 
     def redeploy(self, app: str, repo_dir: Path) -> DeployResult:
-        """Install the app unit and restart it with systemd."""
+        """Install the app unit when missing and restart it with systemd."""
         try:
             self.ensure_service(app, repo_dir)
             self._systemctl(["restart", self.service_name(app)])

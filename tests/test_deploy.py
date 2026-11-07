@@ -105,6 +105,24 @@ class DeployTests(unittest.TestCase):
         self.assertNotIn(("daemon-reload",), self.deployer.calls)
         self.assertFalse(any(call[0] == "enable" for call in self.deployer.calls))
 
+    def test_existing_unit_file_is_kept_on_start_stop_and_redeploy(self):
+        self.makefile()
+        path = self.deployer.service_path("app")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        edited = "[Service]\nExecStart=/usr/bin/make run\nEnvironment=PORT=9000\n"
+        path.write_text(edited)
+        with mock.patch.object(self.deployer, "_remove_reboot_entry", return_value=False), \
+             mock.patch("bot.deploy.time.monotonic", side_effect=[0, 2, 2, 0, 2, 2]), \
+             mock.patch.object(self.deployer, "_write_unit") as write:
+            self.assertTrue(self.deployer.start("app", self.repo).ok)
+            self.assertTrue(self.deployer.stop("app", self.repo))
+            self.assertTrue(self.deployer.redeploy("app", self.repo).ok)
+            message = self.deployer.ensure_service("app", self.repo)
+        write.assert_not_called()
+        self.assertEqual(path.read_text(), edited)
+        self.assertNotIn(("daemon-reload",), self.deployer.calls)
+        self.assertIn("already registered and enabled", message)
+
     def test_redeploy_restarts_service_and_reports_systemd_state(self):
         self.makefile()
         with mock.patch.object(self.deployer, "_remove_reboot_entry", return_value=False), \
