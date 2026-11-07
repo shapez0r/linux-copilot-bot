@@ -104,7 +104,7 @@ class Deployer:
     @staticmethod
     def service_name(app: str) -> str:
         if not _APP_NAME.fullmatch(app):
-            raise DeployError(f"invalid app name for a systemd service: {app}")
+            raise DeployError(f"invalid app name for a service: {app}")
         return f"{APP_SERVICE_PREFIX}{app}.service"
 
     def service_path(self, app: str) -> Path:
@@ -162,7 +162,7 @@ class Deployer:
                 values[key] = value
         if done.returncode != 0 and not values:
             detail = done.stderr.strip() or done.stdout.strip() or f"exit code {done.returncode}"
-            raise DeployError(f"cannot read systemd service {service}: {detail[-600:]}")
+            raise DeployError(f"cannot read service {service}: {detail[-600:]}")
         try:
             pid = int(values.get("MainPID") or 0)
         except ValueError:
@@ -277,7 +277,7 @@ class Deployer:
                 temporary = Path(output.name)
             self._sudo(["install", "-D", "-m", "0644", "--", str(temporary), str(path)])
         except OSError as error:
-            raise DeployError(f"cannot prepare systemd service {path.name}: {error}") from None
+            raise DeployError(f"cannot prepare service {path.name}: {error}") from None
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
@@ -292,7 +292,7 @@ class Deployer:
             exists = path.is_file()
             changed = not exists or (not keep_existing and path.read_text(encoding="utf-8") != content)
         except OSError as error:
-            raise DeployError(f"cannot read systemd service {service}: {error}") from None
+            raise DeployError(f"cannot read service {service}: {error}") from None
         if changed:
             self._write_unit(path, content)
             self._systemctl(["daemon-reload"])
@@ -374,9 +374,9 @@ class Deployer:
             state = self.service_state(app)
         if state.running and time.monotonic() >= deadline:
             pid = f" (pid {state.pid})" if state.pid else ""
-            return DeployResult(True, f"Systemd service {service} is enabled and running{pid}.")
+            return DeployResult(True, f"App service {service} is enabled and running{pid}.")
         detail = self.log_tail(app)
-        message = f"Systemd service {service} is {state.display()}."
+        message = f"App service {service} is {state.display()}."
         if detail:
             message += "\n" + detail
         return DeployResult(False, message)
@@ -420,7 +420,7 @@ class Deployer:
         if registered:
             message = f"Service: disabled and removed {service}."
         else:
-            message = "Service: no systemd unit was registered."
+            message = "Service: no app service was registered."
         if removed:
             message += " The matching crontab entry was removed."
         return message

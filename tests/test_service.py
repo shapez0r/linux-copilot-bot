@@ -127,8 +127,8 @@ class FakeDeployer:
     def redeploy(self, app, repo_dir):
         self.calls.append((app, Path(repo_dir)))
         self.registered.append((app, Path(repo_dir)))
-        return DeployResult(self.ok, f"Systemd service copilot-app-{app}.service is running (pid 1)."
-                            if self.ok else f"Systemd service copilot-app-{app}.service failed.")
+        return DeployResult(self.ok, f"App service copilot-app-{app}.service is running (pid 1)."
+                            if self.ok else f"App service copilot-app-{app}.service failed.")
 
     def ensure_service(self, app, repo_dir):
         self.registered.append((app, Path(repo_dir)))
@@ -136,7 +136,7 @@ class FakeDeployer:
 
     def start(self, app, repo_dir):
         self.starts.append((app, Path(repo_dir)))
-        return DeployResult(self.ok, f"Systemd service copilot-app-{app}.service is running (pid 1).")
+        return DeployResult(self.ok, f"App service copilot-app-{app}.service is running (pid 1).")
 
     def status(self, app, repo_dir):
         return self.statuses.get(
@@ -723,9 +723,11 @@ class ServiceTests(unittest.TestCase):
         report = self.tg.sent[-1]
         self.assertIn("https://fresh-app.kurwalab.fyi", report)
         self.assertIn("Copilot output:\nAdded it.", report)
-        self.assertIn("Deploy: Systemd service copilot-app-fresh-app.service", report)
+        self.assertIn("Deploy: App service copilot-app-fresh-app.service", report)
         self.assertIn("Tunnel: https://fresh-app.kurwalab.fyi -> http://127.0.0.1:8081.", report)
         self.assertEqual(self.rt.histories, [False])
+        for message in self.tg.sent + self.tg.edits:
+            self.assertNotIn("systemd", message.lower())
 
     def test_regular_user_creation_records_ownership_and_allows_only_owner_fixes(self):
         self.approve(77, 88)
@@ -1127,6 +1129,9 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("\U0001f4c4 Makefile  +2 \u22120", report)
         self.assertNotIn("+++", report)
         self.assertTrue(report.endswith("\n\nCopilot output:\nAdded it."))
+        self.assertIn("app: restarting the app...", "\n".join(self.tg.edits + self.tg.sent))
+        for message in self.tg.sent + self.tg.edits:
+            self.assertNotIn("systemd", message.lower())
 
     def test_fix_selects_the_repository_and_runs(self):
         self.say("/fix app=app prompt=tidy the readme")
@@ -1303,7 +1308,7 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("existing-two", registered)
         self.assertNotIn("linux-copilot-bot", registered)
         self.assertEqual(self.state.app_owner("me/existing-one"), ADMIN_OWNER)
-        self.assertIn("Systemd app service registration", self.tg.sent[-1])
+        self.assertIn("App service registration", self.tg.sent[-1])
 
     def test_app_controls_enforce_regular_user_ownership(self):
         self.approve(77, 88)
@@ -1426,7 +1431,7 @@ class ServiceTests(unittest.TestCase):
         self.deployer.as_service = False
         self.say("/fix app=linux-copilot-bot prompt=tidy it")
         self.assertEqual(self.deployer.bot_restarts, 0)
-        self.assertIn("not running as its systemd service", self.tg.sent[-1])
+        self.assertIn("not started as a service", self.tg.sent[-1])
         self.assertTrue((live / "Makefile").is_file())
 
     def test_regular_users_never_see_or_change_the_bot(self):

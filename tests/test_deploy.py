@@ -123,13 +123,14 @@ class DeployTests(unittest.TestCase):
         self.assertNotIn(("daemon-reload",), self.deployer.calls)
         self.assertIn("already registered and enabled", message)
 
-    def test_redeploy_restarts_service_and_reports_systemd_state(self):
+    def test_redeploy_restarts_service_and_reports_its_state(self):
         self.makefile()
         with mock.patch.object(self.deployer, "_remove_reboot_entry", return_value=False), \
              mock.patch("bot.deploy.time.monotonic", side_effect=[0, 2, 2]):
             result = self.deployer.redeploy("app", self.repo)
         self.assertTrue(result.ok, result.message)
         self.assertIn(("restart", self.deployer.service_name("app")), self.deployer.calls)
+        self.assertEqual(result.message, f"App service {self.deployer.service_name('app')} is enabled and running (pid 123).")
         self.assertEqual(self.deployer.status("app", self.repo), "running (pid 123)")
         self.assertEqual(self.deployer.running_apps(), [("app", 123)])
 

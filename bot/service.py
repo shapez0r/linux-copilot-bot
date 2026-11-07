@@ -160,9 +160,9 @@ HELP = f"""Use the buttons below to create and manage apps. Every action starts 
 /repo [public|private] <name|owner/name> - select a repository; a missing one is created from the eurofish reference app
 /repo - show the active repository
 /fix [model=<provider/model>] [tempchat|notempchat] [browser|nobrowser] app="<name|owner/name>" prompt="<request>" - fix an app with the same choices as Fix an app; linux-copilot-bot changes this bot and restarts it
-/list - list every local app and this bot with systemd status and tunnel details
+/list - list every local app and this bot with service status and tunnel details
 /app start|stop <name> - start or stop an app service
-/register [all|<name>] - register and enable systemd services for existing local apps
+/register [all|<name>] - register and enable app services for existing local apps
 /cloudflare <subdomain> <port> - route <subdomain>.kurwalab.fyi to http://127.0.0.1:<port>
 /cloudflare list - list tunnel routes
 /cloudflare delete <subdomain> - delete a tunnel route by name
@@ -1377,7 +1377,7 @@ class Bot:
             self.say(chat_id, "You can only start or stop apps you created.")
             return
 
-        # Regular users see the app name and URL instead of systemd service details.
+        # Regular users see the app name and URL instead of service details.
         def control():
             if action == "start":
                 result = self.deployer.start(name, folder)
@@ -1391,8 +1391,8 @@ class Bot:
             else:
                 stopped = self.deployer.stop(name, folder)
                 if admin:
-                    message = (f"Systemd service {self.deployer.service_name(name)} is stopped."
-                               if stopped else f"Systemd service {self.deployer.service_name(name)} was already "
+                    message = (f"App service {self.deployer.service_name(name)} is stopped."
+                               if stopped else f"App service {self.deployer.service_name(name)} was already "
                                                "stopped or is not registered.")
                 else:
                     message = f"{name} is stopped." if stopped else f"{name} was already stopped."
@@ -1417,7 +1417,7 @@ class Bot:
             if not folders:
                 self.say(chat_id, "No matching apps are available.")
                 return
-            lines = ["Systemd app service registration:"]
+            lines = ["App service registration:"]
             changed = False
             for folder in folders:
                 try:
@@ -1438,7 +1438,7 @@ class Bot:
             self.say(chat_id, "Usage: /list")
             return
         # Build the list off the polling thread so Telegram confirms the update before the slow
-        # systemd and Cloudflare lookups; an unconfirmed update can be delivered again.
+        # service and Cloudflare lookups; an unconfirmed update can be delivered again.
         worker = threading.Thread(target=self._send_app_list, args=(chat_id, user_id),
                                   name="list", daemon=True)
         self._list_worker = worker
@@ -2034,7 +2034,7 @@ class Bot:
                                   + self._copilot_output(result))
                 return
             sha, pushed_branch = pushed
-            progress.update(f"{full}: registering and restarting its systemd service on port {port}..." if admin
+            progress.update(f"{full}: registering and starting the app on port {port}..." if admin
                             else f"{full}: starting the app...")
             deploy = self.deployer.redeploy(name, dest)
             if not deploy.ok:
@@ -2186,7 +2186,7 @@ class Bot:
             return
         sha, pushed_branch = pushed
         result["numstat"] = self._numstat(dest)
-        progress.update(f"{full}: restarting its systemd service..." if admin else f"{full}: restarting the app...")
+        progress.update(f"{full}: restarting the app...")
         deploy = self.deployer.redeploy(name, dest)
         progress.flush()
         self.say(chat_id, self._report(full, sha, pushed_branch, result, deploy,
@@ -2238,7 +2238,7 @@ class Bot:
         lines.append(f"Local checkout: {live} updated.")
         others = len(self._running_sessions()) - 1
         if not restart:
-            lines.append("Restart: the bot is not running as its systemd service; restart it to apply the changes.")
+            lines.append("Restart: the bot was not started as a service; restart it to apply the changes.")
         elif others > 0:
             lines.append(f"Restart: {BOT_SERVICE} restarts to apply the changes once the {others} other running "
                          "session(s) finish; new sessions wait for the restart.")
