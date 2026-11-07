@@ -1126,8 +1126,7 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("Changes: 1 file \u00b7 \U0001f7e2 +2 \U0001f534 \u22120", report)
         self.assertIn("\U0001f4c4 Makefile  +2 \u22120", report)
         self.assertNotIn("+++", report)
-        self.assertNotIn("Added it.", report)
-        self.assertNotIn("Copilot:", report)
+        self.assertTrue(report.endswith("\n\nCopilot output:\nAdded it."))
 
     def test_fix_selects_the_repository_and_runs(self):
         self.say("/fix app=app prompt=tidy the readme")
@@ -1234,6 +1233,7 @@ class ServiceTests(unittest.TestCase):
         self.say("/fix app=app prompt=nothing")
         self.assertEqual(self.deployer.calls, [])
         self.assertIn("no changes", self.tg.sent[-1])
+        self.assertTrue(self.tg.sent[-1].endswith("\n\nCopilot output:\nAdded it."))
 
     def test_failed_redeploy_is_reported_after_the_push(self):
         self.deployer.ok = False
@@ -1416,6 +1416,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.deployer.calls, [])
         self.assertEqual(self.deployer.bot_restarts, 1)
         self.assertIn("copilot-telegram-bot.service is restarting", self.tg.sent[-2])
+        self.assertTrue(self.tg.sent[-2].endswith("\n\nCopilot output:\nAdded it."))
         self.assertEqual(self.gh.created, [])
         self.assertEqual(self.state.app_owner("me/linux-copilot-bot"), "")
         self.assertEqual(self.state.repo, "me/linux-copilot-bot")

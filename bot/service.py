@@ -2030,9 +2030,8 @@ class Bot:
             pushed = self.git.commit_and_push(dest, request, result.get("chat_response") or "")
             if pushed is None:
                 progress.flush()
-                output = (result.get("chat_response") or "(no final text returned)").strip()
-                self.say(chat_id, f"Copilot returned no changes to commit for {full}; nothing was deployed.\n\n"
-                                  f"Copilot output:\n{output}")
+                self.say(chat_id, f"Copilot returned no changes to commit for {full}; nothing was deployed."
+                                  + self._copilot_output(result))
                 return
             sha, pushed_branch = pushed
             progress.update(f"{full}: registering and restarting its systemd service on port {port}..." if admin
@@ -2182,7 +2181,8 @@ class Bot:
         pushed = self.git.commit_and_push(dest, request, result.get("chat_response") or "")
         if pushed is None:
             progress.flush()
-            self.say(chat_id, f"Copilot returned no changes to commit for {full}; nothing was deployed.")
+            self.say(chat_id, f"Copilot returned no changes to commit for {full}; nothing was deployed."
+                              + self._copilot_output(result))
             return
         sha, pushed_branch = pushed
         result["numstat"] = self._numstat(dest)
@@ -2223,7 +2223,8 @@ class Bot:
                 result["numstat"] = self._numstat(dest)
         if pushed is None:
             progress.flush()
-            self.say(chat_id, f"Copilot returned no changes to commit for {full}; nothing was deployed.")
+            self.say(chat_id, f"Copilot returned no changes to commit for {full}; nothing was deployed."
+                              + self._copilot_output(result))
             return
         sha, pushed_branch = pushed
         progress.update(f"{full}: updating {live}...")
@@ -2243,7 +2244,7 @@ class Bot:
                          "session(s) finish; new sessions wait for the restart.")
         else:
             lines.append(f"Restart: {BOT_SERVICE} is restarting to apply the changes; the bot is back shortly.")
-        self.say(chat_id, "\n".join(lines))
+        self.say(chat_id, "\n".join(lines) + self._copilot_output(result))
         if restart:
             self._schedule_bot_restart(chat_id)
 
@@ -2281,6 +2282,12 @@ class Bot:
         return f"Changes: {diff_lines[-1].strip()}" if diff_lines else ""
 
     @staticmethod
+    def _copilot_output(result: dict) -> str:
+        """Copilot's final answer as the closing section of a result message."""
+        output = (result.get("chat_response") or "(no final text returned)").strip()
+        return f"\n\nCopilot output:\n{output}"
+
+    @staticmethod
     def _report(full: str, sha: str, branch: str, result: dict, deploy, url: str = "") -> str:
         """Summarize a fix; a URL selects the regular-user form without service details."""
         mark = "\u2705" if deploy.ok else "\u26a0\ufe0f"
@@ -2294,7 +2301,7 @@ class Bot:
             lines.append(f"App: {url}")
         else:
             lines.append("Pushed, but the redeploy failed. Ask an admin to check the app.")
-        return "\n".join(lines)
+        return "\n".join(lines) + Bot._copilot_output(result)
 
     @staticmethod
     def _new_app_report(full: str, sha: str, branch: str, result: dict, deploy_message: str,
@@ -2313,6 +2320,4 @@ class Bot:
             lines.append(f"App: {url}")
         if error:
             lines.append(error)
-        output = (result.get("chat_response") or "(no final text returned)").strip()
-        lines.extend(["", "Copilot output:", output])
-        return "\n".join(lines)
+        return "\n".join(lines) + Bot._copilot_output(result)
